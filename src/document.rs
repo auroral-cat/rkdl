@@ -102,7 +102,12 @@ impl Document {
         format!("<Document with {} nodes>", self.__len__(py))
     }
 
-    fn fmt(&self, py: Python<'_>, formatter: &Formatter) {
-        self.with_state(py, |s| formatter.apply(&mut s.kdl));
+    // autoformat only rewrites format strings, never structure, so the IdTree stays valid.
+    #[pyo3(signature = (formatter=None))]
+    fn fmt(&self, py: Python<'_>, formatter: Option<&Formatter>) {
+        self.with_state(py, |s| match formatter {
+            Some(f) => f.apply(&mut s.kdl),
+            None => Formatter::default().apply(&mut s.kdl),
+        });
     }
 }

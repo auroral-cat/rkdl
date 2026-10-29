@@ -28,9 +28,11 @@ impl Parser {
     }
 
     fn parse(&self, py: Python<'_>, text: &str) -> PyResult<Document> {
-        let kdl = text.parse::<KdlDocument>().map_err(|e| parse_error(py, &e))?;
-        // TODO(05): run doc.fmt(formatter) when self.formatter is set.
-        let _ = &self.formatter;
+        let mut kdl = text.parse::<KdlDocument>().map_err(|e| parse_error(py, &e))?;
+        // Formatting before the Document exists is the same as doc.fmt() but needs no lock.
+        if let Some(formatter) = &self.formatter {
+            formatter.get().apply(&mut kdl);
+        }
         Ok(Document::new(kdl, self.types.clone()))
     }
 }
