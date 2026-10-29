@@ -16,7 +16,7 @@ mod _rkdl {
     #[pymodule_export]
     use crate::parser::{Parser, parse};
     #[pymodule_export]
-    use crate::values::Type;
+    use crate::values::{_debug_from_python, _debug_to_python, Type};
 
     #[pymodule_init]
     fn init(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {

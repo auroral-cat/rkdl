@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use kdl::KdlDocument;
 use pyo3::prelude::*;
@@ -18,13 +18,12 @@ pub struct Parser {
 impl Parser {
     #[new]
     #[pyo3(signature = (types=None, formatter=None))]
-    fn new(types: Option<Vec<Py<Type>>>, formatter: Option<Py<Formatter>>) -> Self {
-        // TODO(03): build the registry with TypeRegistry::with_user_types.
-        let _ = types;
-        Parser {
-            types: Arc::new(TypeRegistry::builtin()),
-            formatter,
-        }
+    fn new(py: Python<'_>, types: Option<Vec<Py<Type>>>, formatter: Option<Py<Formatter>>) -> PyResult<Self> {
+        let types = match types {
+            Some(types) => Arc::new(TypeRegistry::with_user_types(py, types)?),
+            None => builtin_types(),
+        };
+        Ok(Parser { types, formatter })
     }
 
     fn parse(&self, py: Python<'_>, text: &str) -> PyResult<Document> {
@@ -35,9 +34,18 @@ impl Parser {
     }
 }
 
+// Documents parsed without user types all share one registry.
+fn builtin_types() -> Arc<TypeRegistry> {
+    static BUILTIN: OnceLock<Arc<TypeRegistry>> = OnceLock::new();
+    BUILTIN.get_or_init(|| Arc::new(TypeRegistry::builtin())).clone()
+}
+
 impl Default for Parser {
     fn default() -> Self {
-        Parser::new(None, None)
+        Parser {
+            types: builtin_types(),
+            formatter: None,
+        }
     }
 }
 
