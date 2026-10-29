@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::args::Args;
 use crate::children::{self, Children, Owner};
 use crate::document::Document;
-use crate::entry::Entries;
+use crate::entry::{Entries, new_entry};
 use crate::handles::{self, Fail, Home, stale};
 use crate::parser::builtin_types;
 use crate::props::Props;
@@ -54,14 +54,7 @@ pub(crate) fn detached<'py>(py: Python<'py>, node: KdlNode, types: Arc<TypeRegis
 
 fn entry(value: &Bound<'_, PyAny>, key: Option<String>, types: &TypeRegistry) -> PyResult<KdlEntry> {
     let (value, ty) = values::from_python(value, None, types)?;
-    let mut entry = match key {
-        Some(key) => KdlEntry::new_prop(key, value),
-        None => KdlEntry::new(value),
-    };
-    if let Some(ty) = ty {
-        entry.set_ty(ty);
-    }
-    Ok(entry)
+    Ok(new_entry(key, value, ty))
 }
 
 #[pymethods]
@@ -77,9 +70,9 @@ impl Node {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<Node>> {
         let types = builtin_types();
-        let mut node = KdlNode::new(name);
+        let mut node = KdlNode::new(values::identifier(name));
         if let Some(ty) = r#type {
-            node.set_ty(ty);
+            node.set_ty(values::identifier(ty));
         }
         for value in args.iter() {
             node.entries_mut().push(entry(&value, None, &types)?);
@@ -103,7 +96,7 @@ impl Node {
     // set_name replaces the whole identifier, so the old spelling doesn't keep printing.
     #[setter]
     fn set_name(&self, py: Python<'_>, name: String) -> PyResult<()> {
-        self.with_node(py, |n| n.set_name(name))
+        self.with_node(py, |n| n.set_name(values::identifier(name)))
     }
 
     #[getter]
@@ -113,7 +106,7 @@ impl Node {
 
     #[setter]
     fn set_type(&self, py: Python<'_>, ty: Option<String>) -> PyResult<()> {
-        self.with_node(py, |n| *n.ty_mut() = ty.map(KdlIdentifier::from))
+        self.with_node(py, |n| *n.ty_mut() = ty.map(values::identifier))
     }
 
     #[getter]
@@ -181,6 +174,15 @@ impl Node {
 
     fn get_all<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, Node>>> {
         children::lookup(&Owner::Node(slf.clone().unbind()), key, false)
+    }
+
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.with_node(py, |n| {
+            let text = n.to_string();
+            // The leading text is the indentation and comments above the node, which belong to its surroundings.
+            let leading = n.format().map_or("", |f| f.leading.as_str());
+            text.strip_prefix(leading).unwrap_or(&text).trim().to_owned()
+        })
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {

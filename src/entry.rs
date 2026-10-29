@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
+use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlNode, KdlValue};
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple, PyWeakrefReference};
@@ -21,10 +21,19 @@ fn removed() -> PyErr {
 /// of the format holds the entry's whitespace and any `/-` comment in front of it.
 pub(crate) fn store(entry: &mut KdlEntry, value: KdlValue, ty: Option<String>) {
     let repr = values::canonical_repr(&value);
+    let differs = repr != value.to_string();
     entry.set_value(value);
     set_ty(entry, ty);
-    if let Some(f) = entry.format_mut() {
-        f.value_repr = repr;
+    match entry.format_mut() {
+        Some(f) => f.value_repr = repr,
+        // An entry without a format prints its value through kdl-rs, which can print a string it can't parse back
+        // (see values::canonical_repr). A format carries the fixed text; the leading space is what kdl-rs would add.
+        None if differs => entry.set_format(KdlEntryFormat {
+            value_repr: repr,
+            leading: " ".into(),
+            ..Default::default()
+        }),
+        None => {}
     }
 }
 
@@ -32,7 +41,7 @@ fn set_ty(entry: &mut KdlEntry, ty: Option<String>) {
     match ty {
         // The same annotation keeps its spelling.
         Some(ty) if entry.ty().is_some_and(|old| old.value() == ty) => {}
-        Some(ty) => entry.set_ty(ty),
+        Some(ty) => entry.set_ty(values::identifier(ty)),
         None if entry.ty().is_some() => *entry = without_ty(entry),
         None => {}
     }
@@ -60,12 +69,10 @@ fn without_ty(entry: &KdlEntry) -> KdlEntry {
 
 pub(crate) fn new_entry(key: Option<String>, value: KdlValue, ty: Option<String>) -> KdlEntry {
     let mut entry = match key {
-        Some(key) => KdlEntry::new_prop(key, value),
-        None => KdlEntry::new(value),
+        Some(key) => KdlEntry::new_prop(values::identifier(key), KdlValue::Null),
+        None => KdlEntry::new(KdlValue::Null),
     };
-    if let Some(ty) = ty {
-        entry.set_ty(ty);
-    }
+    store(&mut entry, value, ty);
     entry
 }
 

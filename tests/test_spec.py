@@ -21,9 +21,7 @@ ROUND_TRIP_FAILS = {
     "space_after_node.kdl": "kdl-rs drops everything after a closing } up to the newline, newline included",
 }
 
-CANONICAL_FAILS = {
-    "prop_ambiguous_number.kdl": "kdl-rs prints the strings +.7 and -.7 bare, which don't parse back",
-}
+CANONICAL_FAILS = {}
 
 INVALID_ACCEPTED = {
     "hex.kdl": "valid KDL (fits i128) with no expected file in kdl-rs's copy of the suite",

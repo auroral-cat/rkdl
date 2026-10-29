@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use kdl::{KdlEntry, KdlValue};
+use kdl::{KdlEntry, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -296,7 +296,55 @@ pub fn from_python(
 
 /// Canonical KDL text for a value, written into KdlEntryFormat::value_repr after every value write.
 pub fn canonical_repr(value: &KdlValue) -> String {
-    value.to_string()
+    let text = value.to_string();
+    // Workaround for a kdl-rs 6.7.1 bug: it prints strings like "+.7" and "-.7" bare, and its own parser rejects
+    // that. Quote any bare string that doesn't read back as itself.
+    if let KdlValue::String(s) = value
+        && !text.starts_with('"')
+        && !parses_back_as(&text, s)
+    {
+        return quoted(s);
+    }
+    text
+}
+
+/// An identifier (node name, property key or type annotation) that prints as text which parses back. kdl-rs prints
+/// identifiers the way it prints string values, so it has the same bare `+.7` problem.
+pub fn identifier(name: impl Into<String>) -> KdlIdentifier {
+    let name = name.into();
+    let value = KdlValue::String(name.clone());
+    let repr = canonical_repr(&value);
+    let mut ident = KdlIdentifier::from(name);
+    if repr != value.to_string() {
+        ident.set_repr(repr);
+    }
+    ident
+}
+
+fn parses_back_as(text: &str, s: &str) -> bool {
+    KdlEntry::parse(text).is_ok_and(|e| e.name().is_none() && e.value().as_string() == Some(s))
+}
+
+/// The quoted form, escaped the way kdl-rs's write_string escapes.
+fn quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn plain_to_python(py: Python<'_>, value: &KdlValue) -> PyResult<Py<PyAny>> {
