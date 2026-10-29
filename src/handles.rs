@@ -8,14 +8,15 @@
 //! Lock order: document locks, then the cache, then a `Home`. Nothing takes a document lock while holding the cache.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError, Weak};
 
-use pyo3::PyClass;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
 use pyo3::type_object::PyTypeCheck;
 use pyo3::types::PyWeakrefReference;
+use pyo3::{PyClass, PyTraverseError};
 
 use crate::document::{DocState, Document};
 
@@ -39,6 +40,23 @@ impl Home {
     /// a fresh `DocRef`, so a handle that moved away and back still counts as moved.
     pub(crate) fn moved_from(&self, doc: &DocRef) -> bool {
         !Arc::ptr_eq(doc, &self.doc())
+    }
+
+    /// Tells the cycle collector about the document, for the handle that owns this home. A move gives every handle
+    /// it repoints the same `DocRef`, and reporting that one reference from each of them would count more references
+    /// than exist, so only a home that holds its `DocRef` alone reports it. A cycle through handles that moved
+    /// together, while more than one of them is alive, stays uncollected.
+    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        // A move on another thread may be repointing this home right now, and traversal mustn't wait for it.
+        let doc = match self.0.try_lock() {
+            Ok(doc) => doc,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return Ok(()),
+        };
+        if Arc::strong_count(&doc) == 1 {
+            visit.call(&**doc)?;
+        }
+        Ok(())
     }
 }
 
@@ -70,7 +88,7 @@ static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
 });
 
 /// The live handle for `key`, if there is one.
-pub(crate) fn get<'py, T: PyTypeCheck>(py: Python<'py>, key: u64) -> Option<Bound<'py, T>> {
+pub(crate) fn get<T: PyTypeCheck>(py: Python<'_>, key: u64) -> Option<Bound<'_, T>> {
     let found = {
         let cache = CACHE.lock_py_attached(py).unwrap_or_else(PoisonError::into_inner);
         cache.slots.get(&key).and_then(|slot| slot.object.bind(py).upgrade())
@@ -194,9 +212,8 @@ pub(crate) fn on_home<R>(home: &Home, mut op: impl FnMut(&DocRef) -> Result<R, F
         match op(&doc) {
             Ok(result) => return Ok(result),
             Err(Fail::Err(err)) => return Err(err),
-            Err(Fail::Changed) => {}
             Err(Fail::Missing(err)) if !home.moved_from(&doc) => return Err(err),
-            Err(Fail::Missing(_)) => {}
+            Err(Fail::Changed | Fail::Missing(_)) => {}
         }
     }
 }

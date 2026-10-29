@@ -4,7 +4,7 @@ use pyo3::types::PyString;
 
 use crate::values;
 
-/// Autoformat settings, mirroring kdl-rs's FormatConfig.
+/// Autoformat settings, mirroring kdl-rs's `FormatConfig`.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Formatter {
     #[pyo3(get)]
@@ -42,13 +42,12 @@ impl Formatter {
     }
 }
 
-impl Default for Formatter {
-    fn default() -> Self {
-        Formatter::new("    ".to_string(), 0, false, false)
-    }
-}
-
 impl Formatter {
+    /// `Formatter()`, made through Python so the defaults are written only in the constructor's signature.
+    pub(crate) fn default(py: Python<'_>) -> PyResult<Bound<'_, Formatter>> {
+        Ok(py.get_type::<Formatter>().call0()?.cast_into()?)
+    }
+
     pub(crate) fn apply(&self, doc: &mut KdlDocument) {
         let mut config = FormatConfig::builder()
             .indent(&self.indent)
@@ -64,7 +63,7 @@ impl Formatter {
 }
 
 /// autoformat clears the text rkdl wrote for names, keys, types and string values, and kdl-rs's own spelling of
-/// some strings doesn't parse back (see values::fixed_repr). Puts the fixed spelling back where it's needed.
+/// some strings doesn't parse back (see `values::fixed_repr`). Puts the fixed spelling back where it's needed.
 fn requote(doc: &mut KdlDocument) {
     for node in doc.nodes_mut() {
         values::fix_identifier(node.name_mut());

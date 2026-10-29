@@ -57,9 +57,9 @@ pub(crate) fn parse_error(py: Python<'_>, err: &KdlError) -> PyErr {
     let value = exc.value(py);
     let set = value
         .setattr("line", first.map(|f| f.0))
-        .and_then(|_| value.setattr("column", first.map(|f| f.1)))
-        .and_then(|_| value.setattr("offset", first.map(|f| f.2)))
-        .and_then(|_| value.setattr("diagnostics", diagnostics));
+        .and_then(|()| value.setattr("column", first.map(|f| f.1)))
+        .and_then(|()| value.setattr("offset", first.map(|f| f.2)))
+        .and_then(|()| value.setattr("diagnostics", diagnostics));
     match set {
         Ok(()) => exc,
         Err(e) => e,

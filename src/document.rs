@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use kdl::KdlDocument;
+use pyo3::PyTraverseError;
 use pyo3::exceptions::PyTypeError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
 use crate::children::{self, Children, Owner};
@@ -27,6 +29,7 @@ impl DocState {
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Document {
     state: Mutex<DocState>,
+    /// Not shared with other documents unless it has no user types. See `TypeRegistry::traverse`.
     pub(crate) types: Arc<TypeRegistry>,
     /// A detached node's private one-node document. Never handed to Python as a Document.
     pub(crate) home: bool,
@@ -34,12 +37,21 @@ pub struct Document {
 
 impl Document {
     pub(crate) fn new(kdl: KdlDocument, types: Arc<TypeRegistry>) -> Self {
-        Document::with_ids(IdTree::from_document(&kdl), kdl, types, false)
+        Document::build(kdl, types, false)
     }
 
-    pub(crate) fn with_ids(ids: IdTree, kdl: KdlDocument, types: Arc<TypeRegistry>, home: bool) -> Self {
+    /// A private home for a detached node, empty until `fill` puts the node in. It starts empty so the caller can
+    /// create its Python object before locking anything.
+    pub(crate) fn empty_home(types: Arc<TypeRegistry>) -> Self {
+        Document::build(KdlDocument::new(), types, true)
+    }
+
+    fn build(kdl: KdlDocument, types: Arc<TypeRegistry>, home: bool) -> Self {
         Document {
-            state: Mutex::new(DocState { kdl, ids }),
+            state: Mutex::new(DocState {
+                ids: IdTree::from_document(&kdl),
+                kdl,
+            }),
             types,
             home,
         }
@@ -50,7 +62,7 @@ impl Document {
         self.state.lock().expect("document state poisoned by an earlier panic")
     }
 
-    /// The only way to touch DocState. The closure can't hold a Python token, so it can't call into Python while
+    /// The only way to touch `DocState`. The closure can't hold a Python token, so it can't call into Python while
     /// the lock is held.
     pub(crate) fn with_state<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&mut DocState) -> R + Send) -> R {
         py.detach(|| {
@@ -67,11 +79,6 @@ impl Document {
         let mut state = self.lock();
         *state = DocState { kdl, ids };
         state.check();
-    }
-
-    pub(crate) fn empty_home(types: Arc<TypeRegistry>) -> Self {
-        let kdl = KdlDocument::new();
-        Document::with_ids(IdTree::from_document(&kdl), kdl, types, true)
     }
 
     /// The one handle for `id`. Every way of getting a Node goes through here. See `handles::publish`.
@@ -96,7 +103,7 @@ pub(crate) fn lock_both<R: Send>(
             state.check();
             return result;
         }
-        let (mut sa, mut sb) = if (a as *const Document) < (b as *const Document) {
+        let (mut sa, mut sb) = if std::ptr::from_ref(a) < std::ptr::from_ref(b) {
             let sa = a.lock();
             (sa, b.lock())
         } else {
@@ -126,11 +133,14 @@ impl Document {
 
     // autoformat only rewrites format strings, never structure, so the IdTree stays valid.
     #[pyo3(signature = (formatter=None))]
-    fn fmt(&self, py: Python<'_>, formatter: Option<&Formatter>) {
-        self.with_state(py, |s| match formatter {
-            Some(f) => f.apply(&mut s.kdl),
-            None => Formatter::default().apply(&mut s.kdl),
-        });
+    fn fmt(&self, py: Python<'_>, formatter: Option<Bound<'_, Formatter>>) -> PyResult<()> {
+        let formatter = match formatter {
+            Some(f) => f,
+            None => Formatter::default(py)?,
+        };
+        let formatter = formatter.get();
+        self.with_state(py, |s| formatter.apply(&mut s.kdl));
+        Ok(())
     }
 
     #[getter]
@@ -139,6 +149,7 @@ impl Document {
     }
 
     #[setter]
+    #[expect(clippy::unused_self, reason = "PyO3 setters take self")]
     fn set_children(&self, _value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
         Err(PyTypeError::new_err(
             "can't assign to Document.children; edit it with insert, append, pop, remove or del",
@@ -160,5 +171,11 @@ impl Document {
 
     fn get_all<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, Node>>> {
         children::lookup(&Owner::Doc(slf.clone().unbind()), key, false)
+    }
+
+    // The registry's Types are the document's only strong references; it holds its handles weakly. There's no
+    // `__clear__`: the registry never changes, and every cycle through it passes a Type, which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        TypeRegistry::traverse(&self.types, &visit)
     }
 }
