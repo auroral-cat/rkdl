@@ -1,0 +1,14 @@
+# the usual
+/target/
+__pycache__/
+*.so
+*.pyd
+.venv/
+/dist/
+.pytest_cache/
+.mypy_cache/
+
+# llm yap
+/refs/
+plan.md
+/notes/
