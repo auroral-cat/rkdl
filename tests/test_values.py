@@ -139,7 +139,13 @@ def test_known_type_that_does_not_fit_raises(text):
     [
         ("hi", ("hi", None)),
         ("a b", ('"a b"', None)),
-        (5, ("5", None)),
+        # kdl-rs would print these bare, and they wouldn't parse back.
+        ("+.7", ('"+.7"', None)),
+        ("-.7", ('"-.7"', None)),
+        ("+.5e3", ('"+.5e3"', None)),
+        ('+."\\', ('"+.\\"\\\\"', None)),
+        ("+.x", ("+.x", None)),
+        (5,("5", None)),
         (1.5, ("1.5", None)),
         (1e20, ("1e20", None)),
         (True, ("#true", None)),

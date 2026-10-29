@@ -183,6 +183,15 @@ impl Node {
         children::lookup(&Owner::Node(slf.clone().unbind()), key, false)
     }
 
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.with_node(py, |n| {
+            let text = n.to_string();
+            // The leading text is the indentation and comments above the node, which belong to its surroundings.
+            let leading = n.format().map_or("", |f| f.leading.as_str());
+            text.strip_prefix(leading).unwrap_or(&text).trim().to_owned()
+        })
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let name = self.with_node(py, |n| KdlIdentifier::from(n.name().value()).to_string())?;
         Ok(format!("<Node {name}>"))
