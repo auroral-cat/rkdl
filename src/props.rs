@@ -1,4 +1,3 @@
-use kdl::KdlIdentifier;
 use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -7,18 +6,11 @@ use crate::entry::{Entry, Item, Snapshot, chosen, edit, new_entry, read, store};
 use crate::node::Node;
 use crate::values;
 
-/// The entry `props[key]` reads and writes: the last one with that key, which is KdlNode::entry's rule.
+/// The entry `props[key]` reads, writes and deletes: the last one with that key, which is KdlNode::entry's rule.
+/// Deleting doesn't use KdlNode::remove, which takes the first match and compares key spellings, so it never finds a
+/// parsed key (the parser records every key's spelling).
 fn last<'a>(items: &'a [Item], key: &str) -> Option<&'a Item> {
     items.iter().rev().find(|i| i.key() == Some(key))
-}
-
-/// The entry `del props[key]` removes. This mirrors KdlNode::remove on purpose, bugs included: it takes the *first*
-/// match, and compares whole identifiers, spelling too, against an unspelled `KdlIdentifier::from(key)`. So it can
-/// remove a different entry from the one `props[key]` reads, and it never finds a key as parsed, since the parser
-/// records every key's spelling.
-fn removable(items: &[Item], key: &str) -> Option<Item> {
-    let key = KdlIdentifier::from(key);
-    items.iter().find(|i| i.name.as_ref() == Some(&key)).cloned()
 }
 
 /// Each key once, in order of first appearance.
@@ -86,7 +78,7 @@ impl Props {
                 let Some(value) = get(py, snapshot, key)? else {
                     return Ok(None);
                 };
-                let item = removable(&snapshot.items, key).ok_or_else(|| key_error(key))?;
+                let item = last(&snapshot.items, key).ok_or_else(|| key_error(key))?;
                 Ok(Some((item.id, value)))
             },
             |mut target, planned| {
@@ -128,11 +120,7 @@ impl Props {
         edit(
             py,
             self.node.get(),
-            |snapshot| {
-                removable(&snapshot.items, &k)
-                    .map(|i| i.id)
-                    .ok_or_else(|| key_error(&k))
-            },
+            |snapshot| last(&snapshot.items, &k).map(|i| i.id).ok_or_else(|| key_error(&k)),
             |mut target, id| target.remove(id),
         )
     }

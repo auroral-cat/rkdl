@@ -265,29 +265,25 @@ def test_duplicate_keys_read_and_write_the_last():
     assert n.props.entry("a") is n.entries[1]
 
 
-def test_kdl_rs_remove_takes_the_first_duplicate():
+def test_del_removes_the_duplicate_props_reads():
     n = rkdl.Node("n", props={"a": 1}, a=2)
     assert n.props["a"] == 2
     del n.props["a"]
-    # KdlNode::remove takes the first match, not the one props["a"] reads.
-    assert [(e.name, e.value) for e in n.entries] == [("a", 2)]
+    assert [(e.name, e.value) for e in n.entries] == [("a", 1)]
+    assert n.props["a"] == 1
 
 
-def test_kdl_rs_remove_does_not_find_a_quoted_key():
-    _, n = node('n "quoted key"=1\n')
-    assert n.props["quoted key"] == 1
-    with pytest.raises(KeyError):
-        del n.props["quoted key"]
+def test_del_finds_a_quoted_key():
+    d, n = node('n 1 "quoted key"=1\n')
+    del n.props["quoted key"]
+    assert str(d) == "n 1\n"
 
 
-def test_kdl_rs_remove_does_not_find_any_parsed_key():
-    # KdlNode::remove compares spellings too, and the parser records every key's spelling, so even a bare parsed
-    # key isn't found.
-    _, n = node("n port=1\n")
-    with pytest.raises(KeyError):
-        del n.props["port"]
-    with pytest.raises(KeyError):
-        n.props.pop("port")
+def test_del_finds_parsed_keys():
+    d, n = node("n port=1 x=2\n")
+    del n.props["port"]
+    assert n.props.pop("x") == 2
+    assert str(d) == "n\n"
 
 
 def test_del_finds_keys_added_through_the_api():
