@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kdl::{KdlDocument, KdlNode};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct NodeId(NonZeroU64);
+pub(crate) struct NodeId(NonZeroU64);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct EntryId(NonZeroU64);
+pub(crate) struct EntryId(NonZeroU64);
 
 // Ids come from one global counter, so they're unique across all documents.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -23,7 +23,7 @@ impl NodeId {
     }
 
     /// The id as a plain integer, for keying the handle cache.
-    pub fn key(self) -> u64 {
+    pub(crate) fn key(self) -> u64 {
         self.0.get()
     }
 }
@@ -34,7 +34,7 @@ impl EntryId {
     }
 
     /// The id as a plain integer. Node and entry ids share one counter, so keys never collide.
-    pub fn key(self) -> u64 {
+    pub(crate) fn key(self) -> u64 {
         self.0.get()
     }
 }
@@ -45,8 +45,8 @@ struct NodeSlot {
     entries: Vec<EntryId>,
 }
 
-/// A node's ids and everything under it, taken out of one IdTree to be put into another.
-pub struct Subtree {
+/// A node's ids and everything under it, taken out of one `IdTree` to be put into another.
+pub(crate) struct Subtree {
     root: NodeId,
     nodes: HashMap<NodeId, NodeSlot>,
     entries: HashMap<EntryId, NodeId>,
@@ -54,13 +54,13 @@ pub struct Subtree {
 
 #[cfg(test)]
 impl Subtree {
-    pub fn root(&self) -> NodeId {
+    pub(crate) fn root(&self) -> NodeId {
         self.root
     }
 }
 
-/// Mirrors the shape of a KdlDocument: same nodes, entries and children blocks, in the same order.
-pub struct IdTree {
+/// Mirrors the shape of a `KdlDocument`: same nodes, entries and children blocks, in the same order.
+pub(crate) struct IdTree {
     top: Vec<NodeId>,
     nodes: HashMap<NodeId, NodeSlot>,
     entries: HashMap<EntryId, NodeId>,
@@ -75,7 +75,7 @@ impl IdTree {
         }
     }
 
-    pub fn from_document(doc: &KdlDocument) -> Self {
+    pub(crate) fn from_document(doc: &KdlDocument) -> Self {
         let mut tree = IdTree::empty();
         let top = doc.nodes().iter().map(|n| tree.add_node(None, n)).collect();
         tree.top = top;
@@ -83,7 +83,7 @@ impl IdTree {
     }
 
     /// One top-level node: a detached node's home.
-    pub fn from_subtree(subtree: Subtree) -> Self {
+    pub(crate) fn from_subtree(subtree: Subtree) -> Self {
         let mut tree = IdTree::empty();
         tree.put_subtree(None, 0, subtree);
         tree
@@ -128,30 +128,30 @@ impl IdTree {
         }
     }
 
-    pub fn top(&self) -> &[NodeId] {
+    pub(crate) fn top(&self) -> &[NodeId] {
         &self.top
     }
 
-    pub fn contains(&self, node: NodeId) -> bool {
+    pub(crate) fn contains(&self, node: NodeId) -> bool {
         self.nodes.contains_key(&node)
     }
 
     /// None for a top-level node.
-    pub fn parent(&self, node: NodeId) -> Option<NodeId> {
+    pub(crate) fn parent(&self, node: NodeId) -> Option<NodeId> {
         self.slot(node).parent
     }
 
     /// None means the node has no children block.
-    pub fn children(&self, node: NodeId) -> Option<&[NodeId]> {
+    pub(crate) fn children(&self, node: NodeId) -> Option<&[NodeId]> {
         self.slot(node).children.as_deref()
     }
 
-    pub fn entries(&self, node: NodeId) -> &[EntryId] {
+    pub(crate) fn entries(&self, node: NodeId) -> &[EntryId] {
         &self.slot(node).entries
     }
 
     /// Indices from the top level down.
-    pub fn path(&self, node: NodeId) -> Option<Vec<usize>> {
+    pub(crate) fn path(&self, node: NodeId) -> Option<Vec<usize>> {
         let mut path = Vec::new();
         let mut current = node;
         loop {
@@ -175,7 +175,7 @@ impl IdTree {
         Some(path)
     }
 
-    pub fn entry_position(&self, entry: EntryId) -> Option<(NodeId, usize)> {
+    pub(crate) fn entry_position(&self, entry: EntryId) -> Option<(NodeId, usize)> {
         let &node = self.entries.get(&entry)?;
         let index = self
             .entries(node)
@@ -188,13 +188,13 @@ impl IdTree {
     /// Assigns fresh ids to `node` and its whole subtree. `parent: None` means top level. The handles insert through
     /// `put_subtree` instead, so only tests build trees this way.
     #[cfg(test)]
-    pub fn insert_node(&mut self, parent: Option<NodeId>, index: usize, node: &KdlNode) -> NodeId {
+    pub(crate) fn insert_node(&mut self, parent: Option<NodeId>, index: usize, node: &KdlNode) -> NodeId {
         let id = self.add_node(parent, node);
         self.siblings_mut(parent).insert(index, id);
         id
     }
 
-    pub fn take_subtree(&mut self, node: NodeId) -> Subtree {
+    pub(crate) fn take_subtree(&mut self, node: NodeId) -> Subtree {
         let parent = self.parent(node);
         let siblings = self.siblings_mut(parent);
         let index = siblings
@@ -224,7 +224,7 @@ impl IdTree {
         subtree
     }
 
-    pub fn put_subtree(&mut self, parent: Option<NodeId>, index: usize, subtree: Subtree) {
+    pub(crate) fn put_subtree(&mut self, parent: Option<NodeId>, index: usize, subtree: Subtree) {
         let root = subtree.root;
         self.siblings_mut(parent).insert(index, root);
         self.nodes.extend(subtree.nodes);
@@ -233,7 +233,7 @@ impl IdTree {
     }
 
     /// None -> Some(empty).
-    pub fn open_block(&mut self, node: NodeId) {
+    pub(crate) fn open_block(&mut self, node: NodeId) {
         let slot = self.slot_mut(node);
         assert!(slot.children.is_none(), "node already has a children block");
         slot.children = Some(Vec::new());
@@ -247,21 +247,21 @@ impl IdTree {
         removed
     }
 
-    pub fn insert_entry(&mut self, node: NodeId, index: usize) -> EntryId {
+    pub(crate) fn insert_entry(&mut self, node: NodeId, index: usize) -> EntryId {
         let id = EntryId::fresh();
         self.slot_mut(node).entries.insert(index, id);
         self.entries.insert(id, node);
         id
     }
 
-    pub fn remove_entry(&mut self, entry: EntryId) {
+    pub(crate) fn remove_entry(&mut self, entry: EntryId) {
         let (node, index) = self.entry_position(entry).expect("entry is not in this tree");
         self.slot_mut(node).entries.remove(index);
         self.entries.remove(&entry);
     }
 
     /// Panics with a description of the first difference. Called after every edit in debug builds.
-    pub fn check_shape(&self, doc: &KdlDocument) {
+    pub(crate) fn check_shape(&self, doc: &KdlDocument) {
         self.check_level(&self.top, doc, &mut Vec::new());
     }
 
@@ -300,7 +300,7 @@ impl IdTree {
     }
 }
 
-pub fn node_at<'a>(doc: &'a KdlDocument, path: &[usize]) -> &'a KdlNode {
+pub(crate) fn node_at<'a>(doc: &'a KdlDocument, path: &[usize]) -> &'a KdlNode {
     let (&first, rest) = path.split_first().expect("empty node path");
     let mut node = &doc.nodes()[first];
     for &i in rest {
@@ -312,7 +312,7 @@ pub fn node_at<'a>(doc: &'a KdlDocument, path: &[usize]) -> &'a KdlNode {
     node
 }
 
-pub fn node_at_mut<'a>(doc: &'a mut KdlDocument, path: &[usize]) -> &'a mut KdlNode {
+pub(crate) fn node_at_mut<'a>(doc: &'a mut KdlDocument, path: &[usize]) -> &'a mut KdlNode {
     let (&first, rest) = path.split_first().expect("empty node path");
     let mut node = &mut doc.nodes_mut()[first];
     for &i in rest {
@@ -473,6 +473,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "each id is named after its node in the KDL text"
+    )]
     fn open_and_close_block() {
         let mut doc = parse("a\nb {\n    c\n    d {\n        e\n    }\n}\n");
         let mut tree = IdTree::from_document(&doc);

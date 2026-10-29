@@ -485,3 +485,8 @@ def test_edits_leave_the_rest_byte_identical():
     out = str(d)
     assert out.startswith(BIG[: BIG.index("        // first")])
     assert out.endswith(BIG[BIG.index('        post "/x"') :])
+
+
+def test_repr_quotes_names_that_would_not_parse_back():
+    assert repr(rkdl.Node("+.7")) == '<Node "+.7">'
+    assert repr(rkdl.Node("a\x7f")) == '<Node "a\\u{7f}">'

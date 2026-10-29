@@ -1,24 +1,42 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString, PyType};
+use pyo3::{PyTraverseError, PyTypeInfo};
 
 use crate::errors::parse_error;
 
-/// One type annotation that converts values. Exposed to Python as rkdl.Type(name, cls, decode, encode).
-#[pyclass(module = "rkdl", frozen)]
-pub struct Type {
+/// One type annotation that converts values. Exposed to Python as `rkdl.Type(name, cls, decode, encode)`.
+///
+/// Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
+/// reference cycle.
+#[pyclass(module = "rkdl")]
+pub(crate) struct Type {
     #[pyo3(get)]
     name: String,
-    #[pyo3(get)]
+    /// None once the cycle collector has cleared this Type.
+    hooks: Option<Hooks>,
+}
+
+struct Hooks {
     cls: Py<PyType>,
-    #[pyo3(get)]
     decode: Py<PyAny>,
-    #[pyo3(get)]
     encode: Py<PyAny>,
+}
+
+impl Type {
+    /// One of the hooks. Only a finalizer running during cycle collection can see a cleared Type.
+    fn hook<'py, T: PyTypeInfo>(ty: &Bound<'py, Type>, pick: impl FnOnce(&Hooks) -> &Py<T>) -> PyResult<Bound<'py, T>> {
+        let py = ty.py();
+        match &ty.borrow().hooks {
+            Some(hooks) => Ok(pick(hooks).bind(py).clone()),
+            None => Err(PyRuntimeError::new_err("Type was cleared by the garbage collector")),
+        }
+    }
 }
 
 #[pymethods]
@@ -31,15 +49,41 @@ impl Type {
         }
         Ok(Type {
             name,
-            cls,
-            decode,
-            encode,
+            hooks: Some(Hooks { cls, decode, encode }),
         })
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let cls = self.cls.bind(py).qualname()?;
-        Ok(format!("Type({:?}, {cls})", self.name))
+    #[getter]
+    fn cls(slf: &Bound<'_, Self>) -> PyResult<Py<PyType>> {
+        Ok(Type::hook(slf, |h| &h.cls)?.unbind())
+    }
+
+    #[getter]
+    fn decode(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(Type::hook(slf, |h| &h.decode)?.unbind())
+    }
+
+    #[getter]
+    fn encode(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(Type::hook(slf, |h| &h.encode)?.unbind())
+    }
+
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let cls = Type::hook(slf, |h| &h.cls)?.qualname()?;
+        Ok(format!("Type({:?}, {cls})", slf.borrow().name))
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(hooks) = &self.hooks {
+            visit.call(&hooks.cls)?;
+            visit.call(&hooks.decode)?;
+            visit.call(&hooks.encode)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.hooks = None;
     }
 }
 
@@ -63,86 +107,24 @@ enum Builtin {
     PlainString,
 }
 
+const fn int(min: i128, max: i128) -> Builtin {
+    Builtin::Int { min, max }
+}
+
 const BUILTINS: &[(&str, Builtin)] = &[
-    (
-        "i8",
-        Builtin::Int {
-            min: i8::MIN as i128,
-            max: i8::MAX as i128,
-        },
-    ),
-    (
-        "i16",
-        Builtin::Int {
-            min: i16::MIN as i128,
-            max: i16::MAX as i128,
-        },
-    ),
-    (
-        "i32",
-        Builtin::Int {
-            min: i32::MIN as i128,
-            max: i32::MAX as i128,
-        },
-    ),
-    (
-        "i64",
-        Builtin::Int {
-            min: i64::MIN as i128,
-            max: i64::MAX as i128,
-        },
-    ),
-    (
-        "i128",
-        Builtin::Int {
-            min: i128::MIN,
-            max: i128::MAX,
-        },
-    ),
-    (
-        "isize",
-        Builtin::Int {
-            min: i64::MIN as i128,
-            max: i64::MAX as i128,
-        },
-    ),
-    (
-        "u8",
-        Builtin::Int {
-            min: 0,
-            max: u8::MAX as i128,
-        },
-    ),
-    (
-        "u16",
-        Builtin::Int {
-            min: 0,
-            max: u16::MAX as i128,
-        },
-    ),
-    (
-        "u32",
-        Builtin::Int {
-            min: 0,
-            max: u32::MAX as i128,
-        },
-    ),
-    (
-        "u64",
-        Builtin::Int {
-            min: 0,
-            max: u64::MAX as i128,
-        },
-    ),
+    ("i8", int(i8::MIN as i128, i8::MAX as i128)),
+    ("i16", int(i16::MIN as i128, i16::MAX as i128)),
+    ("i32", int(i32::MIN as i128, i32::MAX as i128)),
+    ("i64", int(i64::MIN as i128, i64::MAX as i128)),
+    ("i128", int(i128::MIN, i128::MAX)),
+    ("isize", int(i64::MIN as i128, i64::MAX as i128)),
+    ("u8", int(0, u8::MAX as i128)),
+    ("u16", int(0, u16::MAX as i128)),
+    ("u32", int(0, u32::MAX as i128)),
+    ("u64", int(0, u64::MAX as i128)),
     // kdl-rs stores integers as i128, so the top half of u128 can't be represented anyway.
-    ("u128", Builtin::Int { min: 0, max: i128::MAX }),
-    (
-        "usize",
-        Builtin::Int {
-            min: 0,
-            max: u64::MAX as i128,
-        },
-    ),
+    ("u128", int(0, i128::MAX)),
+    ("usize", int(0, u64::MAX as i128)),
     ("f32", Builtin::F32),
     ("f64", Builtin::F64),
     ("decimal64", Builtin::DecimalNumber),
@@ -188,60 +170,110 @@ const INFERRED: &[(&str, Builtin)] = &[
     ("decimal", Builtin::DecimalString),
 ];
 
-enum Converter {
+enum Converter<'a> {
     Builtin(Builtin),
-    User(Py<Type>),
+    User(&'a UserType),
+}
+
+struct UserType {
+    // Copied out of the Type so lookups don't have to borrow it.
+    name: String,
+    ty: Py<Type>,
 }
 
 /// Built-in reserved types plus any user Types. Immutable once built, shared by Arc.
-pub struct TypeRegistry {
-    by_name: HashMap<String, Converter>,
-    // In the order given, which is the order inference tries them.
-    user: Vec<Py<Type>>,
+///
+/// Each document gets its own registry (see `private_copy`), because the cycle collector has to be told about every
+/// reference to a Type by exactly the object that holds it. See `traverse`.
+pub(crate) struct TypeRegistry {
+    // In the order given, which is the order inference tries them. A later Type shadows an earlier one with the same
+    // name.
+    user: Vec<UserType>,
 }
 
 impl TypeRegistry {
-    pub fn builtin() -> Self {
-        TypeRegistry {
-            by_name: BUILTINS
-                .iter()
-                .map(|&(name, b)| (name.to_owned(), Converter::Builtin(b)))
-                .collect(),
-            user: Vec::new(),
-        }
+    pub(crate) const fn builtin() -> Self {
+        TypeRegistry { user: Vec::new() }
     }
 
-    pub fn with_user_types(py: Python<'_>, types: Vec<Py<Type>>) -> PyResult<Self> {
-        let mut registry = TypeRegistry::builtin();
-        for ty in types {
-            registry
-                .by_name
-                .insert(ty.get().name.clone(), Converter::User(ty.clone_ref(py)));
-            registry.user.push(ty);
-        }
-        Ok(registry)
+    pub(crate) fn with_user_types(py: Python<'_>, types: Vec<Py<Type>>) -> Self {
+        let user = types
+            .into_iter()
+            .map(|ty| UserType {
+                name: ty.bind(py).borrow().name.clone(),
+                ty,
+            })
+            .collect();
+        TypeRegistry { user }
     }
 
-    /// User types still registered under their name, in order. A later Type with the same name shadows an earlier one.
-    fn active_user_types(&self) -> impl Iterator<Item = &Py<Type>> {
+    /// The same Types for another document, through references of its own. A registry without user types holds no
+    /// references, so it's shared as is.
+    pub(crate) fn private_copy(this: &Arc<Self>, py: Python<'_>) -> Arc<Self> {
+        if this.user.is_empty() {
+            return Arc::clone(this);
+        }
+        let user = this
+            .user
+            .iter()
+            .map(|u| UserType {
+                name: u.name.clone(),
+                ty: u.ty.clone_ref(py),
+            })
+            .collect();
+        Arc::new(TypeRegistry { user })
+    }
+
+    /// Tells the cycle collector about the registry's Types, for the object that holds `this`. Only the sole holder
+    /// reports them: reporting a shared registry from each holder would count more references than exist, and the
+    /// collector would then free objects still in use. A shared registry's cycles just stay uncollected.
+    pub(crate) fn traverse(this: &Arc<Self>, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if Arc::strong_count(this) == 1 {
+            for user in &this.user {
+                visit.call(&user.ty)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn get(&self, name: &str) -> Option<Converter<'_>> {
+        if let Some(user) = self.user.iter().rev().find(|u| u.name == name) {
+            return Some(Converter::User(user));
+        }
+        BUILTINS
+            .iter()
+            .find(|&&(builtin, _)| builtin == name)
+            .map(|&(_, b)| Converter::Builtin(b))
+    }
+
+    /// User types not shadowed by a later one, in order.
+    fn active_user_types(&self) -> impl Iterator<Item = &UserType> {
         self.user
             .iter()
-            .filter(|ty| matches!(self.by_name.get(&ty.get().name), Some(Converter::User(current)) if current.is(*ty)))
+            .enumerate()
+            .filter(|&(i, u)| !self.user.iter().skip(i + 1).any(|later| later.name == u.name))
+            .map(|(_, u)| u)
     }
 }
 
 /// KDL value plus its entry's type annotation -> Python object. Raises if a known type's contents don't fit.
-pub fn to_python(py: Python<'_>, value: &KdlValue, ty: Option<&str>, types: &TypeRegistry) -> PyResult<Py<PyAny>> {
+pub(crate) fn to_python(
+    py: Python<'_>,
+    value: &KdlValue,
+    ty: Option<&str>,
+    types: &TypeRegistry,
+) -> PyResult<Py<PyAny>> {
     let Some(ty) = ty else {
         return plain_to_python(py, value);
     };
-    match types.by_name.get(ty) {
+    match types.get(ty) {
         None => plain_to_python(py, value),
         Some(Converter::User(user)) => {
             let plain = plain_to_python(py, value)?;
-            user.get().decode.call1(py, (plain,))
+            let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
+            Ok(decode.call1((plain,))?.unbind())
         }
-        Some(Converter::Builtin(b)) => decode_builtin(py, *b, value).map_err(|reason| {
+        Some(Converter::Builtin(b)) => decode_builtin(py, b, value).map_err(|reason| {
             PyValueError::new_err(format!("({ty}){} is not a valid {ty}: {reason}", canonical_repr(value)))
         }),
     }
@@ -249,18 +281,17 @@ pub fn to_python(py: Python<'_>, value: &KdlValue, ty: Option<&str>, types: &Typ
 
 /// Python object -> KDL value plus the annotation to write, applying the "keep the current annotation if the value
 /// fits it" rule from plan.md.
-pub fn from_python(
+pub(crate) fn from_python(
     value: &Bound<'_, PyAny>,
     current_ty: Option<&str>,
     types: &TypeRegistry,
 ) -> PyResult<(KdlValue, Option<String>)> {
-    let py = value.py();
     if let Some(ty) = current_ty {
-        let kept = match types.by_name.get(ty) {
+        let kept = match types.get(ty) {
             // An unknown annotation is the user's own label, so any plain value keeps it.
             None => plain_to_kdl(value)?,
-            Some(Converter::Builtin(b)) => encode_builtin(*b, value)?,
-            Some(Converter::User(user)) => encode_user(user.bind(py), value)?,
+            Some(Converter::Builtin(b)) => encode_builtin(b, value)?,
+            Some(Converter::User(user)) => encode_user(user, value)?,
         };
         if let Some(kdl) = kept {
             return Ok((kdl, Some(ty.to_owned())));
@@ -272,12 +303,12 @@ pub fn from_python(
         return Ok((kdl, None));
     }
     for user in types.active_user_types() {
-        if let Some(kdl) = encode_user(user.bind(py), value)? {
-            return Ok((kdl, Some(user.get().name.clone())));
+        if let Some(kdl) = encode_user(user, value)? {
+            return Ok((kdl, Some(user.name.clone())));
         }
     }
     for &(name, b) in INFERRED {
-        if !matches!(types.by_name.get(name), Some(Converter::Builtin(_))) {
+        if !matches!(types.get(name), Some(Converter::Builtin(_))) {
             continue;
         }
         if let Some(kdl) = encode_builtin(b, value)? {
@@ -294,8 +325,8 @@ pub fn from_python(
     )))
 }
 
-/// Canonical KDL text for a value, written into KdlEntryFormat::value_repr after every value write.
-pub fn canonical_repr(value: &KdlValue) -> String {
+/// Canonical KDL text for a value, written into `KdlEntryFormat::value_repr` after every value write.
+pub(crate) fn canonical_repr(value: &KdlValue) -> String {
     let text = value.to_string();
     fixed_repr(&text, value).unwrap_or(text)
 }
@@ -304,7 +335,7 @@ pub fn canonical_repr(value: &KdlValue) -> String {
 /// whitespace and any `/-` comment in front of it. An entry without a format prints its value through kdl-rs, so it
 /// needs one only when `repr` differs from kdl-rs's text, and then the format has to carry the space in front of the
 /// entry that kdl-rs would have printed.
-pub fn set_value_repr(entry: &mut KdlEntry, repr: String) {
+pub(crate) fn set_value_repr(entry: &mut KdlEntry, repr: String) {
     if let Some(f) = entry.format_mut() {
         f.value_repr = repr;
     } else if repr != entry.value().to_string() {
@@ -318,14 +349,14 @@ pub fn set_value_repr(entry: &mut KdlEntry, repr: String) {
 
 /// An identifier (node name, property key or type annotation) that prints as text which parses back. kdl-rs prints
 /// identifiers the way it prints string values, so it has the same problems.
-pub fn identifier(name: impl Into<String>) -> KdlIdentifier {
+pub(crate) fn identifier(name: impl Into<String>) -> KdlIdentifier {
     let mut ident = KdlIdentifier::from(name.into());
     fix_identifier(&mut ident);
     ident
 }
 
 /// Gives an identifier the escaped, quoted spelling if the text it prints wouldn't read back as its value.
-pub fn fix_identifier(ident: &mut KdlIdentifier) {
+pub(crate) fn fix_identifier(ident: &mut KdlIdentifier) {
     if !reads_back_as(&ident.to_string(), ident.value()) {
         ident.set_repr(quoted(ident.value()));
     }
@@ -334,7 +365,11 @@ pub fn fix_identifier(ident: &mut KdlIdentifier) {
 /// The escaped, quoted text to print instead of `text`, if `text` stands for a string value and wouldn't read back
 /// as it. kdl-rs 6.7.1 prints strings like "+.7" bare, which its own parser rejects, and copies code points KDL bans
 /// into its quoted form unescaped.
-pub fn fixed_repr(text: &str, value: &KdlValue) -> Option<String> {
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "only strings need fixing, whatever other values kdl-rs grows"
+)]
+pub(crate) fn fixed_repr(text: &str, value: &KdlValue) -> Option<String> {
     match value {
         KdlValue::String(s) if !reads_back_as(text, s) => Some(quoted(s)),
         _ => None,
@@ -377,13 +412,19 @@ fn quoted(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
-            '\u{0B}' | '\u{85}' | '\u{2028}' | '\u{2029}' => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
-            c if is_disallowed(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if matches!(c, '\u{0B}' | '\u{85}' | '\u{2028}' | '\u{2029}') || is_disallowed(c) => {
+                out.extend(c.escape_unicode());
+            }
             _ => out.push(c),
         }
     }
     out.push('"');
     out
+}
+
+/// Whether `f` is in f32's range. f32 has infinities and NaN too.
+fn fits_f32(f: f64) -> bool {
+    !f.is_finite() || f.abs() <= f64::from(f32::MAX)
 }
 
 fn plain_to_python(py: Python<'_>, value: &KdlValue) -> PyResult<Py<PyAny>> {
@@ -404,8 +445,8 @@ fn is_exact_plain(value: &Bound<'_, PyAny>) -> bool {
         || value.is_exact_instance_of::<PyString>()
 }
 
-/// None if the value isn't one of the plain types. An int outside i128 raises OverflowError and a str with lone
-/// surrogates raises UnicodeEncodeError, a ValueError.
+/// None if the value isn't one of the plain types. An int outside i128 raises `OverflowError` and a str with lone
+/// surrogates raises `UnicodeEncodeError`, a `ValueError`.
 fn plain_to_kdl(value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
     Ok(Some(if value.is_none() {
         KdlValue::Null
@@ -424,18 +465,17 @@ fn plain_to_kdl(value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
 }
 
 /// None if the value isn't an instance of the Type's class.
-fn encode_user(ty: &Bound<'_, Type>, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
-    let ty = ty.get();
-    let py = value.py();
-    if !value.is_instance(ty.cls.bind(py))? {
+fn encode_user(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
+    let ty = user.ty.bind(value.py());
+    if !value.is_instance(Type::hook(ty, |h| &h.cls)?.as_any())? {
         return Ok(None);
     }
-    let plain = ty.encode.bind(py).call1((value,))?;
+    let plain = Type::hook(ty, |h| &h.encode)?.call1((value,))?;
     match plain_to_kdl(&plain)? {
         Some(kdl) => Ok(Some(kdl)),
         None => Err(PyTypeError::new_err(format!(
             "encode for type {:?} returned {}, not str, int, float, bool or None",
-            ty.name,
+            user.name,
             plain.get_type().qualname()?
         ))),
     }
@@ -450,6 +490,10 @@ fn is_instance(value: &Bound<'_, PyAny>, module: &str, attr: &str) -> PyResult<b
 }
 
 /// The Err is the reason the value doesn't fit, for the caller's message.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "each type accepts one or two kinds of value and rejects the rest"
+)]
 fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue) -> Result<Py<PyAny>, String> {
     let string = || match value {
         KdlValue::String(s) => Ok(s.as_str()),
@@ -467,11 +511,12 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue) -> Result<Py<PyA
         }
         Builtin::F32 | Builtin::F64 => {
             let f = match value {
+                #[expect(clippy::cast_precision_loss, reason = "an f64 annotation asks for the nearest float")]
                 KdlValue::Integer(i) => *i as f64,
                 KdlValue::Float(f) => *f,
                 _ => return Err("expected a number".to_owned()),
             };
-            if matches!(b, Builtin::F32) && f.is_finite() && f.abs() > f32::MAX as f64 {
+            if matches!(b, Builtin::F32) && !fits_f32(f) {
                 return Err("out of range for f32".to_owned());
             }
             f.into_bound_py_any(py)
@@ -533,7 +578,7 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlVa
             let Ok(f) = value.extract::<f64>() else {
                 return Ok(None);
             };
-            if matches!(b, Builtin::F32) && f.is_finite() && f.abs() > f32::MAX as f64 {
+            if matches!(b, Builtin::F32) && !fits_f32(f) {
                 return Ok(None);
             }
             Ok(Some(KdlValue::Float(f)))
@@ -562,35 +607,46 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlVa
             string(call(value.py(), "base64", "b64encode", value)?.call_method1("decode", ("ascii",))?)
         }
         Builtin::PlainString if value.is_instance_of::<PyString>() => string(value.clone()),
-        _ => Ok(None),
+        Builtin::DecimalNumber
+        | Builtin::DecimalString
+        | Builtin::DateTime
+        | Builtin::Date
+        | Builtin::Time
+        | Builtin::Ipv4
+        | Builtin::Ipv6
+        | Builtin::Uuid
+        | Builtin::Regex
+        | Builtin::Base64
+        | Builtin::PlainString => Ok(None),
     }
 }
 
-fn registry(py: Python<'_>, types: Option<Vec<Py<Type>>>) -> PyResult<TypeRegistry> {
-    match types {
-        Some(types) => TypeRegistry::with_user_types(py, types),
-        None => Ok(TypeRegistry::builtin()),
-    }
+fn registry(py: Python<'_>, types: Option<Vec<Py<Type>>>) -> TypeRegistry {
+    types.map_or_else(TypeRegistry::builtin, |types| TypeRegistry::with_user_types(py, types))
 }
 
-/// Test hook until the handle API exists: parses one entry and converts its value.
+/// Direct conversion hook for `test_values.py`: parses one entry and converts its value.
 #[pyfunction]
 #[pyo3(signature = (kdl_entry_text, types=None))]
-pub fn _debug_to_python(py: Python<'_>, kdl_entry_text: &str, types: Option<Vec<Py<Type>>>) -> PyResult<Py<PyAny>> {
+pub(crate) fn _debug_to_python(
+    py: Python<'_>,
+    kdl_entry_text: &str,
+    types: Option<Vec<Py<Type>>>,
+) -> PyResult<Py<PyAny>> {
     let entry = KdlEntry::parse(kdl_entry_text).map_err(|e| parse_error(py, &e))?;
-    let types = registry(py, types)?;
-    to_python(py, entry.value(), entry.ty().map(|t| t.value()), &types)
+    let types = registry(py, types);
+    to_python(py, entry.value(), entry.ty().map(KdlIdentifier::value), &types)
 }
 
-/// Test hook until the handle API exists: returns (canonical_repr, annotation).
+/// Direct conversion hook for `test_values.py`: returns `(canonical_repr, annotation)`.
 #[pyfunction]
 #[pyo3(signature = (value, current_type=None, types=None))]
-pub fn _debug_from_python(
+pub(crate) fn _debug_from_python(
     value: &Bound<'_, PyAny>,
     current_type: Option<&str>,
     types: Option<Vec<Py<Type>>>,
 ) -> PyResult<(String, Option<String>)> {
-    let types = registry(value.py(), types)?;
+    let types = registry(value.py(), types);
     let (kdl, ty) = from_python(value, current_type, &types)?;
     Ok((canonical_repr(&kdl), ty))
 }

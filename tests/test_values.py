@@ -376,3 +376,16 @@ def test_type_attributes():
 
 def test_parser_accepts_types():
     rkdl.Parser(types=[CELSIUS]).parse("a (celsius)1")
+
+
+def test_types_come_from_the_document_a_node_is_in():
+    typed = rkdl.Parser(types=[CELSIUS]).parse("t (celsius)21\n")
+    node = typed.children.pop(0)
+    # A detached node keeps the types of the document it left.
+    assert node.args[0] == Celsius(21)
+    plain = rkdl.parse("")
+    plain.children.append(node)
+    assert type(node.args[0]) is int
+    assert node.args[0] == 21
+    typed.children.append(plain.children.pop(0))
+    assert node.args[0] == Celsius(21)

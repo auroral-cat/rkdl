@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use kdl::{KdlDocument, KdlEntry, KdlIdentifier, KdlNode};
+use kdl::{KdlDocument, KdlEntry, KdlNode};
+use pyo3::PyTraverseError;
 use pyo3::exceptions::PyTypeError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
@@ -27,7 +29,7 @@ impl Node {
         Node { id, home }
     }
 
-    /// Runs `f` on this node's KdlNode under its document's lock.
+    /// Runs `f` on this node's `KdlNode` under its document's lock.
     pub(crate) fn with_node<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&mut KdlNode) -> R + Send) -> PyResult<R> {
         let id = self.id;
         let mut f = Some(f);
@@ -41,13 +43,17 @@ impl Node {
     }
 }
 
-/// Wraps one KdlNode in a private document of its own, with fresh ids.
-pub(crate) fn detached<'py>(py: Python<'py>, node: KdlNode, types: Arc<TypeRegistry>) -> PyResult<Bound<'py, Node>> {
+/// Wraps one `KdlNode` in a private document of its own, with fresh ids. `types` should be the home's own registry
+/// (see `TypeRegistry::private_copy`).
+pub(crate) fn detached(py: Python<'_>, node: KdlNode, types: Arc<TypeRegistry>) -> PyResult<Bound<'_, Node>> {
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
     let ids = IdTree::from_document(&kdl);
-    let id = ids.top()[0];
-    let home = Bound::new(py, Document::with_ids(ids, kdl, types, true))?;
+    let &[id] = ids.top() else {
+        return Err(stale());
+    };
+    let home = Bound::new(py, Document::empty_home(types))?;
+    home.get().fill(kdl, ids);
     // Nothing else can reach a new home, so the node is still there.
     Document::node_handle(&home, id)?.ok_or_else(stale)
 }
@@ -79,6 +85,10 @@ impl Node {
         }
         for dict in [props, kwargs].into_iter().flatten() {
             for (key, value) in dict.iter() {
+                #[expect(
+                    clippy::map_err_ignore,
+                    reason = "this message says which argument was wrong; PyO3's doesn't"
+                )]
                 let key: String = key
                     .extract()
                     .map_err(|_| PyTypeError::new_err("property keys must be str"))?;
@@ -135,7 +145,7 @@ impl Node {
         let owner = Owner::Node(slf.clone().unbind());
         match value {
             Some(v) if !v.is_none() => {
-                let empty = v.cast::<PyList>().is_ok_and(|l| l.is_empty());
+                let empty = v.cast::<PyList>().is_ok_and(PyListMethods::is_empty);
                 if !empty {
                     return Err(PyTypeError::new_err(
                         "node.children can only be set to [] or None; edit it with insert, append, pop, remove or del",
@@ -148,15 +158,14 @@ impl Node {
     }
 
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Node>> {
-        let mut types = None;
-        let node = handles::on_home(&self.home, |doc| {
-            types = Some(doc.get().types.clone());
-            doc.get().with_state(py, |s| {
+        let (node, types) = handles::on_home(&self.home, |doc| {
+            let node = doc.get().with_state(py, |s| {
                 let path = s.ids.path(self.id).ok_or_else(|| Fail::Missing(stale()))?;
-                Ok(node_at(&s.kdl, &path).clone())
-            })
+                Ok::<_, Fail>(node_at(&s.kdl, &path).clone())
+            })?;
+            Ok((node, TypeRegistry::private_copy(&doc.get().types, py)))
         })?;
-        detached(py, node, types.expect("set before reading the node"))
+        detached(py, node, types)
     }
 
     fn __getitem__<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {
@@ -186,15 +195,25 @@ impl Node {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let name = self.with_node(py, |n| KdlIdentifier::from(n.name().value()).to_string())?;
+        let name = self.with_node(py, |n| values::identifier(n.name().value()).to_string())?;
         Ok(format!("<Node {name}>"))
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts the other operand as a PyRef"
+    )]
     fn __eq__(&self, other: PyRef<'_, Node>) -> bool {
         self.id == other.id
     }
 
     fn __hash__(&self) -> u64 {
         self.id.key()
+    }
+
+    // The home is the node's only strong reference. No `__clear__`: a cycle through a node also passes a Type (the
+    // document's only strong references), which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.home.traverse(&visit)
     }
 }
