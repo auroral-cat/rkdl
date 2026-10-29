@@ -746,10 +746,6 @@ class EditSequences(RuleBasedStateMachine):
         # fmt() prints strings like `+.7` bare (test_fmt_keeps_ambiguous_strings_quoted).
         if any(AMBIGUOUS.match(s) for root in self.trees[k] for m in root.walk() for s in strings_in(m)):
             return
-        # fmt() leaves a newline after a node's trailing `/* comment */` that a later block goes after
-        # (test_block_after_formatted_comment).
-        if "/*" in str(self.docs[k]):
-            return
         self.docs[k].fmt()
 
     # Invariants
@@ -822,10 +818,6 @@ def test_fmt_keeps_ambiguous_strings_quoted():
     assert str(rkdl.parse(str(d))) == str(d)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="rkdl: opening a block moves before_terminator, which fmt() ends with a newline, in front of `{`",
-)
 def test_block_after_formatted_comment():
     d = rkdl.parse("a 1 /* end */\n")
     d.fmt()
@@ -833,7 +825,6 @@ def test_block_after_formatted_comment():
     assert str(rkdl.parse(str(d))) == str(d)
 
 
-@pytest.mark.xfail(strict=True, reason="rkdl: appending to an empty document doesn't end a final `// comment` first")
 def test_append_after_a_final_line_comment():
     d = rkdl.parse("// hi")
     d.children.append(rkdl.Node("new"))

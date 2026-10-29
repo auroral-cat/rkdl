@@ -141,6 +141,12 @@ fn ends_in_open_escline(text: &str) -> bool {
         .ends_with('\\')
 }
 
+/// Whether `text` ends in a line break, give or take spaces after it.
+fn ends_line(text: &str) -> bool {
+    text.trim_end_matches(|c: char| c.is_whitespace() && c != '\n')
+        .ends_with('\n')
+}
+
 fn fmt_mut(node: &mut KdlNode) -> &mut KdlNodeFormat {
     if node.format().is_none() {
         node.set_format(KdlNodeFormat {
@@ -218,6 +224,12 @@ fn reindent_children(node: &mut KdlNode, old: &str, new: &str) {
 fn place(block: &mut KdlDocument, index: usize, mut node: KdlNode, nested: Option<(&str, &str)>) {
     let len = block.nodes().len();
     let (indent, newline) = match nested {
+        // A document's leading text can end in a comment with no line break, and a `// comment` would swallow the
+        // new node.
+        None if len == 0 => {
+            let leading = block.format().map_or("", |f| &f.leading);
+            (String::new(), !is_blank(leading) && !ends_line(leading))
+        }
         None => (String::new(), false),
         Some((parent_indent, unit)) if len == 0 => {
             let f = block_fmt_mut(block);
@@ -464,6 +476,14 @@ pub(crate) fn open_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
             // They have to stay in front of it.
             if !is_blank(&f.before_terminator) {
                 let mut moved = std::mem::take(&mut f.before_terminator);
+                // Autoformat ends before_terminator with a newline. That line break goes after the block, not before
+                // `{`, where it would end the node early.
+                if ends_line(&moved) {
+                    moved.truncate(moved.trim_end().len());
+                    if f.terminator.is_empty() {
+                        f.terminator = "\n".into();
+                    }
+                }
                 if ends_in_open_escline(&moved) {
                     moved.push('\n');
                 }

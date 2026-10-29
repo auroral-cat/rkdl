@@ -139,6 +139,22 @@ def test_insert_into_empty_document():
     assert str(d) == "a\n"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("// hi", "// hi\nnew\n"),
+        ("/* x */", "/* x */\nnew\n"),
+        ("// hi\n", "// hi\nnew\n"),
+        ("/* x */\n", "/* x */\nnew\n"),
+    ],
+)
+def test_insert_after_a_final_comment_starts_a_new_line(text, expected):
+    d = rkdl.parse(text)
+    d.children.append(rkdl.Node("new"))
+    assert str(d) == expected
+    assert [n.name for n in rkdl.parse(str(d)).children] == ["new"]
+
+
 def test_nested_three_deep():
     d = rkdl.parse("top {\n    mid {\n        low {\n        }\n    }\n}\n")
     d["top"]["mid"]["low"].children.append(rkdl.Node("leaf", 1))
@@ -336,6 +352,26 @@ def test_children_empty_list():
     assert str(d) == "// header\na 1 {}\nb {}\ne {}\n"
     d["a"].children.append(rkdl.Node("x"))
     assert str(d) == "// header\na 1 {\n    x\n}\nb {}\ne {}\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "formatted", "expected"),
+    [
+        # fmt() ends the comment with a newline of its own, which mustn't land before `{`.
+        ("a 1 /* end */\n", "a 1 /* end */\n\n", "a 1 /* end */ {}\n"),
+        ("x {\n  a 1 /* end */\n}\n", "x {\n    a 1 /* end */\n\n}\n", "x {\n    a 1 /* end */ {}\n}\n"),
+        ("a /-b \\\n  /-c\n", "a /-b \\\n  /-c\n\n", "a /-b \\\n  /-c {}\n"),
+        # fmt() drops a `//` comment at the end of a node.
+        ("a 1 // end\n", "a 1\n", "a 1 {}\n"),
+    ],
+)
+def test_children_empty_list_after_fmt(text, formatted, expected):
+    d = rkdl.parse(text)
+    d.fmt()
+    assert str(d) == formatted
+    (d["x"]["a"] if "x" in text else d["a"]).children = []
+    assert str(d) == expected
+    assert str(rkdl.parse(str(d))) == expected
 
 
 def test_children_assignment_errors():
