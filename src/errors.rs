@@ -27,19 +27,21 @@ impl Diagnostic {
 
 impl Diagnostic {
     fn from_kdl(input: &str, diag: &KdlDiagnostic) -> Self {
-        // kdl-rs spans are byte offsets into the UTF-8 input.
-        let start = diag.span.offset().min(input.len());
-        let end = (start + diag.span.len()).min(input.len());
-        let before = &input[..start];
-        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        // kdl-rs spans are byte offsets into the UTF-8 input. Rounding them down to a character boundary means a span
+        // that lands inside a character gives a slightly-off position instead of a panic.
+        let start = input.floor_char_boundary(diag.span.offset());
+        let end = input.floor_char_boundary(start.saturating_add(diag.span.len()));
+        let before = input.get(..start).unwrap_or_default();
+        let spanned = input.get(start..end).unwrap_or_default();
+        let last_line = before.rsplit('\n').next().unwrap_or_default();
         Diagnostic {
             message: diag.message.clone().unwrap_or_else(|| "unexpected error".into()),
             label: diag.label.clone(),
             help: diag.help.clone(),
             offset: before.chars().count(),
-            length: input[start..end].chars().count(),
+            length: spanned.chars().count(),
             line: before.matches('\n').count() + 1,
-            column: before[line_start..].chars().count() + 1,
+            column: last_line.chars().count() + 1,
         }
     }
 }

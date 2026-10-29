@@ -127,8 +127,7 @@ fn leading(node: &KdlNode) -> &str {
 /// The indentation in a leading: the whitespace that starts its last line.
 fn indent_of(leading: &str) -> &str {
     let line = leading.rsplit('\n').next().unwrap_or("");
-    let end = line.find(|c: char| !c.is_whitespace()).unwrap_or(line.len());
-    &line[..end]
+    line.strip_suffix(line.trim_start()).unwrap_or_default()
 }
 
 fn is_blank(text: &str) -> bool {

@@ -11,3 +11,39 @@ pyo3 = { version = "0.30.1", features = ["abi3-py310"] }
 
 [lib]
 crate-type = ["cdylib"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# Errors are the hard gate; warnings are review material for the cleanup pass. Groups sit at priority -1 so the
+# individual lints below override them.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+
+# Suppressions must be #[expect(lint, reason = "...")], which errors once it goes stale.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+unwrap_used = "deny"
+# Warn, not deny: rkdl's .expect() calls state internal invariants, and the message already gives the reason. A failed
+# one is an rkdl bug, and PyO3 turns the panic into a Python exception.
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "warn"
+panic_in_result_fn = "deny"
+get_unwrap = "deny"
+string_slice = "deny"
+indexing_slicing = "warn"
+
+let_underscore_must_use = "deny"
+unused_result_ok = "deny"
+map_err_ignore = "warn"
+
+wildcard_enum_match_arm = "warn"
+clone_on_ref_ptr = "warn"
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"

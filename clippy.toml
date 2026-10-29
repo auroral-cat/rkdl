@@ -1,3 +1,12 @@
 disallowed-methods = [
     { path = "pyo3::marker::Python::attach", reason = "calling Python while holding a document lock can deadlock; take the Python token from the caller instead" },
 ]
+
+# Tests are allowed to panic; that's how they fail.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# Unwrapping a poisoned lock propagates the original panic, which is the conventional behaviour.
+allow-unwrap-types = ["std::sync::LockResult"]

@@ -22,6 +22,13 @@ def test_position_counts_code_points():
     assert (first.line, first.column, first.offset) == (2, 4, 9)
 
 
+def test_span_over_multibyte_text():
+    # The bad number "1日本x" is 8 bytes but 4 code points, after a 2-byte "é".
+    err = parse_error("é 1日本x")
+    first = err.diagnostics[0]
+    assert (first.line, first.column, first.offset, first.length) == (1, 3, 2, 4)
+
+
 def test_several_diagnostics():
     err = parse_error('name #"raw"#"quoted key"=1')
     assert len(err.diagnostics) == 2

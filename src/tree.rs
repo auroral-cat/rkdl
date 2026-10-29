@@ -1,6 +1,3 @@
-// Most of this is used by the handles in round 3, which removes this allow.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,6 +52,7 @@ pub struct Subtree {
     entries: HashMap<EntryId, NodeId>,
 }
 
+#[cfg(test)]
 impl Subtree {
     pub fn root(&self) -> NodeId {
         self.root
@@ -187,7 +185,9 @@ impl IdTree {
         Some((node, index))
     }
 
-    /// Assigns fresh ids to `node` and its whole subtree. `parent: None` means top level.
+    /// Assigns fresh ids to `node` and its whole subtree. `parent: None` means top level. The handles insert through
+    /// `put_subtree` instead, so only tests build trees this way.
+    #[cfg(test)]
     pub fn insert_node(&mut self, parent: Option<NodeId>, index: usize, node: &KdlNode) -> NodeId {
         let id = self.add_node(parent, node);
         self.siblings_mut(parent).insert(index, id);
@@ -210,7 +210,10 @@ impl IdTree {
         };
         let mut stack = vec![node];
         while let Some(id) = stack.pop() {
-            let slot = self.nodes.remove(&id).expect("descendant is not in this tree");
+            let mut slot = self.nodes.remove(&id).expect("descendant is not in this tree");
+            if id == node {
+                slot.parent = None;
+            }
             for e in &slot.entries {
                 self.entries.remove(e);
                 subtree.entries.insert(*e, id);
@@ -218,16 +221,15 @@ impl IdTree {
             stack.extend(slot.children.iter().flatten());
             subtree.nodes.insert(id, slot);
         }
-        subtree.nodes.get_mut(&node).unwrap().parent = None;
         subtree
     }
 
-    pub fn put_subtree(&mut self, parent: Option<NodeId>, index: usize, mut subtree: Subtree) {
+    pub fn put_subtree(&mut self, parent: Option<NodeId>, index: usize, subtree: Subtree) {
         let root = subtree.root;
-        subtree.nodes.get_mut(&root).unwrap().parent = parent;
         self.siblings_mut(parent).insert(index, root);
         self.nodes.extend(subtree.nodes);
         self.entries.extend(subtree.entries);
+        self.slot_mut(root).parent = parent;
     }
 
     /// None -> Some(empty).
@@ -280,6 +282,10 @@ impl IdTree {
                 slot.entries.len(),
                 node.entries().len()
             );
+            #[expect(
+                clippy::panic,
+                reason = "a shape mismatch is an rkdl bug, and this only runs in debug builds"
+            )]
             match (&slot.children, node.children()) {
                 (None, None) => {}
                 (Some(ids), Some(doc)) => self.check_level(ids, doc, path),
