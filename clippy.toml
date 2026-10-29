@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "pyo3::marker::Python::attach", reason = "calling Python while holding a document lock can deadlock; take the Python token from the caller instead" },
+]
