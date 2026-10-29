@@ -172,6 +172,36 @@ def test_insert_after_a_last_node_without_newline():
     assert str(d) == "a\nb\nc\n"
 
 
+def test_new_block_goes_after_trailing_slashdashed_entries():
+    d = rkdl.parse("node /- key=value\n")
+    d["node"].children = []
+    d["node"].children.append(rkdl.Node("added", 1))
+    assert str(d) == "node /- key=value {\n    added 1\n}\n"
+    d = rkdl.parse("node {a} /- {b}\nx\n")
+    d["node"].children.append(rkdl.Node("added", 1))
+    assert str(d).endswith("} /- {b}\nx\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "parent", "expected"),
+    [
+        ("node1;", None, "node1;\nadded 1\n"),
+        ("node1 {\n      node2;\n}", "node1", "node1 {\n      node2;\n      added 1\n}"),
+    ],
+)
+def test_insert_after_semicolon_starts_a_new_line(text, parent, expected):
+    d = rkdl.parse(text)
+    (d[parent] if parent else d).children.append(rkdl.Node("added", 1))
+    assert str(d) == expected
+
+
+def test_insert_after_trailing_line_continuation():
+    d = rkdl.parse("node \\")
+    d.children.append(rkdl.Node("added", 1))
+    assert str(d) == "node \\\n;\nadded 1\n"
+    assert [n.name for n in rkdl.parse(str(d)).children] == ["node", "added"]
+
+
 def test_moved_node_keeps_its_comment_and_reindents():
     d = doc()
     node = d["b"].children.pop(1)

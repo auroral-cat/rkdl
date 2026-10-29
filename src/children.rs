@@ -135,6 +135,12 @@ fn is_blank(text: &str) -> bool {
     text.chars().all(char::is_whitespace)
 }
 
+/// Whether `text` ends in a `\` line continuation that still needs its newline.
+fn ends_in_open_escline(text: &str) -> bool {
+    text.trim_end_matches(|c: char| c.is_whitespace() && c != '\n' && c != '\r')
+        .ends_with('\\')
+}
+
 fn fmt_mut(node: &mut KdlNode) -> &mut KdlNodeFormat {
     if node.format().is_none() {
         node.set_format(KdlNodeFormat {
@@ -239,11 +245,31 @@ fn place(block: &mut KdlDocument, index: usize, mut node: KdlNode, nested: Optio
         }
     };
 
-    // The last node of a block or file may have no terminator at all.
+    let mut newline = newline;
     if index > 0 {
-        let f = fmt_mut(&mut block.nodes_mut()[index - 1]);
-        if f.terminator.is_empty() {
+        let prev = &mut block.nodes_mut()[index - 1];
+        let ends_in_escline = ends_in_open_escline(&prev.to_string());
+        let f = fmt_mut(prev);
+        if f.terminator.is_empty() && ends_in_escline {
+            // A newline straight after the `\` would continue this node onto the new one's line. Finish the escline
+            // and end the node with `;` on its own line, which keeps the old text as it was.
+            f.before_terminator.push('\n');
+            f.terminator = ";".into();
+        } else if f.terminator.is_empty() {
+            // The last node of a block or file may have no terminator at all.
             f.terminator = "\n".into();
+        }
+        // A `;` (or the `;` above) doesn't end the line, so the new node starts one of its own.
+        if !format!("{}{}", f.terminator, f.trailing).contains('\n') {
+            newline = true;
+            // A newline before `}` or the end of the file belonged to the old last node's line. The new node ends
+            // that line now and brings its own newline, so drop this one or it leaves a blank line.
+            if index == len
+                && let Some(bf) = block.format_mut()
+                && let Some(rest) = bf.trailing.strip_prefix('\n')
+            {
+                bf.trailing = rest.to_owned();
+            }
         }
     }
 
@@ -434,8 +460,17 @@ pub(crate) fn open_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
                 return Ok(true);
             }
             let f = fmt_mut(node);
-            if f.before_children.is_empty() {
-                f.before_children = " ".into();
+            // Without a block, trailing slashdashed entries sit in before_terminator, which prints after the block.
+            // They have to stay in front of it.
+            if !is_blank(&f.before_terminator) {
+                let mut moved = std::mem::take(&mut f.before_terminator);
+                if ends_in_open_escline(&moved) {
+                    moved.push('\n');
+                }
+                f.before_children = moved + &f.before_children;
+            }
+            if !f.before_children.ends_with(char::is_whitespace) {
+                f.before_children.push(' ');
             }
             let mut block = KdlDocument::new();
             block.set_format(KdlDocumentFormat::default());

@@ -153,10 +153,11 @@ def test_document_parsing_node_display():
 
 def test_document_parsing_append():
     # document.rs: parsing. kdl-rs keeps the hand-parsed entry's 0xDEADbeef; rkdl writes values in canonical form
-    # on purpose, and has no way to build an entry from KDL text.
+    # on purpose, and has no way to build an entry from KDL text. kdl-rs also prints `final;new`; rkdl starts the new
+    # node on its own line.
     doc = rkdl.parse(PARSING_SRC)
     doc.children.append(rkdl.Node("new", props={"blah": 0xDEADBEEF}))
-    assert str(doc) == PARSING_SRC + "new blah=3735928559\n"
+    assert str(doc) == PARSING_SRC + "\nnew blah=3735928559\n"
 
 
 @pytest.mark.xfail(

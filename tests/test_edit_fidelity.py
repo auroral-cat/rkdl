@@ -23,15 +23,6 @@ if not INPUT.is_dir() or not EXPECTED.is_dir():
     pytest.skip(f"spec test cases not found at {CASES_DIR}", allow_module_level=True)
 
 
-SLASHDASHED_ENTRY = (
-    "rkdl bug: a new children block prints before the node's before_terminator, so a trailing slashdashed entry "
-    "ends up after the `}`, which doesn't parse"
-)
-SEMICOLON = "rkdl bug: a node inserted after a `;`-terminated node starts on that line, right after the `;`"
-ESCLINE_AT_EOF = (
-    "rkdl bug: the newline added after a last node with no terminator turns its trailing `\\` into a line "
-    "continuation, so the new node becomes arguments of the old one"
-)
 EMPTIED_BLOCK = (
     "by design: removing the last child prints the block as `{}`, dropping the whitespace before `}` "
     "(test_removing_last_child_empties_block)"
@@ -41,27 +32,6 @@ SPACE_AFTER_BLOCK = "kdl-rs: whitespace between `}` and the newline is dropped, 
 
 # Known failures: (check, case id) -> reason.
 XFAIL = {
-    ("parses", "slashdash_raw_prop_key.kdl:0:append_child"): SLASHDASHED_ENTRY,
-    ("parses", "slashdash_raw_prop_key.kdl:0:insert_child"): SLASHDASHED_ENTRY,
-    ("parses", "slashdash_repeated_prop.kdl:0:append_child"): SLASHDASHED_ENTRY,
-    ("parses", "slashdash_repeated_prop.kdl:0:insert_child"): SLASHDASHED_ENTRY,
-    ("meaning", "slashdash_raw_prop_key.kdl:0:append_child"): SLASHDASHED_ENTRY,
-    ("meaning", "slashdash_raw_prop_key.kdl:0:insert_child"): SLASHDASHED_ENTRY,
-    ("meaning", "slashdash_repeated_prop.kdl:0:append_child"): SLASHDASHED_ENTRY,
-    ("meaning", "slashdash_repeated_prop.kdl:0:insert_child"): SLASHDASHED_ENTRY,
-    ("meaning", "eof_after_escape.kdl:0:append_sibling"): ESCLINE_AT_EOF,
-    ("indent", "eof_after_escape.kdl:0:append_sibling"): ESCLINE_AT_EOF,
-    ("indent", "escline_after_semicolon.kdl:0:append_sibling"): SEMICOLON,
-    ("indent", "escline_after_semicolon.kdl:1:insert_sibling"): SEMICOLON,
-    ("indent", "semicolon_after_child.kdl:0:append_sibling"): SEMICOLON,
-    ("indent", "semicolon_in_child.kdl:0:append_child"): SEMICOLON,
-    ("indent", "semicolon_in_child.kdl:0.0:append_sibling"): SEMICOLON,
-    ("indent", "semicolon_separated.kdl:0:append_sibling"): SEMICOLON,
-    ("indent", "semicolon_separated.kdl:1:insert_sibling"): SEMICOLON,
-    ("indent", "semicolon_separated_nodes.kdl:0:append_sibling"): SEMICOLON,
-    ("indent", "semicolon_separated_nodes.kdl:1:append_sibling"): SEMICOLON,
-    ("indent", "semicolon_separated_nodes.kdl:1:insert_sibling"): SEMICOLON,
-    ("indent", "semicolon_terminated.kdl:0:append_sibling"): SEMICOLON,
     ("untouched", "nested_children.kdl:0.0.0:pop"): EMPTIED_BLOCK,
     ("untouched", "semicolon_in_child.kdl:0.0:pop"): EMPTIED_BLOCK,
     ("round_trip", "comment_after_node_type.kdl"): NODE_TYPE_FORMAT,
