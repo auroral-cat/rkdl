@@ -85,17 +85,6 @@ class MNode:
         return f"MNode({self.name!r}, type={self.type!r}, args={args!r}, props={props!r}, children={kids})"
 
 
-AMBIGUOUS = re.compile(r"[+-]\.[0-9]")
-
-
-def strings_in(m):
-    """Every string a node prints for itself: name, type, keys, entry types and string values."""
-    out = [m.name, m.type, *m.props]
-    for e in [*m.args, *m.props.values()]:
-        out += [e.type, e.value]
-    return [s for s in out if isinstance(s, str)]
-
-
 def same_value(actual, expected, loose=False):
     if isinstance(actual, float) and isinstance(expected, float) and math.isnan(actual) and math.isnan(expected):
         return True
@@ -158,7 +147,7 @@ def check_children(children, expected, where):
 
 
 I128 = 2**127
-# Strings kdl-rs prints unescaped although KDL doesn't allow them literally (test_disallowed_code_points_are_escaped).
+# Code points a quoted string in generated text has to escape, since KDL doesn't allow them literally.
 UNPRINTABLE = set(map(chr, [*range(0x00, 0x08), *range(0x0E, 0x20), 0x0B, 0x85, 0x2028, 0x2029]))
 UNPRINTABLE |= set(map(chr, [0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF]))
 
@@ -171,7 +160,7 @@ AWKWARD_STRINGS = [
 
 strings = st.one_of(
     st.sampled_from(AWKWARD_STRINGS),
-    st.text(st.characters(exclude_categories=["Cs"], exclude_characters=UNPRINTABLE), max_size=6),
+    st.text(st.characters(exclude_categories=["Cs"]), max_size=6),
 )
 # i128::MIN itself is left out: kdl-rs can't parse it back (notes/upstream.md).
 ints = st.one_of(
@@ -743,9 +732,6 @@ class EditSequences(RuleBasedStateMachine):
 
     @rule(k=st.integers(0, 1))
     def fmt(self, k):
-        # fmt() prints strings like `+.7` bare (test_fmt_keeps_ambiguous_strings_quoted).
-        if any(AMBIGUOUS.match(s) for root in self.trees[k] for m in root.walk() for s in strings_in(m)):
-            return
         self.docs[k].fmt()
 
     # Invariants
@@ -796,7 +782,6 @@ TestEditSequences.settings = PROFILE
 # Regressions found by the state machine
 
 
-@pytest.mark.xfail(strict=True, reason="kdl-rs: strings print code points KDL bans, such as U+0000, unescaped")
 @pytest.mark.parametrize("char", ["\x00", "\x0b", "\x85", "\u2028", "\ufeff", "\u200e"])
 def test_disallowed_code_points_are_escaped(char):
     d = rkdl.parse("n 1\n")
@@ -811,15 +796,15 @@ def test_comment_after_a_block_survives(comment):
     assert str(rkdl.parse(text)) == text
 
 
-@pytest.mark.xfail(strict=True, reason="kdl-rs: fmt() clears rkdl's quoting, so `+.7` prints bare (notes/upstream.md)")
 def test_fmt_keeps_ambiguous_strings_quoted():
     d = rkdl.parse('"+.7" "-.7" "+.7"=1\n')
     d.fmt()
     assert str(rkdl.parse(str(d))) == str(d)
 
 
-def test_block_after_formatted_comment():
-    d = rkdl.parse("a 1 /* end */\n")
+@pytest.mark.parametrize("text", ["a 1 /* end */\n", "a /-{}\n"])
+def test_block_after_formatted_comment(text):
+    d = rkdl.parse(text)
     d.fmt()
     d["a"].children = []
     assert str(rkdl.parse(str(d))) == str(d)
