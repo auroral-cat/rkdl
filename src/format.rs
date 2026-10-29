@@ -1,6 +1,8 @@
-use kdl::{FormatConfig, KdlDocument};
+use kdl::{FormatConfig, KdlDocument, KdlEntry, KdlEntryFormat};
 use pyo3::prelude::*;
 use pyo3::types::PyString;
+
+use crate::values;
 
 /// Autoformat settings, mirroring kdl-rs's FormatConfig.
 #[pyclass(module = "rkdl", frozen)]
@@ -57,6 +59,50 @@ impl Formatter {
         // outside kdl, but the field itself is public.
         config.entry_autoformate_keep = self.entry_autoformat_keep;
         doc.autoformat_config(&config);
+        requote(doc);
+    }
+}
+
+/// autoformat clears the text rkdl wrote for names, keys, types and string values, and kdl-rs's own spelling of
+/// some strings doesn't parse back (see values::fixed_repr). Puts the fixed spelling back where it's needed.
+fn requote(doc: &mut KdlDocument) {
+    for node in doc.nodes_mut() {
+        values::fix_identifier(node.name_mut());
+        if let Some(ty) = node.ty_mut() {
+            values::fix_identifier(ty);
+        }
+        for entry in node.entries_mut() {
+            requote_entry(entry);
+        }
+        if let Some(children) = node.children_mut() {
+            requote(children);
+        }
+    }
+}
+
+fn requote_entry(entry: &mut KdlEntry) {
+    if let Some(name) = entry.name_mut() {
+        values::fix_identifier(name);
+    }
+    if let Some(ty) = entry.ty_mut() {
+        values::fix_identifier(ty);
+    }
+    let text = match entry.format() {
+        Some(f) => f.value_repr.clone(),
+        None => entry.value().to_string(),
+    };
+    let Some(repr) = values::fixed_repr(&text, entry.value()) else {
+        return;
+    };
+    match entry.format_mut() {
+        Some(f) => f.value_repr = repr,
+        // Without a format, the node prints a space before the entry. A format carries the fixed text, so it has to
+        // carry that space too.
+        None => entry.set_format(KdlEntryFormat {
+            value_repr: repr,
+            leading: " ".into(),
+            ..Default::default()
+        }),
     }
 }
 

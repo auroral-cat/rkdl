@@ -162,6 +162,34 @@ def test_plain_from_python(value, expected):
     assert from_python(value) == expected
 
 
+# The spec's "Disallowed Literal Code Points" (less surrogates, which a str can't hold here), plus the newlines a
+# single-line string can't hold literally.
+BANNED = [
+    *range(0x00, 0x09), *range(0x0E, 0x20), 0x7F, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF,
+]  # fmt: skip
+NEWLINES = [0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029]
+
+
+@pytest.mark.parametrize("char", [chr(c) for c in BANNED + NEWLINES], ids=lambda c: f"U+{ord(c):04X}")
+def test_code_points_kdl_bans_are_escaped(char):
+    doc = rkdl.parse("n 1\n")
+    node = doc["n"]
+    node.args[0] = char
+    node.props[char] = char
+    node.name = char
+    node.args.entry(0).type = char
+    text = str(doc)
+    assert char not in text.removesuffix("\n")
+    again = rkdl.parse(text)[char]
+    assert again.args.entry(0).type == char
+    assert again.args[0] == char
+    assert again.props[char] == char
+
+
+def test_escapes_use_short_forms_where_kdl_has_them():
+    assert from_python("\b\f\n\r\t\x00 ") == ('"\\b\\f\\n\\r\\t\\u{0}\\u{2028}"', None)
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

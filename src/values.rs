@@ -297,35 +297,56 @@ pub fn from_python(
 /// Canonical KDL text for a value, written into KdlEntryFormat::value_repr after every value write.
 pub fn canonical_repr(value: &KdlValue) -> String {
     let text = value.to_string();
-    // Workaround for a kdl-rs 6.7.1 bug: it prints strings like "+.7" and "-.7" bare, and its own parser rejects
-    // that. Quote any bare string that doesn't read back as itself.
-    if let KdlValue::String(s) = value
-        && !text.starts_with('"')
-        && !parses_back_as(&text, s)
-    {
-        return quoted(s);
-    }
-    text
+    fixed_repr(&text, value).unwrap_or(text)
 }
 
 /// An identifier (node name, property key or type annotation) that prints as text which parses back. kdl-rs prints
-/// identifiers the way it prints string values, so it has the same bare `+.7` problem.
+/// identifiers the way it prints string values, so it has the same problems.
 pub fn identifier(name: impl Into<String>) -> KdlIdentifier {
-    let name = name.into();
-    let value = KdlValue::String(name.clone());
-    let repr = canonical_repr(&value);
-    let mut ident = KdlIdentifier::from(name);
-    if repr != value.to_string() {
-        ident.set_repr(repr);
-    }
+    let mut ident = KdlIdentifier::from(name.into());
+    fix_identifier(&mut ident);
     ident
 }
 
-fn parses_back_as(text: &str, s: &str) -> bool {
-    KdlEntry::parse(text).is_ok_and(|e| e.name().is_none() && e.value().as_string() == Some(s))
+/// Gives an identifier the escaped, quoted spelling if the text it prints wouldn't read back as its value.
+pub fn fix_identifier(ident: &mut KdlIdentifier) {
+    if !reads_back_as(&ident.to_string(), ident.value()) {
+        ident.set_repr(quoted(ident.value()));
+    }
 }
 
-/// The quoted form, escaped the way kdl-rs's write_string escapes.
+/// The escaped, quoted text to print instead of `text`, if `text` stands for a string value and wouldn't read back
+/// as it. kdl-rs 6.7.1 prints strings like "+.7" bare, which its own parser rejects, and copies code points KDL bans
+/// into its quoted form unescaped.
+pub fn fixed_repr(text: &str, value: &KdlValue) -> Option<String> {
+    match value {
+        KdlValue::String(s) if !reads_back_as(text, s) => Some(quoted(s)),
+        _ => None,
+    }
+}
+
+/// Whether `text` parses as the string `s` and holds no code point KDL bans literally. kdl-rs's parser accepts some
+/// of those (U+007F), so the parse alone isn't enough.
+fn reads_back_as(text: &str, s: &str) -> bool {
+    !text.chars().any(is_disallowed)
+        && KdlEntry::parse(text).is_ok_and(|e| e.name().is_none() && e.value().as_string() == Some(s))
+}
+
+/// The spec's "Disallowed Literal Code Points". Surrogates can't occur in a Rust string.
+fn is_disallowed(c: char) -> bool {
+    matches!(c,
+        '\u{0000}'..='\u{0008}'
+        | '\u{000E}'..='\u{001F}'
+        | '\u{007F}'
+        | '\u{200E}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{FEFF}'
+    )
+}
+
+/// The quoted form: kdl-rs's escapes, plus `\u{…}` for the newlines and banned code points a single-line string
+/// can't hold literally.
 fn quoted(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -340,6 +361,8 @@ fn quoted(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
+            '\u{0B}' | '\u{85}' | '\u{2028}' | '\u{2029}' => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if is_disallowed(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
             _ => out.push(c),
         }
     }
