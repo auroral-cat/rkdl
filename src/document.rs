@@ -3,11 +3,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use kdl::KdlDocument;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::PyWeakrefReference;
 
 use crate::children::{self, Children, Owner};
 use crate::format::Formatter;
-use crate::handles::{self, Garbage, Home};
+use crate::handles;
 use crate::node::Node;
 use crate::tree::{IdTree, NodeId};
 use crate::values::TypeRegistry;
@@ -75,35 +74,9 @@ impl Document {
         Document::with_ids(IdTree::from_document(&kdl), kdl, types, true)
     }
 
-    /// The one handle for `id`, so `doc["a"] is doc["a"]`. Every way of getting a Node goes through here. None means
-    /// the node isn't in `doc` any more: the caller's view of the document is out of date and it should look again.
+    /// The one handle for `id`. Every way of getting a Node goes through here. See `handles::publish`.
     pub(crate) fn node_handle<'py>(doc: &Bound<'py, Document>, id: NodeId) -> PyResult<Option<Bound<'py, Node>>> {
-        let py = doc.py();
-        loop {
-            if let Some(node) = handles::get::<Node>(py, id.key()) {
-                return Ok(Some(node));
-            }
-            // Python objects are made before locking; the lock only decides whether to publish this one.
-            let home = Home::new(Arc::new(doc.clone().unbind()));
-            let node = Bound::new(py, Node::new(id, home.clone()))?;
-            let weak = PyWeakrefReference::new(&node)?.unbind();
-            let (found, published, garbage) = doc.get().with_state(py, |s| {
-                let mut garbage = Garbage::default();
-                if !s.ids.contains(id) {
-                    garbage.weakrefs.push(weak);
-                    return (false, false, garbage);
-                }
-                let published = handles::intern_locked(id.key(), weak, &home, &mut garbage);
-                (true, published, garbage)
-            });
-            drop(garbage);
-            match (found, published) {
-                (false, _) => return Ok(None),
-                (true, true) => return Ok(Some(node)),
-                // Another thread published a handle first, or one is being freed right now.
-                (true, false) => py.detach(std::thread::yield_now),
-            }
-        }
+        handles::publish(doc, id.key(), |home| Node::new(id, home), |s| s.ids.contains(id))
     }
 }
 

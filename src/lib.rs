@@ -5,6 +5,7 @@ mod entry;
 mod errors;
 mod format;
 mod handles;
+mod index;
 mod node;
 mod parser;
 mod props;

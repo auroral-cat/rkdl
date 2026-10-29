@@ -1,8 +1,9 @@
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
-use crate::entry::{Entry, Item, Snapshot, chosen, edit, new_entry, position, read, sliced, store};
+use crate::entry::{Entry, Item, Snapshot, chosen, edit, new_entry, read, store};
+use crate::index::{insert_at, not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::values;
 
@@ -12,8 +13,7 @@ fn args(items: &[Item]) -> Vec<(usize, &Item)> {
 }
 
 fn arg(items: &[Item], index: isize) -> PyResult<&Item> {
-    let args = args(items);
-    Ok(args[position(args.len(), index, "argument")?].1)
+    Ok(pick_one(&args(items), index, "args")?.1)
 }
 
 fn values<'py>(py: Python<'py>, snapshot: &Snapshot) -> PyResult<Vec<Py<PyAny>>> {
@@ -60,8 +60,7 @@ impl Args {
         let snapshot = read(py, self.node.get())?;
         if let Ok(slice) = index.cast::<PySlice>() {
             let values = values(py, &snapshot)?;
-            let picked = sliced(values.len(), slice)?.into_iter().map(|i| &values[i]);
-            return Ok(PyList::new(py, picked)?.into_any());
+            return Ok(PyList::new(py, pick_slice(&values, slice)?)?.into_any());
         }
         let item = arg(&snapshot.items, index.extract()?)?;
         Ok(item.to_python(py, snapshot.types())?.into_bound(py))
@@ -94,8 +93,8 @@ impl Args {
             |snapshot| {
                 let ids: Vec<_> = args(&snapshot.items).into_iter().map(|(_, i)| i.id).collect();
                 match (&slice, index) {
-                    (Some(slice), _) => Ok(sliced(ids.len(), slice)?.into_iter().map(|i| ids[i]).collect()),
-                    (None, Some(index)) => Ok(vec![ids[position(ids.len(), index, "argument")?]]),
+                    (Some(slice), _) => Ok(pick_slice(&ids, slice)?.into_iter().copied().collect()),
+                    (None, Some(index)) => Ok(vec![*pick_one(&ids, index, "args")?]),
                     (None, None) => unreachable!("an index or a slice"),
                 }
             },
@@ -110,12 +109,7 @@ impl Args {
             self.node.get(),
             |snapshot| {
                 let args = args(&snapshot.items);
-                let i = if index < 0 {
-                    index.saturating_add_unsigned(args.len()).max(0) as usize
-                } else {
-                    (index as usize).min(args.len())
-                };
-                let at = match (args.get(i), args.last()) {
+                let at = match (args.get(insert_at(args.len(), index)), args.last()) {
                     (Some(&(at, _)), _) => at,
                     (None, Some(&(last, _))) => last + 1,
                     (None, None) => 0,
@@ -160,7 +154,7 @@ impl Args {
             |snapshot| {
                 find(snapshot, value)?
                     .map(|item| item.id)
-                    .ok_or_else(|| PyValueError::new_err("value is not in node.args"))
+                    .ok_or_else(|| not_in(value, "args"))
             },
             |mut target, id| target.remove(id),
         )
@@ -177,7 +171,7 @@ impl Args {
 
     fn index(&self, value: &Bound<'_, PyAny>) -> PyResult<usize> {
         let snapshot = read(value.py(), self.node.get())?;
-        let found = find(&snapshot, value)?.ok_or_else(|| PyValueError::new_err("value is not in node.args"))?;
+        let found = find(&snapshot, value)?.ok_or_else(|| not_in(value, "args"))?;
         Ok(args(&snapshot.items)
             .iter()
             .position(|(_, i)| i.id == found.id)

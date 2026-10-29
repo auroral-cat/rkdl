@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlNode, KdlValue};
-use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
+use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PySlice, PyTuple, PyWeakrefReference};
+use pyo3::types::{PyList, PySlice, PyTuple};
 
 use crate::document::{DocState, Document};
-use crate::handles::{self, DocRef, Fail, Garbage, Home};
+use crate::handles::{self, DocRef, Fail, Home, stale};
+use crate::index::{not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
@@ -21,20 +22,9 @@ fn removed() -> PyErr {
 /// of the format holds the entry's whitespace and any `/-` comment in front of it.
 pub(crate) fn store(entry: &mut KdlEntry, value: KdlValue, ty: Option<String>) {
     let repr = values::canonical_repr(&value);
-    let differs = repr != value.to_string();
     entry.set_value(value);
     set_ty(entry, ty);
-    match entry.format_mut() {
-        Some(f) => f.value_repr = repr,
-        // An entry without a format prints its value through kdl-rs, which can print a string it can't parse back
-        // (see values::canonical_repr). A format carries the fixed text; the leading space is what kdl-rs would add.
-        None if differs => entry.set_format(KdlEntryFormat {
-            value_repr: repr,
-            leading: " ".into(),
-            ..Default::default()
-        }),
-        None => {}
-    }
+    values::set_value_repr(entry, repr);
 }
 
 fn set_ty(entry: &mut KdlEntry, ty: Option<String>) {
@@ -76,14 +66,11 @@ pub(crate) fn new_entry(key: Option<String>, value: KdlValue, ty: Option<String>
     entry
 }
 
-/// Finds the entry under its document's lock. Moves repoint handles under that lock too, so if the handle still
-/// points at `doc` and the entry isn't there, it was removed.
-fn entry_mut<'a>(s: &'a mut DocState, id: EntryId, doc: &DocRef, home: &Home) -> Result<&'a mut KdlEntry, Fail> {
+/// Finds the entry under its document's lock. If it isn't there and the handle didn't move meanwhile, it was
+/// removed.
+fn entry_mut(s: &mut DocState, id: EntryId) -> Result<&mut KdlEntry, Fail> {
     let Some((node, index)) = s.ids.entry_position(id) else {
-        return Err(match Arc::ptr_eq(doc, &home.doc()) {
-            true => Fail::Err(removed()),
-            false => Fail::Changed,
-        });
+        return Err(Fail::Missing(removed()));
     };
     let path = s.ids.path(node).expect("an entry's node is in the tree");
     Ok(&mut node_at_mut(&mut s.kdl, &path).entries_mut()[index])
@@ -126,7 +113,7 @@ impl Item {
 }
 
 fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
-    let path = s.ids.path(node).ok_or(Fail::Gone)?;
+    let path = s.ids.path(node).ok_or_else(|| Fail::Missing(stale()))?;
     let entries = node_at(&s.kdl, &path).entries();
     Ok(s.ids
         .entries(node)
@@ -238,39 +225,13 @@ pub(crate) fn chosen<'py>(
     node: &Node,
     choose: impl Fn(&[Item]) -> PyResult<Vec<EntryId>>,
 ) -> PyResult<Vec<Bound<'py, Entry>>> {
-    'retry: loop {
+    loop {
         let snapshot = read(py, node)?;
-        let doc = snapshot.doc.bind(py);
-        let mut found = Vec::new();
-        for id in choose(&snapshot.items)? {
-            match Entry::handle(doc, id)? {
-                Some(entry) => found.push(entry),
-                None => continue 'retry,
-            }
+        let ids = choose(&snapshot.items)?;
+        if let Some(found) = handles::publish_all(snapshot.doc.bind(py), &ids, Entry::handle)? {
+            return Ok(found);
         }
-        return Ok(found);
     }
-}
-
-/// Python's index rules: negative counts from the end. `what` names the sequence in the error.
-pub(crate) fn position(len: usize, index: isize, what: &str) -> PyResult<usize> {
-    let i = if index < 0 {
-        index.checked_add_unsigned(len)
-    } else {
-        Some(index)
-    };
-    match i {
-        Some(i) if i >= 0 && (i as usize) < len => Ok(i as usize),
-        _ => Err(PyIndexError::new_err(format!("{what} index out of range"))),
-    }
-}
-
-/// The indexes a slice picks from a sequence of `len` items.
-pub(crate) fn sliced(len: usize, slice: &Bound<'_, PySlice>) -> PyResult<Vec<usize>> {
-    let s = slice.indices(len as isize)?;
-    Ok((0..s.slicelength)
-        .map(|k| (s.start + k as isize * s.step) as usize)
-        .collect())
 }
 
 // The handle.
@@ -284,33 +245,14 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// The one handle for `id`, published the same way as `Document::node_handle`. None means the entry isn't in
-    /// `doc` any more, and the caller should look again.
+    /// The one handle for `id`. See `handles::publish`.
     pub(crate) fn handle<'py>(doc: &Bound<'py, Document>, id: EntryId) -> PyResult<Option<Bound<'py, Entry>>> {
-        let py = doc.py();
-        loop {
-            if let Some(entry) = handles::get::<Entry>(py, id.key()) {
-                return Ok(Some(entry));
-            }
-            let home = Home::new(Arc::new(doc.clone().unbind()));
-            let entry = Bound::new(py, Entry { id, home: home.clone() })?;
-            let weak = PyWeakrefReference::new(&entry)?.unbind();
-            let (found, published, garbage) = doc.get().with_state(py, |s| {
-                let mut garbage = Garbage::default();
-                if s.ids.entry_position(id).is_none() {
-                    garbage.weakrefs.push(weak);
-                    return (false, false, garbage);
-                }
-                let published = handles::intern_locked(id.key(), weak, &home, &mut garbage);
-                (true, published, garbage)
-            });
-            drop(garbage);
-            match (found, published) {
-                (false, _) => return Ok(None),
-                (true, true) => return Ok(Some(entry)),
-                (true, false) => py.detach(std::thread::yield_now),
-            }
-        }
+        handles::publish(
+            doc,
+            id.key(),
+            |home| Entry { id, home },
+            |s| s.ids.entry_position(id).is_some(),
+        )
     }
 
     /// Runs `f` on this entry under its document's lock.
@@ -318,7 +260,7 @@ impl Entry {
         let mut f = Some(f);
         handles::on_home(&self.home, |doc| {
             doc.get().with_state(py, |s| {
-                let entry = entry_mut(s, self.id, doc, &self.home)?;
+                let entry = entry_mut(s, self.id)?;
                 let f = f.take().expect("runs once it finds the entry");
                 Ok(f(entry))
             })
@@ -327,9 +269,9 @@ impl Entry {
 
     fn item(&self, py: Python<'_>) -> PyResult<(Item, DocRef)> {
         handles::on_home(&self.home, |doc| {
-            let item = doc.get().with_state(py, |s| {
-                entry_mut(s, self.id, doc, &self.home).map(|e| Item::new(self.id, e))
-            })?;
+            let item = doc
+                .get()
+                .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e)))?;
             Ok((item, doc.clone()))
         })
     }
@@ -353,13 +295,13 @@ impl Entry {
     fn set_value(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = value.py();
         handles::on_home(&self.home, |doc| {
-            let before = doc.get().with_state(py, |s| {
-                entry_mut(s, self.id, doc, &self.home).map(|e| Item::new(self.id, e).ty)
-            })?;
+            let before = doc
+                .get()
+                .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e).ty))?;
             // Converting may call Python, so it happens between two locks.
             let (value, ty) = values::from_python(value, before.as_deref(), &doc.get().types)?;
             doc.get().with_state(py, |s| {
-                let entry = entry_mut(s, self.id, doc, &self.home)?;
+                let entry = entry_mut(s, self.id)?;
                 if entry.ty().map(|t| t.value()) != before.as_deref() {
                     return Err(Fail::Changed);
                 }
@@ -447,14 +389,12 @@ impl Entries {
         let node = self.node.get();
         if let Ok(slice) = index.cast::<PySlice>() {
             let found = chosen(py, node, |items| {
-                Ok(sliced(items.len(), slice)?.into_iter().map(|i| items[i].id).collect())
+                Ok(pick_slice(items, slice)?.into_iter().map(|i| i.id).collect())
             })?;
             return Ok(PyList::new(py, found)?.into_any());
         }
         let index: isize = index.extract()?;
-        let mut found = chosen(py, node, |items| {
-            Ok(vec![items[position(items.len(), index, "entries")?].id])
-        })?;
+        let mut found = chosen(py, node, |items| Ok(vec![pick_one(items, index, "entries")?.id]))?;
         Ok(found.pop().expect("chose one entry").into_any())
     }
 
@@ -483,7 +423,7 @@ impl Entries {
         items
             .iter()
             .position(|i| i.id == entry.get().id)
-            .ok_or_else(|| PyValueError::new_err("entry is not in this list"))
+            .ok_or_else(|| not_in(entry.as_any(), "entries"))
     }
 
     fn count(&self, entry: &Bound<'_, PyAny>) -> PyResult<usize> {

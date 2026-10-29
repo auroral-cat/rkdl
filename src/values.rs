@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use kdl::{KdlEntry, KdlIdentifier, KdlValue};
+use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -298,6 +298,22 @@ pub fn from_python(
 pub fn canonical_repr(value: &KdlValue) -> String {
     let text = value.to_string();
     fixed_repr(&text, value).unwrap_or(text)
+}
+
+/// Sets the text an entry's value prints as. Only `value_repr` changes: the rest of the format holds the entry's
+/// whitespace and any `/-` comment in front of it. An entry without a format prints its value through kdl-rs, so it
+/// needs one only when `repr` differs from kdl-rs's text, and then the format has to carry the space in front of the
+/// entry that kdl-rs would have printed.
+pub fn set_value_repr(entry: &mut KdlEntry, repr: String) {
+    if let Some(f) = entry.format_mut() {
+        f.value_repr = repr;
+    } else if repr != entry.value().to_string() {
+        entry.set_format(KdlEntryFormat {
+            value_repr: repr,
+            leading: " ".into(),
+            ..Default::default()
+        });
+    }
 }
 
 /// An identifier (node name, property key or type annotation) that prints as text which parses back. kdl-rs prints

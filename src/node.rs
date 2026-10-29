@@ -33,7 +33,7 @@ impl Node {
         let mut f = Some(f);
         handles::on_home(&self.home, |doc| {
             doc.get().with_state(py, |s| {
-                let path = s.ids.path(id).ok_or(Fail::Gone)?;
+                let path = s.ids.path(id).ok_or_else(|| Fail::Missing(stale()))?;
                 let f = f.take().expect("runs once it finds the node");
                 Ok(f(node_at_mut(&mut s.kdl, &path)))
             })
@@ -152,7 +152,7 @@ impl Node {
         let node = handles::on_home(&self.home, |doc| {
             types = Some(doc.get().types.clone());
             doc.get().with_state(py, |s| {
-                let path = s.ids.path(self.id).ok_or(Fail::Gone)?;
+                let path = s.ids.path(self.id).ok_or_else(|| Fail::Missing(stale()))?;
                 Ok(node_at(&s.kdl, &path).clone())
             })
         })?;

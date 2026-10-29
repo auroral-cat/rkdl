@@ -1,4 +1,4 @@
-use kdl::{FormatConfig, KdlDocument, KdlEntry, KdlEntryFormat};
+use kdl::{FormatConfig, KdlDocument, KdlEntry};
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
@@ -91,18 +91,8 @@ fn requote_entry(entry: &mut KdlEntry) {
         Some(f) => f.value_repr.clone(),
         None => entry.value().to_string(),
     };
-    let Some(repr) = values::fixed_repr(&text, entry.value()) else {
-        return;
-    };
-    match entry.format_mut() {
-        Some(f) => f.value_repr = repr,
-        // Without a format, the node prints a space before the entry. A format carries the fixed text, so it has to
-        // carry that space too.
-        None => entry.set_format(KdlEntryFormat {
-            value_repr: repr,
-            leading: " ".into(),
-            ..Default::default()
-        }),
+    if let Some(repr) = values::fixed_repr(&text, entry.value()) {
+        values::set_value_repr(entry, repr);
     }
 }
 

@@ -10,13 +10,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
+use pyo3::PyClass;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
 use pyo3::type_object::PyTypeCheck;
 use pyo3::types::PyWeakrefReference;
 
-use crate::document::Document;
+use crate::document::{DocState, Document};
 
 /// A document pointer. Every move installs a fresh Arc, so comparing Arcs tells a reader whether its handle moved,
 /// even if it came back to the same document.
@@ -31,7 +32,13 @@ impl Home {
     }
 
     pub(crate) fn doc(&self) -> DocRef {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        Arc::clone(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Whether a move has repointed this home since it pointed at `doc`. Once true, it stays true: every move installs
+    /// a fresh `DocRef`, so a handle that moved away and back still counts as moved.
+    pub(crate) fn moved_from(&self, doc: &DocRef) -> bool {
+        !Arc::ptr_eq(doc, &self.doc())
     }
 }
 
@@ -71,6 +78,53 @@ pub(crate) fn get<'py, T: PyTypeCheck>(py: Python<'py>, key: u64) -> Option<Boun
     found?.cast_into::<T>().ok()
 }
 
+/// The one handle for `key`, so `doc["a"] is doc["a"]`. `make` builds a handle object for a home in `doc`, and
+/// `present` says, under `doc`'s lock, whether `key` is still there. None means it isn't: the caller's view of the
+/// document is out of date and it should look again.
+pub(crate) fn publish<'py, T: PyClass, I: Into<PyClassInitializer<T>>>(
+    doc: &Bound<'py, Document>,
+    key: u64,
+    make: impl Fn(Arc<Home>) -> I,
+    present: impl Fn(&DocState) -> bool + Sync,
+) -> PyResult<Option<Bound<'py, T>>> {
+    let py = doc.py();
+    loop {
+        if let Some(object) = get::<T>(py, key) {
+            return Ok(Some(object));
+        }
+        // Python objects are made before locking; the lock only decides whether to publish this one.
+        let home = Home::new(Arc::new(doc.clone().unbind()));
+        let object = Bound::new(py, make(Arc::clone(&home)))?;
+        let weak = PyWeakrefReference::new(object.as_any())?.unbind();
+        let (found, published, garbage) = doc.get().with_state(py, |s| {
+            let mut garbage = Garbage::default();
+            if !present(s) {
+                garbage.weakrefs.push(weak);
+                return (false, false, garbage);
+            }
+            let published = intern_locked(key, weak, &home, &mut garbage);
+            (true, published, garbage)
+        });
+        drop(garbage);
+        match (found, published) {
+            (false, _) => return Ok(None),
+            (true, true) => return Ok(Some(object)),
+            // Another thread published a handle first, or one is being freed right now.
+            (true, false) => py.detach(std::thread::yield_now),
+        }
+    }
+}
+
+/// Handles for every id in `ids`, made by `handle` (a `publish` caller). None if one of them has left `doc` since
+/// `ids` was read from it, and the caller should read again.
+pub(crate) fn publish_all<'py, I: Copy, T>(
+    doc: &Bound<'py, Document>,
+    ids: &[I],
+    handle: impl Fn(&Bound<'py, Document>, I) -> PyResult<Option<Bound<'py, T>>>,
+) -> PyResult<Option<Vec<Bound<'py, T>>>> {
+    ids.iter().map(|&id| handle(doc, id)).collect()
+}
+
 /// Records `object` as the handle for `key` unless a live one is already there, in which case `object` goes to the
 /// garbage and this returns false. Called with the document that holds `key` locked, so no move can slip between
 /// checking where the node is and publishing a handle that says so.
@@ -103,7 +157,10 @@ pub(crate) fn repoint(keys: impl IntoIterator<Item = u64>, doc: &DocRef, garbage
         let Some(home) = cache.slots.get(&key).and_then(|slot| slot.home.upgrade()) else {
             continue;
         };
-        let old = std::mem::replace(&mut *home.0.lock().unwrap_or_else(PoisonError::into_inner), doc.clone());
+        let old = std::mem::replace(
+            &mut *home.0.lock().unwrap_or_else(PoisonError::into_inner),
+            Arc::clone(doc),
+        );
         garbage.docs.push(old);
         // This may be the last reference if the handle is being freed right now.
         garbage.homes.push(home);
@@ -116,8 +173,9 @@ pub(crate) fn stale() -> PyErr {
 
 /// Why an operation on a document didn't go through.
 pub(crate) enum Fail {
-    /// The node wasn't in the document. Fine if a move changed the pointer meanwhile, a bug otherwise.
-    Gone,
+    /// The node or entry wasn't in the document. If the handle's home still points there, the error is the answer;
+    /// if a move repointed it meanwhile, try again.
+    Missing(PyErr),
     /// The document changed between reading it and editing it. Try again.
     Changed,
     Err(PyErr),
@@ -137,8 +195,8 @@ pub(crate) fn on_home<R>(home: &Home, mut op: impl FnMut(&DocRef) -> Result<R, F
             Ok(result) => return Ok(result),
             Err(Fail::Err(err)) => return Err(err),
             Err(Fail::Changed) => {}
-            Err(Fail::Gone) if Arc::ptr_eq(&doc, &home.doc()) => return Err(stale()),
-            Err(Fail::Gone) => {}
+            Err(Fail::Missing(err)) if !home.moved_from(&doc) => return Err(err),
+            Err(Fail::Missing(_)) => {}
         }
     }
 }
