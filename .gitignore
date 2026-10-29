@@ -12,3 +12,6 @@ __pycache__/
 /refs/
 plan.md
 /notes/
+
+# agent worktrees
+/.claude/worktrees/
