@@ -1,10 +1,14 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use kdl::KdlDocument;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 
+use crate::children::{self, Children, Owner};
 use crate::format::Formatter;
-use crate::tree::IdTree;
+use crate::node::Node;
+use crate::tree::{IdTree, NodeId};
 use crate::values::TypeRegistry;
 
 pub(crate) struct DocState {
@@ -23,19 +27,25 @@ impl DocState {
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Document {
     state: Mutex<DocState>,
-    // Read by the value views in round 3, which removes this allow.
-    #[allow(dead_code)]
-    types: Arc<TypeRegistry>,
+    pub(crate) types: Arc<TypeRegistry>,
+    /// A detached node's private one-node document. Never handed to Python as a Document.
+    pub(crate) home: bool,
+    // A weakref.WeakValueDictionary from id key to Node. Python's own dictionary means no second Rust lock to order
+    // against the GIL.
+    cache: PyOnceLock<Py<PyAny>>,
 }
 
 impl Document {
     pub(crate) fn new(kdl: KdlDocument, types: Arc<TypeRegistry>) -> Self {
+        Document::with_ids(IdTree::from_document(&kdl), kdl, types, false)
+    }
+
+    pub(crate) fn with_ids(ids: IdTree, kdl: KdlDocument, types: Arc<TypeRegistry>, home: bool) -> Self {
         Document {
-            state: Mutex::new(DocState {
-                ids: IdTree::from_document(&kdl),
-                kdl,
-            }),
+            state: Mutex::new(DocState { kdl, ids }),
             types,
+            home,
+            cache: PyOnceLock::new(),
         }
     }
 
@@ -54,13 +64,57 @@ impl Document {
             result
         })
     }
+
+    fn cache<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyAny>> {
+        self.cache
+            .get_or_try_init(py, || {
+                py.import("weakref")?
+                    .getattr("WeakValueDictionary")?
+                    .call0()
+                    .map(Bound::unbind)
+            })
+            .map(|cache| cache.bind(py))
+    }
+
+    /// The one handle for `id`, so `doc["a"] is doc["a"]`. Every way of getting a Node goes through here.
+    pub(crate) fn node_handle<'py>(slf: &Bound<'py, Document>, id: NodeId) -> PyResult<Bound<'py, Node>> {
+        let py = slf.py();
+        let cache = slf.get().cache(py)?;
+        let found = cache.call_method1("get", (id.key(),))?;
+        if !found.is_none() {
+            return Ok(found.cast_into::<Node>()?);
+        }
+        let node = Bound::new(py, Node::new(id, slf.clone().unbind()))?;
+        cache.set_item(id.key(), &node)?;
+        Ok(node)
+    }
+
+    /// After a subtree moved from `from` to `to`, points the live handles in it at their new document.
+    pub(crate) fn move_handles(
+        py: Python<'_>,
+        from: &Bound<'_, Document>,
+        to: &Bound<'_, Document>,
+        ids: &[NodeId],
+    ) -> PyResult<()> {
+        let old = from.get().cache(py)?;
+        let new = to.get().cache(py)?;
+        for id in ids {
+            let found = old.call_method1("get", (id.key(),))?;
+            if found.is_none() {
+                continue;
+            }
+            let node = found.cast_into::<Node>()?;
+            node.get().set_doc(to.clone().unbind());
+            new.set_item(id.key(), &node)?;
+            old.del_item(id.key())?;
+        }
+        Ok(())
+    }
 }
 
 /// Locks two documents for an edit that spans both, such as moving a node. They're locked in address order so two
 /// threads moving nodes in opposite directions can't deadlock. If `a` and `b` are the same document it's locked once
 /// and `f` gets `None` for `b`.
-// Used by node moves in round 3, which removes this allow.
-#[allow(dead_code)]
 pub(crate) fn lock_both<R: Send>(
     py: Python<'_>,
     a: &Document,
@@ -109,5 +163,34 @@ impl Document {
             Some(f) => f.apply(&mut s.kdl),
             None => Formatter::default().apply(&mut s.kdl),
         });
+    }
+
+    #[getter]
+    fn children(slf: &Bound<'_, Self>) -> Children {
+        Children::new(Owner::Doc(slf.clone().unbind()))
+    }
+
+    #[setter]
+    fn set_children(&self, _value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        Err(PyTypeError::new_err(
+            "can't assign to Document.children; edit it with insert, append, pop, remove or del",
+        ))
+    }
+
+    fn __getitem__<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {
+        children::lookup_one(&Owner::Doc(slf.clone().unbind()), key)
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn get<'py>(
+        slf: &Bound<'py, Self>,
+        key: &Bound<'py, PyAny>,
+        default: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        children::lookup_get(&Owner::Doc(slf.clone().unbind()), key, default)
+    }
+
+    fn get_all<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, Node>>> {
+        children::lookup(&Owner::Doc(slf.clone().unbind()), key, false)
     }
 }

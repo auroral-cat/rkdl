@@ -37,7 +37,7 @@ impl Parser {
 }
 
 // Documents parsed without user types all share one registry.
-fn builtin_types() -> Arc<TypeRegistry> {
+pub(crate) fn builtin_types() -> Arc<TypeRegistry> {
     static BUILTIN: OnceLock<Arc<TypeRegistry>> = OnceLock::new();
     BUILTIN.get_or_init(|| Arc::new(TypeRegistry::builtin())).clone()
 }

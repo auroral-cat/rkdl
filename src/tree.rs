@@ -24,6 +24,11 @@ impl NodeId {
     fn fresh() -> Self {
         NodeId(next_id())
     }
+
+    /// The id as a plain integer, for keying Python-side caches.
+    pub fn key(self) -> u64 {
+        self.0.get()
+    }
 }
 
 impl EntryId {

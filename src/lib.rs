@@ -1,6 +1,8 @@
+mod children;
 mod document;
 mod errors;
 mod format;
+mod node;
 mod parser;
 mod tree;
 mod values;
@@ -8,11 +10,15 @@ mod values;
 #[pyo3::pymodule]
 mod _rkdl {
     #[pymodule_export]
+    use crate::children::Children;
+    #[pymodule_export]
     use crate::document::Document;
     #[pymodule_export]
     use crate::errors::{Diagnostic, ParseError};
     #[pymodule_export]
     use crate::format::Formatter;
+    #[pymodule_export]
+    use crate::node::Node;
     #[pymodule_export]
     use crate::parser::{Parser, parse};
     #[pymodule_export]

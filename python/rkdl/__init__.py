@@ -1,7 +1,11 @@
+import collections.abc
+
 from ._rkdl import (
+    Children,
     Diagnostic,
     Document,
     Formatter,
+    Node,
     ParseError,
     Parser,
     Type,
@@ -10,9 +14,11 @@ from ._rkdl import (
 )
 
 __all__ = [
+    "Children",
     "Diagnostic",
     "Document",
     "Formatter",
+    "Node",
     "ParseError",
     "Parser",
     "Type",
@@ -21,6 +27,9 @@ __all__ = [
     "load",
     "parse",
 ]
+
+
+collections.abc.MutableSequence.register(Children)
 
 
 def load(fp):
