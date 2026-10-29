@@ -151,9 +151,9 @@ impl Node {
                         "node.children can only be set to [] or None; edit it with insert, append, pop, remove or del",
                     ));
                 }
-                children::open_block(&owner, slf.py())
+                children::open_block(slf.py(), &owner)
             }
-            _ => children::close_block(&owner, slf.py()),
+            _ => children::close_block(slf.py(), &owner),
         }
     }
 
