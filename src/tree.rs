@@ -25,7 +25,7 @@ impl NodeId {
         NodeId(next_id())
     }
 
-    /// The id as a plain integer, for keying Python-side caches.
+    /// The id as a plain integer, for keying the handle cache.
     pub fn key(self) -> u64 {
         self.0.get()
     }
@@ -34,6 +34,11 @@ impl NodeId {
 impl EntryId {
     fn fresh() -> Self {
         EntryId(next_id())
+    }
+
+    /// The id as a plain integer. Node and entry ids share one counter, so keys never collide.
+    pub fn key(self) -> u64 {
+        self.0.get()
     }
 }
 

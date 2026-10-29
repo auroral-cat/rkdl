@@ -2,6 +2,7 @@ mod children;
 mod document;
 mod errors;
 mod format;
+mod handles;
 mod node;
 mod parser;
 mod tree;

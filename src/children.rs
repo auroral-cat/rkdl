@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use kdl::{KdlDocument, KdlDocumentFormat, KdlNode, KdlNodeFormat};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
-use crate::document::{Document, lock_both};
-use crate::node::{Node, stale};
-use crate::tree::{IdTree, NodeId, Subtree, node_at, node_at_mut};
+use crate::document::{DocState, Document, lock_both};
+use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
+use crate::node::Node;
+use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
 
 /// Whose children a view or lookup is over. A node's view follows the node when it moves between documents.
 pub(crate) enum Owner {
@@ -14,11 +17,46 @@ pub(crate) enum Owner {
 }
 
 impl Owner {
-    /// The document and the parent node, or None for the top level.
-    fn locate(&self, py: Python<'_>) -> (Py<Document>, Option<NodeId>) {
+    /// Runs `op` on the owner's document and parent node (None for the top level), again if the owner moved while
+    /// `op` waited for the lock.
+    fn on_doc<R>(&self, py: Python<'_>, mut op: impl FnMut(&DocRef, Option<NodeId>) -> Result<R, Fail>) -> PyResult<R> {
         match self {
-            Owner::Doc(doc) => (doc.clone_ref(py), None),
-            Owner::Node(node) => (node.get().doc(py), Some(node.get().id)),
+            Owner::Doc(doc) => handles::on_home(&Home::new(Arc::new(doc.clone_ref(py))), |doc| op(doc, None)),
+            Owner::Node(node) => {
+                let node = node.get();
+                handles::on_home(&node.home, |doc| op(doc, Some(node.id)))
+            }
+        }
+    }
+
+    /// Reads the owner's document under its lock.
+    fn read<R: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl Fn(&DocState, Option<NodeId>) -> Result<R, Fail> + Sync,
+    ) -> PyResult<(DocRef, R)> {
+        self.on_doc(py, |doc, parent| {
+            let result = doc.get().with_state(py, |s| f(s, parent))?;
+            Ok((doc.clone(), result))
+        })
+    }
+
+    fn ids(&self, py: Python<'_>) -> PyResult<(DocRef, Vec<NodeId>)> {
+        self.read(py, |s, parent| Ok(block_ids(&s.ids, parent)?.to_vec()))
+    }
+
+    /// Handles for the nodes `choose` picks from the block. If one of them moves away before its handle exists, the
+    /// block is read again.
+    fn chosen<'py>(
+        &self,
+        py: Python<'py>,
+        choose: impl Fn(&[NodeId]) -> PyResult<Vec<NodeId>>,
+    ) -> PyResult<Vec<Bound<'py, Node>>> {
+        loop {
+            let (doc, ids) = self.ids(py)?;
+            if let Some(found) = handles_for(py, &doc, &choose(&ids)?)? {
+                return Ok(found);
+            }
         }
     }
 }
@@ -27,15 +65,24 @@ fn no_block() -> PyErr {
     PyValueError::new_err("node has no children block")
 }
 
-fn block_ids(ids: &IdTree, parent: Option<NodeId>) -> PyResult<&[NodeId]> {
+fn block_ids(ids: &IdTree, parent: Option<NodeId>) -> Result<&[NodeId], Fail> {
     match parent {
         None => Ok(ids.top()),
-        Some(p) if !ids.contains(p) => Err(stale()),
-        Some(p) => ids.children(p).ok_or_else(no_block),
+        Some(p) if !ids.contains(p) => Err(Fail::Gone),
+        Some(p) => ids.children(p).ok_or_else(|| Fail::Err(no_block())),
     }
 }
 
 // Only called after block_ids has checked the parent.
+fn block<'a>(kdl: &'a KdlDocument, ids: &IdTree, parent: Option<NodeId>) -> &'a KdlDocument {
+    match parent {
+        None => kdl,
+        Some(p) => node_at(kdl, &ids.path(p).expect("checked by block_ids"))
+            .children()
+            .expect("checked by block_ids"),
+    }
+}
+
 fn block_mut<'a>(kdl: &'a mut KdlDocument, ids: &IdTree, parent: Option<NodeId>) -> &'a mut KdlDocument {
     match parent {
         None => kdl,
@@ -46,19 +93,29 @@ fn block_mut<'a>(kdl: &'a mut KdlDocument, ids: &IdTree, parent: Option<NodeId>)
     }
 }
 
-fn subtree_ids(ids: &IdTree, root: NodeId) -> Vec<NodeId> {
-    let mut found = Vec::new();
+/// Cache keys for every node and entry under `root`, whose handles move with it.
+fn subtree_keys(ids: &IdTree, root: NodeId) -> Vec<u64> {
+    let mut keys = Vec::new();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
-        found.push(id);
+        keys.push(id.key());
+        keys.extend(ids.entries(id).iter().map(|e| e.key()));
         stack.extend(ids.children(id).into_iter().flatten());
     }
-    found
+    keys
 }
 
-fn handles<'py>(py: Python<'py>, doc: &Py<Document>, ids: &[NodeId]) -> PyResult<Vec<Bound<'py, Node>>> {
+/// None if one of the nodes has left `doc` since the ids were read.
+fn handles_for<'py>(py: Python<'py>, doc: &DocRef, ids: &[NodeId]) -> PyResult<Option<Vec<Bound<'py, Node>>>> {
     let doc = doc.bind(py);
-    ids.iter().map(|&id| Document::node_handle(doc, id)).collect()
+    let mut found = Vec::with_capacity(ids.len());
+    for &id in ids {
+        match Document::node_handle(doc, id)? {
+            Some(node) => found.push(node),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(found))
 }
 
 // Whitespace and indentation. See notes/kdl-rs.md, "Editing".
@@ -236,8 +293,7 @@ fn unplace(block: &mut KdlDocument, index: usize, nested: bool) -> KdlNode {
 
 // Structural edits.
 
-fn check_insertable(target: &Py<Document>, node: &Bound<'_, Node>) -> PyResult<Py<Document>> {
-    let source = node.get().doc(node.py());
+fn check_insertable(target: &Py<Document>, source: &Py<Document>) -> PyResult<()> {
     if !source.get().home {
         return Err(PyValueError::new_err(
             "node is already in a document; detach it first (pop, remove, del) or insert node.copy()",
@@ -247,89 +303,119 @@ fn check_insertable(target: &Py<Document>, node: &Bound<'_, Node>) -> PyResult<P
     if source.as_ptr() == target.as_ptr() {
         return Err(PyValueError::new_err("can't insert a node inside itself"));
     }
-    Ok(source)
+    Ok(())
 }
 
 fn insert(py: Python<'_>, owner: &Owner, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
-    let (target, parent) = owner.locate(py);
-    let source = check_insertable(&target, node)?;
     let id = node.get().id;
-    let moved = lock_both(py, target.get(), source.get(), |t, s| -> PyResult<Vec<NodeId>> {
-        let s = s.expect("checked that the documents differ");
-        let len = block_ids(&t.ids, parent)?.len();
-        let index = if index < 0 {
-            index.saturating_add_unsigned(len).max(0) as usize
-        } else {
-            (index as usize).min(len)
-        };
-        if s.ids.top() != [id] {
-            return Err(stale());
-        }
-        let nested = match parent {
-            None => None,
-            Some(p) => {
-                let parent_node = node_at(&t.kdl, &t.ids.path(p).expect("checked by block_ids"));
-                Some((indent_of(leading(parent_node)).to_owned(), indent_unit(&t.kdl)))
+    let home = &node.get().home;
+    let garbage = owner.on_doc(py, |target, parent| {
+        let source = home.doc();
+        check_insertable(target, &source)?;
+        let new_home = Arc::new(target.clone_ref(py));
+        lock_both(py, target.get(), source.get(), |t, s| -> Result<Garbage, Fail> {
+            let s = s.expect("checked that the documents differ");
+            let len = block_ids(&t.ids, parent)?.len();
+            if s.ids.top() != [id] {
+                // Another thread inserted it first; the retry will find it attached.
+                return match Arc::ptr_eq(&source, &home.doc()) {
+                    true => Err(Fail::Err(stale())),
+                    false => Err(Fail::Changed),
+                };
             }
-        };
-        let moved = subtree_ids(&s.ids, id);
-        let kdl_node = s.kdl.nodes_mut().remove(0);
-        let subtree = s.ids.take_subtree(id);
-        let nested = nested.as_ref().map(|(indent, unit)| (indent.as_str(), unit.as_str()));
-        place(block_mut(&mut t.kdl, &t.ids, parent), index, kdl_node, nested);
-        t.ids.put_subtree(parent, index, subtree);
-        Ok(moved)
+            let index = if index < 0 {
+                index.saturating_add_unsigned(len).max(0) as usize
+            } else {
+                (index as usize).min(len)
+            };
+            let nested = match parent {
+                None => None,
+                Some(p) => {
+                    let parent_node = node_at(&t.kdl, &t.ids.path(p).expect("checked by block_ids"));
+                    Some((indent_of(leading(parent_node)).to_owned(), indent_unit(&t.kdl)))
+                }
+            };
+            let keys = subtree_keys(&s.ids, id);
+            let kdl_node = s.kdl.nodes_mut().remove(0);
+            let subtree = s.ids.take_subtree(id);
+            let nested = nested.as_ref().map(|(indent, unit)| (indent.as_str(), unit.as_str()));
+            place(block_mut(&mut t.kdl, &t.ids, parent), index, kdl_node, nested);
+            t.ids.put_subtree(parent, index, subtree);
+            let mut garbage = Garbage::default();
+            handles::repoint(keys, &new_home, &mut garbage);
+            Ok(garbage)
+        })
     })?;
-    Document::move_handles(py, source.bind(py), target.bind(py), &moved)
-}
-
-struct Taken {
-    node: KdlNode,
-    subtree: Subtree,
-    moved: Vec<NodeId>,
+    drop(garbage);
+    Ok(())
 }
 
 /// Takes the nodes `pick` chooses out of the block, each into a private document of its own, and returns their
-/// handles. `close` also removes the block itself.
+/// handles. `close` also removes the block itself, and is a no-op if there is none.
 fn take_out<'py>(
     py: Python<'py>,
     owner: &Owner,
-    pick: impl FnOnce(&[NodeId]) -> PyResult<Vec<NodeId>> + Send,
+    pick: impl Fn(&[NodeId]) -> PyResult<Vec<NodeId>>,
     close: bool,
 ) -> PyResult<Vec<Bound<'py, Node>>> {
-    let (doc, parent) = owner.locate(py);
-    let taken = doc.get().with_state(py, |s| -> PyResult<Vec<Taken>> {
-        let picked = pick(block_ids(&s.ids, parent)?)?;
-        let mut taken = Vec::with_capacity(picked.len());
-        for id in picked {
-            let index = block_ids(&s.ids, parent)?
-                .iter()
-                .position(|&n| n == id)
-                .ok_or_else(stale)?;
-            let moved = subtree_ids(&s.ids, id);
-            let node = unplace(block_mut(&mut s.kdl, &s.ids, parent), index, parent.is_some());
-            let subtree = s.ids.take_subtree(id);
-            taken.push(Taken { node, subtree, moved });
-        }
-        if let (true, Some(p)) = (close, parent) {
-            node_at_mut(&mut s.kdl, &s.ids.path(p).expect("checked by block_ids")).clear_children();
-            s.ids.close_block(p);
-        }
-        Ok(taken)
+    let taken = owner.on_doc(py, |doc, parent| {
+        let snapshot = doc.get().with_state(py, |s| match block_ids(&s.ids, parent) {
+            Ok(ids) => Ok::<_, Fail>(Some(ids.to_vec())),
+            Err(Fail::Err(_)) if close => Ok(None),
+            Err(fail) => Err(fail),
+        })?;
+        let Some(snapshot) = snapshot else {
+            return Ok(Vec::new());
+        };
+        let picked = pick(&snapshot)?;
+        // The new homes are made up front, so the edit itself needs no Python.
+        let homes = picked
+            .iter()
+            .map(|_| {
+                let home = Py::new(py, Document::empty_home(doc.get().types.clone()))?;
+                Ok((home.clone_ref(py), Arc::new(home)))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let garbage = doc.get().with_state(py, |s| -> Result<Garbage, Fail> {
+            match block_ids(&s.ids, parent) {
+                Ok(ids) if *ids == snapshot[..] => {}
+                Ok(_) => return Err(Fail::Changed),
+                Err(Fail::Err(_)) if close => return Err(Fail::Changed),
+                Err(fail) => return Err(fail),
+            }
+            let mut garbage = Garbage::default();
+            for (&id, (home, home_ref)) in picked.iter().zip(&homes) {
+                let index = block_ids(&s.ids, parent)?
+                    .iter()
+                    .position(|&n| n == id)
+                    .expect("picked from this block");
+                let keys = subtree_keys(&s.ids, id);
+                let node = unplace(block_mut(&mut s.kdl, &s.ids, parent), index, parent.is_some());
+                let subtree = s.ids.take_subtree(id);
+                let mut kdl = KdlDocument::new();
+                kdl.nodes_mut().push(node);
+                home.get().fill(kdl, IdTree::from_subtree(subtree));
+                handles::repoint(keys, home_ref, &mut garbage);
+            }
+            if let (true, Some(p)) = (close, parent) {
+                node_at_mut(&mut s.kdl, &s.ids.path(p).expect("checked by block_ids")).clear_children();
+                s.ids.close_block(p);
+            }
+            Ok(garbage)
+        })?;
+        drop(garbage);
+        Ok(picked
+            .into_iter()
+            .zip(homes)
+            .map(|(id, (home, _))| (id, home))
+            .collect::<Vec<_>>())
     })?;
 
-    let doc = doc.bind(py);
+    // Nothing else can reach the new homes yet, so each node is still in its own.
     taken
         .into_iter()
-        .map(|t| {
-            let root = t.subtree.root();
-            let mut kdl = KdlDocument::new();
-            kdl.nodes_mut().push(t.node);
-            let ids = IdTree::from_subtree(t.subtree);
-            let home = Bound::new(py, Document::with_ids(ids, kdl, doc.get().types.clone(), true))?;
-            Document::move_handles(py, doc, &home, &t.moved)?;
-            Document::node_handle(&home, root)
-        })
+        .map(|(id, home)| Document::node_handle(home.bind(py), id)?.ok_or_else(stale))
         .collect()
 }
 
@@ -339,23 +425,24 @@ fn take_all(ids: &[NodeId]) -> PyResult<Vec<NodeId>> {
 
 /// `node.children = []`: an empty block, detaching any children it had.
 pub(crate) fn open_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
-    let (doc, parent) = owner.locate(py);
-    let id = parent.expect("only nodes open blocks");
-    let had_block = doc.get().with_state(py, |s| -> PyResult<bool> {
-        let path = s.ids.path(id).ok_or_else(stale)?;
-        let node = node_at_mut(&mut s.kdl, &path);
-        if node.children().is_some() {
-            return Ok(true);
-        }
-        let f = fmt_mut(node);
-        if f.before_children.is_empty() {
-            f.before_children = " ".into();
-        }
-        let mut block = KdlDocument::new();
-        block.set_format(KdlDocumentFormat::default());
-        node.set_children(block);
-        s.ids.open_block(id);
-        Ok(false)
+    let had_block = owner.on_doc(py, |doc, parent| {
+        let id = parent.expect("only nodes open blocks");
+        doc.get().with_state(py, |s| -> Result<bool, Fail> {
+            let path = s.ids.path(id).ok_or(Fail::Gone)?;
+            let node = node_at_mut(&mut s.kdl, &path);
+            if node.children().is_some() {
+                return Ok(true);
+            }
+            let f = fmt_mut(node);
+            if f.before_children.is_empty() {
+                f.before_children = " ".into();
+            }
+            let mut block = KdlDocument::new();
+            block.set_format(KdlDocumentFormat::default());
+            node.set_children(block);
+            s.ids.open_block(id);
+            Ok(false)
+        })
     })?;
     if had_block {
         take_out(py, owner, take_all, false)?;
@@ -365,12 +452,6 @@ pub(crate) fn open_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
 
 /// `node.children = None`: removes the block, detaching any children it had.
 pub(crate) fn close_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
-    let Owner::Node(node) = owner else {
-        unreachable!("only nodes close blocks")
-    };
-    if node.get().with_node(py, |n| n.children().is_none())? {
-        return Ok(());
-    }
     take_out(py, owner, take_all, true)?;
     Ok(())
 }
@@ -404,26 +485,27 @@ impl Key {
 pub(crate) fn lookup<'py>(owner: &Owner, key: &Bound<'py, PyAny>, first: bool) -> PyResult<Vec<Bound<'py, Node>>> {
     let py = key.py();
     let key = Key::extract(key)?;
-    let (doc, parent) = owner.locate(py);
-    let found = doc.get().with_state(py, |s| -> PyResult<Vec<NodeId>> {
-        let ids = match block_ids(&s.ids, parent) {
-            Ok(ids) => ids,
-            Err(_) if parent.is_some_and(|p| s.ids.contains(p)) => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
-        let block = match parent {
-            None => &s.kdl,
-            Some(p) => node_at(&s.kdl, &s.ids.path(p).expect("checked by block_ids"))
-                .children()
-                .expect("checked by block_ids"),
-        };
-        let matching = ids.iter().zip(block.nodes()).filter(|(_, n)| key.matches(n));
-        Ok(matching
-            .take(if first { 1 } else { usize::MAX })
-            .map(|(&id, _)| id)
-            .collect())
-    })?;
-    handles(py, &doc, &found)
+    loop {
+        let (doc, found) = owner.read(py, |s, parent| {
+            let ids = match block_ids(&s.ids, parent) {
+                Ok(ids) => ids,
+                // No block means no children to match.
+                Err(Fail::Err(_)) => return Ok(Vec::new()),
+                Err(fail) => return Err(fail),
+            };
+            let matching = ids
+                .iter()
+                .zip(block(&s.kdl, &s.ids, parent).nodes())
+                .filter(|(_, n)| key.matches(n));
+            Ok(matching
+                .take(if first { 1 } else { usize::MAX })
+                .map(|(&id, _)| id)
+                .collect())
+        })?;
+        if let Some(found) = handles_for(py, &doc, &found)? {
+            return Ok(found);
+        }
+    }
 }
 
 pub(crate) fn lookup_one<'py>(owner: &Owner, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {
@@ -455,14 +537,6 @@ impl Children {
     pub(crate) fn new(owner: Owner) -> Self {
         Children { owner }
     }
-
-    fn snapshot(&self, py: Python<'_>) -> PyResult<(Py<Document>, Vec<NodeId>)> {
-        let (doc, parent) = self.owner.locate(py);
-        let ids = doc
-            .get()
-            .with_state(py, |s| block_ids(&s.ids, parent).map(<[NodeId]>::to_vec))?;
-        Ok((doc, ids))
-    }
 }
 
 fn position(ids: &[NodeId], index: isize) -> PyResult<usize> {
@@ -484,68 +558,71 @@ fn sliced(ids: &[NodeId], slice: &Bound<'_, PySlice>) -> PyResult<Vec<NodeId>> {
         .collect())
 }
 
+fn find_id(ids: &[NodeId], id: NodeId) -> PyResult<usize> {
+    ids.iter()
+        .position(|&n| n == id)
+        .ok_or_else(|| PyValueError::new_err("node is not in this list"))
+}
+
 #[pymethods]
 impl Children {
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
-        Ok(self.snapshot(py)?.1.len())
+        Ok(self.owner.read(py, |s, parent| Ok(block_ids(&s.ids, parent)?.len()))?.1)
     }
 
     fn __getitem__<'py>(&self, index: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = index.py();
-        let (doc, ids) = self.snapshot(py)?;
         if let Ok(slice) = index.cast::<PySlice>() {
-            return Ok(PyList::new(py, handles(py, &doc, &sliced(&ids, slice)?)?)?.into_any());
+            let found = self.owner.chosen(py, |ids| sliced(ids, slice))?;
+            return Ok(PyList::new(py, found)?.into_any());
         }
-        let id = ids[position(&ids, index.extract()?)?];
-        Ok(Document::node_handle(doc.bind(py), id)?.into_any())
+        let index: isize = index.extract()?;
+        let mut found = self.owner.chosen(py, |ids| Ok(vec![ids[position(ids, index)?]]))?;
+        Ok(found.pop().expect("chose one node").into_any())
     }
 
     fn __setitem__(&self, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
         let py = node.py();
-        check_insertable(&self.owner.locate(py).0, node)?;
-        let (_, ids) = self.snapshot(py)?;
+        let (doc, ids) = self.owner.ids(py)?;
+        // Checked first so a bad node doesn't cost the old one its place.
+        check_insertable(&doc, &node.get().home.doc())?;
         let i = position(&ids, index)?;
-        let id = ids[i];
-        take_out(py, &self.owner, move |_| Ok(vec![id]), false)?;
+        take_out(py, &self.owner, |ids| Ok(vec![ids[position(ids, index)?]]), false)?;
         insert(py, &self.owner, i as isize, node)
     }
 
     fn __delitem__(&self, index: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = index.py();
-        let (_, ids) = self.snapshot(py)?;
-        let picked = match index.cast::<PySlice>() {
-            Ok(slice) => sliced(&ids, slice)?,
-            Err(_) => vec![ids[position(&ids, index.extract()?)?]],
+        match index.cast::<PySlice>() {
+            Ok(slice) => take_out(py, &self.owner, |ids| sliced(ids, slice), false)?,
+            Err(_) => {
+                let index: isize = index.extract()?;
+                take_out(py, &self.owner, |ids| Ok(vec![ids[position(ids, index)?]]), false)?
+            }
         };
-        take_out(py, &self.owner, move |_| Ok(picked), false)?;
         Ok(())
     }
 
     // Snapshots the handles first, so editing the list while iterating is well defined.
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (doc, ids) = self.snapshot(py)?;
-        Ok(PyList::new(py, handles(py, &doc, &ids)?)?.try_iter()?.into_any())
+        let found = self.owner.chosen(py, take_all)?;
+        Ok(PyList::new(py, found)?.try_iter()?.into_any())
     }
 
     fn __contains__(&self, node: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Ok(node) = node.cast::<Node>() else {
             return Ok(false);
         };
-        Ok(self.snapshot(node.py())?.1.contains(&node.get().id))
+        Ok(self.owner.ids(node.py())?.1.contains(&node.get().id))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let (doc, ids) = self.snapshot(py)?;
-        Ok(format!(
-            "Children({})",
-            PyList::new(py, handles(py, &doc, &ids)?)?.repr()?
-        ))
+        let found = self.owner.chosen(py, take_all)?;
+        Ok(format!("Children({})", PyList::new(py, found)?.repr()?))
     }
 
     fn index(&self, node: &Bound<'_, Node>) -> PyResult<usize> {
-        let (_, ids) = self.snapshot(node.py())?;
-        let id = find_id(&ids, node.get().id)?;
-        Ok(ids.iter().position(|&n| n == id).expect("just found"))
+        find_id(&self.owner.ids(node.py())?.1, node.get().id)
     }
 
     fn insert(&self, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
@@ -565,30 +642,18 @@ impl Children {
 
     #[pyo3(signature = (index=-1))]
     fn pop<'py>(&self, py: Python<'py>, index: isize) -> PyResult<Bound<'py, Node>> {
-        let mut taken = take_out(py, &self.owner, move |ids| Ok(vec![ids[position(ids, index)?]]), false)?;
+        let mut taken = take_out(py, &self.owner, |ids| Ok(vec![ids[position(ids, index)?]]), false)?;
         Ok(taken.pop().expect("took one node"))
     }
 
     fn remove(&self, node: &Bound<'_, Node>) -> PyResult<()> {
         let id = node.get().id;
-        take_out(
-            node.py(),
-            &self.owner,
-            move |ids| find_id(ids, id).map(|id| vec![id]),
-            false,
-        )?;
+        take_out(node.py(), &self.owner, |ids| Ok(vec![ids[find_id(ids, id)?]]), false)?;
         Ok(())
     }
 
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         take_out(py, &self.owner, take_all, false)?;
         Ok(())
-    }
-}
-
-fn find_id(ids: &[NodeId], id: NodeId) -> PyResult<NodeId> {
-    match ids.contains(&id) {
-        true => Ok(id),
-        false => Err(PyValueError::new_err("node is not in this list")),
     }
 }

@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use kdl::KdlDocument;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
+use pyo3::types::PyWeakrefReference;
 
 use crate::children::{self, Children, Owner};
 use crate::format::Formatter;
+use crate::handles::{self, Garbage, Home};
 use crate::node::Node;
 use crate::tree::{IdTree, NodeId};
 use crate::values::TypeRegistry;
@@ -30,9 +31,6 @@ pub struct Document {
     pub(crate) types: Arc<TypeRegistry>,
     /// A detached node's private one-node document. Never handed to Python as a Document.
     pub(crate) home: bool,
-    // A weakref.WeakValueDictionary from id key to Node. Python's own dictionary means no second Rust lock to order
-    // against the GIL.
-    cache: PyOnceLock<Py<PyAny>>,
 }
 
 impl Document {
@@ -45,7 +43,6 @@ impl Document {
             state: Mutex::new(DocState { kdl, ids }),
             types,
             home,
-            cache: PyOnceLock::new(),
         }
     }
 
@@ -65,50 +62,48 @@ impl Document {
         })
     }
 
-    fn cache<'py>(&self, py: Python<'py>) -> PyResult<&Bound<'py, PyAny>> {
-        self.cache
-            .get_or_try_init(py, || {
-                py.import("weakref")?
-                    .getattr("WeakValueDictionary")?
-                    .call0()
-                    .map(Bound::unbind)
-            })
-            .map(|cache| cache.bind(py))
+    /// Fills a private home made by `empty_home`. Only for a home no other thread can reach yet, which is why
+    /// taking its lock while another document is locked can't deadlock.
+    pub(crate) fn fill(&self, kdl: KdlDocument, ids: IdTree) {
+        let mut state = self.lock();
+        *state = DocState { kdl, ids };
+        state.check();
     }
 
-    /// The one handle for `id`, so `doc["a"] is doc["a"]`. Every way of getting a Node goes through here.
-    pub(crate) fn node_handle<'py>(slf: &Bound<'py, Document>, id: NodeId) -> PyResult<Bound<'py, Node>> {
-        let py = slf.py();
-        let cache = slf.get().cache(py)?;
-        let found = cache.call_method1("get", (id.key(),))?;
-        if !found.is_none() {
-            return Ok(found.cast_into::<Node>()?);
-        }
-        let node = Bound::new(py, Node::new(id, slf.clone().unbind()))?;
-        cache.set_item(id.key(), &node)?;
-        Ok(node)
+    pub(crate) fn empty_home(types: Arc<TypeRegistry>) -> Self {
+        let kdl = KdlDocument::new();
+        Document::with_ids(IdTree::from_document(&kdl), kdl, types, true)
     }
 
-    /// After a subtree moved from `from` to `to`, points the live handles in it at their new document.
-    pub(crate) fn move_handles(
-        py: Python<'_>,
-        from: &Bound<'_, Document>,
-        to: &Bound<'_, Document>,
-        ids: &[NodeId],
-    ) -> PyResult<()> {
-        let old = from.get().cache(py)?;
-        let new = to.get().cache(py)?;
-        for id in ids {
-            let found = old.call_method1("get", (id.key(),))?;
-            if found.is_none() {
-                continue;
+    /// The one handle for `id`, so `doc["a"] is doc["a"]`. Every way of getting a Node goes through here. None means
+    /// the node isn't in `doc` any more: the caller's view of the document is out of date and it should look again.
+    pub(crate) fn node_handle<'py>(doc: &Bound<'py, Document>, id: NodeId) -> PyResult<Option<Bound<'py, Node>>> {
+        let py = doc.py();
+        loop {
+            if let Some(node) = handles::get::<Node>(py, id.key()) {
+                return Ok(Some(node));
             }
-            let node = found.cast_into::<Node>()?;
-            node.get().set_doc(to.clone().unbind());
-            new.set_item(id.key(), &node)?;
-            old.del_item(id.key())?;
+            // Python objects are made before locking; the lock only decides whether to publish this one.
+            let home = Home::new(Arc::new(doc.clone().unbind()));
+            let node = Bound::new(py, Node::new(id, home.clone()))?;
+            let weak = PyWeakrefReference::new(&node)?.unbind();
+            let (found, published, garbage) = doc.get().with_state(py, |s| {
+                let mut garbage = Garbage::default();
+                if !s.ids.contains(id) {
+                    garbage.weakrefs.push(weak);
+                    return (false, false, garbage);
+                }
+                let published = handles::intern_locked(id.key(), weak, &home, &mut garbage);
+                (true, published, garbage)
+            });
+            drop(garbage);
+            match (found, published) {
+                (false, _) => return Ok(None),
+                (true, true) => return Ok(Some(node)),
+                // Another thread published a handle first, or one is being freed right now.
+                (true, false) => py.detach(std::thread::yield_now),
+            }
         }
-        Ok(())
     }
 }
 

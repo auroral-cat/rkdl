@@ -1,52 +1,39 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use kdl::{KdlDocument, KdlEntry, KdlIdentifier, KdlNode};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::children::{self, Children, Owner};
 use crate::document::Document;
+use crate::handles::{self, Fail, Home, stale};
 use crate::parser::builtin_types;
-use crate::tree::{IdTree, NodeId, node_at_mut};
+use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
 
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Node {
-    // Ids are global, so moving the node to another document only swaps `doc`.
+    // Ids are global, so moving the node to another document only repoints `home`.
     pub(crate) id: NodeId,
-    // Locked only to read or swap the pointer, never while a document is locked.
-    doc: Mutex<Py<Document>>,
-}
-
-pub(crate) fn stale() -> PyErr {
-    PyRuntimeError::new_err("node handle is out of step with its document (a bug in rkdl)")
+    pub(crate) home: Arc<Home>,
 }
 
 impl Node {
-    pub(crate) fn new(id: NodeId, doc: Py<Document>) -> Self {
-        Node {
-            id,
-            doc: Mutex::new(doc),
-        }
-    }
-
-    pub(crate) fn doc(&self, py: Python<'_>) -> Py<Document> {
-        self.doc.lock().expect("node pointer poisoned").clone_ref(py)
-    }
-
-    pub(crate) fn set_doc(&self, doc: Py<Document>) {
-        let old = std::mem::replace(&mut *self.doc.lock().expect("node pointer poisoned"), doc);
-        // Dropping the old document can run Python code, so do it after unlocking.
-        drop(old);
+    pub(crate) fn new(id: NodeId, home: Arc<Home>) -> Self {
+        Node { id, home }
     }
 
     /// Runs `f` on this node's KdlNode under its document's lock.
     pub(crate) fn with_node<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&mut KdlNode) -> R + Send) -> PyResult<R> {
         let id = self.id;
-        self.doc(py).get().with_state(py, |s| {
-            let path = s.ids.path(id).ok_or_else(stale)?;
-            Ok(f(node_at_mut(&mut s.kdl, &path)))
+        let mut f = Some(f);
+        handles::on_home(&self.home, |doc| {
+            doc.get().with_state(py, |s| {
+                let path = s.ids.path(id).ok_or(Fail::Gone)?;
+                let f = f.take().expect("runs once it finds the node");
+                Ok(f(node_at_mut(&mut s.kdl, &path)))
+            })
         })
     }
 }
@@ -58,7 +45,8 @@ pub(crate) fn detached<'py>(py: Python<'py>, node: KdlNode, types: Arc<TypeRegis
     let ids = IdTree::from_document(&kdl);
     let id = ids.top()[0];
     let home = Bound::new(py, Document::with_ids(ids, kdl, types, true))?;
-    Document::node_handle(&home, id)
+    // Nothing else can reach a new home, so the node is still there.
+    Document::node_handle(&home, id)?.ok_or_else(stale)
 }
 
 fn entry(value: &Bound<'_, PyAny>, key: Option<String>, types: &TypeRegistry) -> PyResult<KdlEntry> {
@@ -149,9 +137,15 @@ impl Node {
     }
 
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Node>> {
-        let doc = self.doc(py);
-        let node = self.with_node(py, |n| n.clone())?;
-        detached(py, node, doc.get().types.clone())
+        let mut types = None;
+        let node = handles::on_home(&self.home, |doc| {
+            types = Some(doc.get().types.clone());
+            doc.get().with_state(py, |s| {
+                let path = s.ids.path(self.id).ok_or(Fail::Gone)?;
+                Ok(node_at(&s.kdl, &path).clone())
+            })
+        })?;
+        detached(py, node, types.expect("set before reading the node"))
     }
 
     fn __getitem__<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {
