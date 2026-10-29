@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 kdl = { version = "6.7", default-features = false, features = ["span"] }
+# The graphical handler without terminal probing: theme and width are fixed, since reports go into exception text.
+miette = { version = "7.6", default-features = false, features = ["fancy-no-syscall"] }
 pyo3 = { version = "0.30.1", features = ["abi3-py310"] }
 
 [lib]

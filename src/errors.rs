@@ -1,4 +1,5 @@
 use kdl::{KdlDiagnostic, KdlError};
+use miette::{GraphicalReportHandler, GraphicalTheme};
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -49,14 +50,26 @@ pub(crate) fn parse_error(py: Python<'_>, err: &KdlError) -> PyErr {
         .iter()
         .map(|d| Diagnostic::from_kdl(&err.input, d))
         .collect();
-    // kdl-rs's own Display is always "Failed to parse KDL document", so lead with the first diagnostic.
-    let message = match diagnostics.first() {
-        Some(d) => format!("{}:{}: {}", d.line, d.column, d.message),
-        None => err.to_string(),
-    };
-    let exc = ParseError::new_err(message);
-    if let Err(e) = exc.value(py).setattr("diagnostics", diagnostics) {
-        return e;
+    let first = diagnostics.first().map(|d| (d.line, d.column, d.offset));
+    let exc = ParseError::new_err(render(err));
+    let value = exc.value(py);
+    let set = value
+        .setattr("line", first.map(|f| f.0))
+        .and_then(|_| value.setattr("column", first.map(|f| f.1)))
+        .and_then(|_| value.setattr("offset", first.map(|f| f.2)))
+        .and_then(|_| value.setattr("diagnostics", diagnostics));
+    match set {
+        Ok(()) => exc,
+        Err(e) => e,
     }
-    exc
+}
+
+/// Exception text ends up in log files, so render without colour or terminal hyperlinks.
+fn render(err: &KdlError) -> String {
+    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor()).with_links(false);
+    let mut out = String::new();
+    match handler.render_report(&mut out, err) {
+        Ok(()) => out.trim_end().to_owned(),
+        Err(_) => err.to_string(),
+    }
 }
