@@ -9,16 +9,13 @@ use crate::values::TypeRegistry;
 
 pub(crate) struct DocState {
     pub(crate) kdl: KdlDocument,
-    // TODO(02): make this non-optional once IdTree::from_document exists.
-    pub(crate) ids: Option<IdTree>,
+    pub(crate) ids: IdTree,
 }
 
 impl DocState {
     fn check(&self) {
-        if cfg!(debug_assertions)
-            && let Some(ids) = &self.ids
-        {
-            ids.check_shape(&self.kdl);
+        if cfg!(debug_assertions) {
+            self.ids.check_shape(&self.kdl);
         }
     }
 }
@@ -34,7 +31,10 @@ pub struct Document {
 impl Document {
     pub(crate) fn new(kdl: KdlDocument, types: Arc<TypeRegistry>) -> Self {
         Document {
-            state: Mutex::new(DocState { kdl, ids: None }),
+            state: Mutex::new(DocState {
+                ids: IdTree::from_document(&kdl),
+                kdl,
+            }),
             types,
         }
     }
