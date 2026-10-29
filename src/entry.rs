@@ -41,7 +41,7 @@ fn set_ty(entry: &mut KdlEntry, ty: Option<String>) {
     match ty {
         // The same annotation keeps its spelling.
         Some(ty) if entry.ty().is_some_and(|old| old.value() == ty) => {}
-        Some(ty) => entry.set_ty(ty),
+        Some(ty) => entry.set_ty(values::identifier(ty)),
         None if entry.ty().is_some() => *entry = without_ty(entry),
         None => {}
     }
@@ -69,7 +69,7 @@ fn without_ty(entry: &KdlEntry) -> KdlEntry {
 
 pub(crate) fn new_entry(key: Option<String>, value: KdlValue, ty: Option<String>) -> KdlEntry {
     let mut entry = match key {
-        Some(key) => KdlEntry::new_prop(key, KdlValue::Null),
+        Some(key) => KdlEntry::new_prop(values::identifier(key), KdlValue::Null),
         None => KdlEntry::new(KdlValue::Null),
     };
     store(&mut entry, value, ty);

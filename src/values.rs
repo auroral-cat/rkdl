@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use kdl::{KdlEntry, KdlValue};
+use kdl::{KdlEntry, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -306,6 +306,19 @@ pub fn canonical_repr(value: &KdlValue) -> String {
         return quoted(s);
     }
     text
+}
+
+/// An identifier (node name, property key or type annotation) that prints as text which parses back. kdl-rs prints
+/// identifiers the way it prints string values, so it has the same bare `+.7` problem.
+pub fn identifier(name: impl Into<String>) -> KdlIdentifier {
+    let name = name.into();
+    let value = KdlValue::String(name.clone());
+    let repr = canonical_repr(&value);
+    let mut ident = KdlIdentifier::from(name);
+    if repr != value.to_string() {
+        ident.set_repr(repr);
+    }
+    ident
 }
 
 fn parses_back_as(text: &str, s: &str) -> bool {
