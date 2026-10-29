@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
+use kdl::{KdlEntry, KdlIdentifier, KdlValue};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
 
 use crate::document::{DocState, Document};
-use crate::handles::{self, DocRef, Fail, Home, stale};
+use crate::edit::{Item, chosen, read};
+use crate::handles::{self, DocRef, Fail, Home};
 use crate::index::{not_in, pick_one, pick_slice};
 use crate::node::Node;
-use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
-use crate::values::{self, TypeRegistry};
+use crate::tree::{EntryId, node_at_mut};
+use crate::values;
 
 fn removed() -> PyErr {
     PyRuntimeError::new_err("entry was removed")
@@ -37,8 +38,8 @@ fn set_ty(entry: &mut KdlEntry, ty: Option<String>) {
     }
 }
 
-/// `entry` with its type annotation removed. KdlEntry can set an annotation but not remove one (`ty_mut` is an
-/// `Option<&mut>`, unlike KdlNode's), so this rebuilds the entry around the same name, value, format and span. A
+/// `entry` with its type annotation removed. `KdlEntry` can set an annotation but not remove one (`ty_mut` is an
+/// `Option<&mut>`, unlike `KdlNode`'s), so this rebuilds the entry around the same name, value, format and span. A
 /// candidate for an upstream fix.
 fn without_ty(entry: &KdlEntry) -> KdlEntry {
     let mut new = match entry.name() {
@@ -55,6 +56,37 @@ fn without_ty(entry: &KdlEntry) -> KdlEntry {
     }
     new.set_span(entry.span());
     new
+}
+
+/// What an entry holds apart from its key and the whitespace around it: the value, its annotation, and both as
+/// spelled in the file.
+pub(crate) struct Contents {
+    value: KdlValue,
+    ty: Option<KdlIdentifier>,
+    repr: String,
+}
+
+pub(crate) fn contents(entry: &KdlEntry) -> Contents {
+    let repr = match entry.format() {
+        Some(f) => f.value_repr.clone(),
+        None => values::canonical_repr(entry.value()),
+    };
+    Contents {
+        value: entry.value().clone(),
+        ty: entry.ty().cloned(),
+        repr,
+    }
+}
+
+/// Moves `contents` into `entry`, spellings included.
+pub(crate) fn put_contents(entry: &mut KdlEntry, contents: Contents) {
+    entry.set_value(contents.value);
+    match contents.ty {
+        Some(ty) => entry.set_ty(ty),
+        None if entry.ty().is_some() => *entry = without_ty(entry),
+        None => {}
+    }
+    values::set_value_repr(entry, contents.repr);
 }
 
 pub(crate) fn new_entry(key: Option<String>, value: KdlValue, ty: Option<String>) -> KdlEntry {
@@ -74,164 +106,6 @@ fn entry_mut(s: &mut DocState, id: EntryId) -> Result<&mut KdlEntry, Fail> {
     };
     let path = s.ids.path(node).expect("an entry's node is in the tree");
     Ok(&mut node_at_mut(&mut s.kdl, &path).entries_mut()[index])
-}
-
-// Snapshots and edits, shared by the views.
-
-/// One entry as read under the lock, to work on once it's released.
-#[derive(Clone)]
-pub(crate) struct Item {
-    pub(crate) id: EntryId,
-    pub(crate) name: Option<KdlIdentifier>,
-    pub(crate) value: KdlValue,
-    pub(crate) ty: Option<String>,
-}
-
-impl Item {
-    fn new(id: EntryId, entry: &KdlEntry) -> Self {
-        Item {
-            id,
-            name: entry.name().cloned(),
-            value: entry.value().clone(),
-            ty: entry.ty().map(|t| t.value().to_owned()),
-        }
-    }
-
-    pub(crate) fn key(&self) -> Option<&str> {
-        self.name.as_ref().map(|n| n.value())
-    }
-
-    pub(crate) fn to_python(&self, py: Python<'_>, types: &TypeRegistry) -> PyResult<Py<PyAny>> {
-        values::to_python(py, &self.value, self.ty.as_deref(), types)
-    }
-
-    // Values may change between planning an edit and applying it. Which entries there are, their keys and their
-    // annotations may not, since the plan depends on them.
-    fn same_shape(&self, other: &Item) -> bool {
-        self.id == other.id && self.name == other.name && self.ty == other.ty
-    }
-}
-
-fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
-    let path = s.ids.path(node).ok_or_else(|| Fail::Missing(stale()))?;
-    let entries = node_at(&s.kdl, &path).entries();
-    Ok(s.ids
-        .entries(node)
-        .iter()
-        .zip(entries)
-        .map(|(&id, e)| Item::new(id, e))
-        .collect())
-}
-
-/// A node's entries in file order, and the document they were read from.
-pub(crate) struct Snapshot {
-    pub(crate) doc: DocRef,
-    pub(crate) items: Vec<Item>,
-}
-
-impl Snapshot {
-    pub(crate) fn types(&self) -> &TypeRegistry {
-        &self.doc.get().types
-    }
-}
-
-pub(crate) fn read(py: Python<'_>, node: &Node) -> PyResult<Snapshot> {
-    handles::on_home(&node.home, |doc| {
-        let items = doc.get().with_state(py, |s| items(s, node.id))?;
-        Ok(Snapshot {
-            doc: doc.clone(),
-            items,
-        })
-    })
-}
-
-/// A node's entries, open for editing. Edits go to the KdlNode and the IdTree together.
-pub(crate) struct Target<'a> {
-    kdl: &'a mut KdlNode,
-    ids: &'a mut IdTree,
-    node: NodeId,
-}
-
-impl Target<'_> {
-    fn index(&self, id: EntryId) -> usize {
-        self.ids.entry_position(id).expect("planned from this node").1
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.kdl.entries().len()
-    }
-
-    pub(crate) fn entry_mut(&mut self, id: EntryId) -> &mut KdlEntry {
-        let index = self.index(id);
-        &mut self.kdl.entries_mut()[index]
-    }
-
-    // Plans compute indexes from a snapshot with the same shape, so they're in bounds and KdlNode's panicking
-    // insert/remove aren't needed.
-    pub(crate) fn insert(&mut self, index: usize, entry: KdlEntry) {
-        self.kdl.entries_mut().insert(index, entry);
-        self.ids.insert_entry(self.node, index);
-    }
-
-    pub(crate) fn remove(&mut self, id: EntryId) {
-        let index = self.index(id);
-        self.kdl.entries_mut().remove(index);
-        self.ids.remove_entry(id);
-    }
-}
-
-/// Plans an edit from a snapshot of the node's entries, with Python available, then applies the plan under the
-/// lock. If the entries changed shape in between, it plans again.
-pub(crate) fn edit<P: Send, R: Send>(
-    py: Python<'_>,
-    node: &Node,
-    mut plan: impl FnMut(&Snapshot) -> PyResult<P>,
-    apply: impl Fn(Target<'_>, P) -> R + Sync,
-) -> PyResult<R> {
-    handles::on_home(&node.home, |doc| {
-        let snapshot = Snapshot {
-            doc: doc.clone(),
-            items: doc.get().with_state(py, |s| items(s, node.id))?,
-        };
-        let planned = plan(&snapshot)?;
-        // A plan that can't be applied goes back out unapplied: it may hold Python objects, which are dropped only
-        // once the lock is released.
-        let applied = doc.get().with_state(py, |s| {
-            let now = match items(s, node.id) {
-                Ok(now) => now,
-                Err(fail) => return Err((fail, planned)),
-            };
-            let same =
-                now.len() == snapshot.items.len() && now.iter().zip(&snapshot.items).all(|(a, b)| a.same_shape(b));
-            if !same {
-                return Err((Fail::Changed, planned));
-            }
-            let path = s.ids.path(node.id).expect("found by items");
-            let target = Target {
-                kdl: node_at_mut(&mut s.kdl, &path),
-                ids: &mut s.ids,
-                node: node.id,
-            };
-            Ok(apply(target, planned))
-        });
-        applied.map_err(|(fail, _)| fail)
-    })
-}
-
-/// Handles for the entries `choose` picks. If one of them leaves the document before its handle exists, the node
-/// is read again.
-pub(crate) fn chosen<'py>(
-    py: Python<'py>,
-    node: &Node,
-    choose: impl Fn(&[Item]) -> PyResult<Vec<EntryId>>,
-) -> PyResult<Vec<Bound<'py, Entry>>> {
-    loop {
-        let snapshot = read(py, node)?;
-        let ids = choose(&snapshot.items)?;
-        if let Some(found) = handles::publish_all(snapshot.doc.bind(py), &ids, Entry::handle)? {
-            return Ok(found);
-        }
-    }
 }
 
 // The handle.
@@ -272,7 +146,7 @@ impl Entry {
             let item = doc
                 .get()
                 .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e)))?;
-            Ok((item, doc.clone()))
+            Ok((item, Arc::clone(doc)))
         })
     }
 }
@@ -302,7 +176,7 @@ impl Entry {
             let (value, ty) = values::from_python(value, before.as_deref(), &doc.get().types)?;
             doc.get().with_state(py, |s| {
                 let entry = entry_mut(s, self.id)?;
-                if entry.ty().map(|t| t.value()) != before.as_deref() {
+                if entry.ty().map(KdlIdentifier::value) != before.as_deref() {
                     return Err(Fail::Changed);
                 }
                 store(entry, value, ty);
@@ -344,13 +218,18 @@ impl Entry {
             Ok(value) => value.bind(py).repr()?.to_string(),
             Err(_) => values::canonical_repr(&item.value),
         };
-        let ty = item.ty.as_deref().map(|t| format!("({t})")).unwrap_or_default();
+        let ty = item
+            .ty
+            .as_deref()
+            .map(|t| format!("({})", values::identifier(t)))
+            .unwrap_or_default();
         Ok(match item.key() {
-            Some(key) => format!("<Entry {key}={ty}{value}>"),
+            Some(key) => format!("<Entry {}={ty}{value}>", values::identifier(key)),
             None => format!("<Entry {ty}{value}>"),
         })
     }
 
+    #[expect(clippy::needless_pass_by_value, reason = "PyO3 extracts arguments as PyRef by value")]
     fn __eq__(&self, other: PyRef<'_, Entry>) -> bool {
         self.id == other.id
     }
@@ -428,6 +307,29 @@ impl Entries {
 
     fn count(&self, entry: &Bound<'_, PyAny>) -> PyResult<usize> {
         Ok(usize::from(self.__contains__(entry)?))
+    }
+
+    /// Equal to an `Entries` or a list holding the same entries in the same order. Like a list, it isn't equal to
+    /// a tuple.
+    fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = other.py();
+        let theirs: Vec<Option<EntryId>> = if let Ok(other) = other.cast::<Entries>() {
+            read(py, other.get().node.get())?
+                .items
+                .iter()
+                .map(|i| Some(i.id))
+                .collect()
+        } else if let Ok(other) = other.cast::<PyList>() {
+            other
+                .iter()
+                .map(|e| e.cast::<Entry>().ok().map(|e| e.get().id))
+                .collect()
+        } else {
+            return Ok(py.NotImplemented().into_bound(py));
+        };
+        let ours = read(py, self.node.get())?.items;
+        let same = ours.len() == theirs.len() && ours.iter().zip(&theirs).all(|(a, b)| Some(a.id) == *b);
+        Ok(same.into_pyobject(py)?.to_owned().into_any())
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {

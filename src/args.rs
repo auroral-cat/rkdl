@@ -2,9 +2,11 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
-use crate::entry::{Entry, Item, Snapshot, chosen, edit, new_entry, read, store};
+use crate::edit::{Item, Snapshot, chosen, edit, read};
+use crate::entry::{Entry, contents, new_entry, put_contents, store};
 use crate::index::{insert_at, not_in, pick_one, pick_slice};
 use crate::node::Node;
+use crate::tree::EntryId;
 use crate::values;
 
 /// The node's arguments: (index in the entry list, item).
@@ -16,11 +18,25 @@ fn arg(items: &[Item], index: isize) -> PyResult<&Item> {
     Ok(pick_one(&args(items), index, "args")?.1)
 }
 
-fn values<'py>(py: Python<'py>, snapshot: &Snapshot) -> PyResult<Vec<Py<PyAny>>> {
+fn arg_values(py: Python<'_>, snapshot: &Snapshot) -> PyResult<Vec<Py<PyAny>>> {
     args(&snapshot.items)
         .into_iter()
         .map(|(_, item)| item.to_python(py, snapshot.types()))
         .collect()
+}
+
+fn arg_ids(items: &[Item]) -> Vec<EntryId> {
+    args(items).into_iter().map(|(_, i)| i.id).collect()
+}
+
+/// Removes the arguments `pick` chooses from the argument ids.
+fn remove_args(py: Python<'_>, node: &Node, pick: impl Fn(&[EntryId]) -> PyResult<Vec<EntryId>>) -> PyResult<()> {
+    edit(
+        py,
+        node,
+        |snapshot| pick(&arg_ids(&snapshot.items)),
+        |mut target, ids| ids.into_iter().for_each(|id| target.remove(id)),
+    )
 }
 
 /// The first argument equal to `value`, by Python's `==`.
@@ -59,8 +75,8 @@ impl Args {
         let py = index.py();
         let snapshot = read(py, self.node.get())?;
         if let Ok(slice) = index.cast::<PySlice>() {
-            let values = values(py, &snapshot)?;
-            return Ok(PyList::new(py, pick_slice(&values, slice)?)?.into_any());
+            let found = arg_values(py, &snapshot)?;
+            return Ok(PyList::new(py, pick_slice(&found, slice)?)?.into_any());
         }
         let item = arg(&snapshot.items, index.extract()?)?;
         Ok(item.to_python(py, snapshot.types())?.into_bound(py))
@@ -85,21 +101,13 @@ impl Args {
 
     fn __delitem__(&self, index: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = index.py();
-        let slice = index.cast::<PySlice>().ok();
-        let index: Option<isize> = if slice.is_some() { None } else { Some(index.extract()?) };
-        edit(
-            py,
-            self.node.get(),
-            |snapshot| {
-                let ids: Vec<_> = args(&snapshot.items).into_iter().map(|(_, i)| i.id).collect();
-                match (&slice, index) {
-                    (Some(slice), _) => Ok(pick_slice(&ids, slice)?.into_iter().copied().collect()),
-                    (None, Some(index)) => Ok(vec![*pick_one(&ids, index, "args")?]),
-                    (None, None) => unreachable!("an index or a slice"),
-                }
-            },
-            |mut target, ids| ids.into_iter().for_each(|id| target.remove(id)),
-        )
+        if let Ok(slice) = index.cast::<PySlice>() {
+            return remove_args(py, self.node.get(), |ids| {
+                Ok(pick_slice(ids, slice)?.into_iter().copied().collect())
+            });
+        }
+        let index: isize = index.extract()?;
+        remove_args(py, self.node.get(), |ids| Ok(vec![*pick_one(ids, index, "args")?]))
     }
 
     /// Puts the new argument where the current `index`-th one is, so properties between arguments stay put.
@@ -125,10 +133,10 @@ impl Args {
         self.insert(isize::MAX, value)
     }
 
-    fn extend(&self, values: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn extend(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
         // Collected first, so `args.extend(args)` ends.
-        let values: Vec<_> = values.try_iter()?.collect::<PyResult<_>>()?;
-        values.iter().try_for_each(|v| self.append(v))
+        let new: Vec<_> = iterable.try_iter()?.collect::<PyResult<_>>()?;
+        new.iter().try_for_each(|v| self.append(v))
     }
 
     #[pyo3(signature = (index=-1))]
@@ -161,12 +169,27 @@ impl Args {
     }
 
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
+        remove_args(py, self.node.get(), |ids| Ok(ids.to_vec()))
+    }
+
+    /// Reverses the arguments' values in place. Each argument's slot keeps its whitespace and its place among the
+    /// properties; the values move with their annotations and spellings.
+    fn reverse(&self, py: Python<'_>) -> PyResult<()> {
         edit(
             py,
             self.node.get(),
-            |snapshot| Ok(args(&snapshot.items).into_iter().map(|(_, i)| i.id).collect::<Vec<_>>()),
-            |mut target, ids| ids.into_iter().for_each(|id| target.remove(id)),
+            |snapshot| Ok(arg_ids(&snapshot.items)),
+            |mut target, ids| {
+                let moved: Vec<_> = ids.iter().map(|&id| contents(target.entry_mut(id))).collect();
+                for (&id, c) in ids.iter().zip(moved.into_iter().rev()) {
+                    put_contents(target.entry_mut(id), c);
+                }
+            },
         )
+    }
+
+    fn __iadd__(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.extend(iterable)
     }
 
     fn index(&self, value: &Bound<'_, PyAny>) -> PyResult<usize> {
@@ -182,7 +205,7 @@ impl Args {
         let py = value.py();
         let snapshot = read(py, self.node.get())?;
         let mut count = 0;
-        for v in values(py, &snapshot)? {
+        for v in arg_values(py, &snapshot)? {
             count += usize::from(v.bind(py).eq(value)?);
         }
         Ok(count)
@@ -194,14 +217,14 @@ impl Args {
 
     // Converts every value first, so editing the node while iterating is well defined.
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let values = values(py, &read(py, self.node.get())?)?;
-        Ok(PyList::new(py, values)?.try_iter()?.into_any())
+        let found = arg_values(py, &read(py, self.node.get())?)?;
+        Ok(PyList::new(py, found)?.try_iter()?.into_any())
     }
 
     fn __reversed__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let mut values = values(py, &read(py, self.node.get())?)?;
-        values.reverse();
-        Ok(PyList::new(py, values)?.try_iter()?.into_any())
+        let mut found = arg_values(py, &read(py, self.node.get())?)?;
+        found.reverse();
+        Ok(PyList::new(py, found)?.try_iter()?.into_any())
     }
 
     /// The handle for the `index`-th argument.
@@ -211,7 +234,7 @@ impl Args {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let values = values(py, &read(py, self.node.get())?)?;
-        Ok(format!("Args({})", PyList::new(py, values)?.repr()?))
+        let found = arg_values(py, &read(py, self.node.get())?)?;
+        Ok(format!("Args({})", PyList::new(py, found)?.repr()?))
     }
 }

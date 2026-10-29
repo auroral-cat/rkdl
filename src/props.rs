@@ -2,12 +2,13 @@ use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::entry::{Entry, Item, Snapshot, chosen, edit, new_entry, read, store};
+use crate::edit::{Item, Snapshot, chosen, edit, read};
+use crate::entry::{Entry, new_entry, store};
 use crate::node::Node;
 use crate::values;
 
-/// The entry `props[key]` reads, writes and deletes: the last one with that key, which is KdlNode::entry's rule.
-/// Deleting doesn't use KdlNode::remove, which takes the first match and compares key spellings, so it never finds a
+/// The entry `props[key]` reads, writes and deletes: the last one with that key, which is `KdlNode::entry`'s rule.
+/// Deleting doesn't use `KdlNode::remove`, which takes the first match and compares key spellings, so it never finds a
 /// parsed key (the parser records every key's spelling).
 fn last<'a>(items: &'a [Item], key: &str) -> Option<&'a Item> {
     items.iter().rev().find(|i| i.key() == Some(key))
@@ -50,23 +51,34 @@ impl Props {
         Props { node }
     }
 
-    fn set(&self, key: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn set(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         edit(
             value.py(),
             self.node.get(),
             |snapshot| {
-                let found = last(&snapshot.items, &key);
+                let found = last(&snapshot.items, key);
                 let (value, ty) = values::from_python(value, found.and_then(|i| i.ty.as_deref()), snapshot.types())?;
                 Ok((found.map(|i| i.id), value, ty))
             },
-            |mut target, (found, value, ty)| match found {
-                Some(id) => store(target.entry_mut(id), value, ty),
-                None => {
+            |mut target, (found, value, ty)| {
+                if let Some(id) = found {
+                    store(target.entry_mut(id), value, ty);
+                } else {
                     let end = target.len();
-                    target.insert(end, new_entry(Some(key.clone()), value, ty));
+                    target.insert(end, new_entry(Some(key.to_owned()), value, ty));
                 }
             },
         )
+    }
+
+    /// A plain dict of the properties.
+    fn dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let snapshot = read(py, self.node.get())?;
+        let dict = PyDict::new(py);
+        for key in keys(&snapshot.items) {
+            dict.set_item(key, get(py, &snapshot, key)?)?;
+        }
+        Ok(dict)
     }
 
     /// Removes the entry `del` picks, and returns the value `[]` reads, as `MutableMapping.pop` would.
@@ -75,11 +87,9 @@ impl Props {
             py,
             self.node.get(),
             |snapshot| {
-                let Some(value) = get(py, snapshot, key)? else {
-                    return Ok(None);
-                };
-                let item = last(&snapshot.items, key).ok_or_else(|| key_error(key))?;
-                Ok(Some((item.id, value)))
+                last(&snapshot.items, key)
+                    .map(|item| Ok((item.id, item.to_python(py, snapshot.types())?)))
+                    .transpose()
             },
             |mut target, planned| {
                 planned.map(|(id, value)| {
@@ -97,7 +107,7 @@ impl Props {
         Ok(keys(&read(py, self.node.get())?.items).len())
     }
 
-    fn __getitem__<'py>(&self, key: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = key.py();
         let found = match str_key(key) {
             Some(k) => get(py, &read(py, self.node.get())?, &k)?,
@@ -109,7 +119,7 @@ impl Props {
     /// Writes the entry `[]` reads, or adds a property at the end.
     fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let key = str_key(key).ok_or_else(|| PyTypeError::new_err("property keys must be str"))?;
-        self.set(key, value)
+        self.set(&key, value)
     }
 
     fn __delitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -192,7 +202,7 @@ impl Props {
         Ok(())
     }
 
-    /// Removes every property. Not through `del`, which can't find parsed keys.
+    /// Removes every property. Not through `KdlNode::remove`, which can't find parsed keys.
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         edit(
             py,
@@ -207,6 +217,45 @@ impl Props {
             },
             |mut target, ids| ids.into_iter().for_each(|id| target.remove(id)),
         )
+    }
+
+    /// Removes and returns the last property, as `dict.popitem` does. With duplicate keys that's the entry `[]`
+    /// reads, and an earlier one with the same key stays.
+    fn popitem(&self, py: Python<'_>) -> PyResult<(String, Py<PyAny>)> {
+        edit(
+            py,
+            self.node.get(),
+            |snapshot| {
+                let item = snapshot
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|i| i.name.is_some())
+                    .ok_or_else(|| PyKeyError::new_err("popitem(): props is empty"))?;
+                let key = item.key().expect("a property").to_owned();
+                Ok((item.id, key, item.to_python(py, snapshot.types())?))
+            },
+            |mut target, (id, key, value)| {
+                target.remove(id);
+                (key, value)
+            },
+        )
+    }
+
+    /// `Mapping`'s equality: the same keys with equal values, compared as dicts.
+    fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = other.py();
+        let mapping = py.import("collections.abc")?.getattr("Mapping")?;
+        if !other.is_instance(&mapping)? {
+            return Ok(py.NotImplemented().into_bound(py));
+        }
+        let theirs = PyDict::new(py);
+        for pair in other.call_method0("items")?.try_iter()? {
+            let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = pair?.extract()?;
+            theirs.set_item(key, value)?;
+        }
+        let same = self.dict(py)?.eq(theirs)?;
+        Ok(same.into_pyobject(py)?.to_owned().into_any())
     }
 
     fn keys<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
@@ -230,12 +279,7 @@ impl Props {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let snapshot = read(py, self.node.get())?;
-        let dict = PyDict::new(py);
-        for key in keys(&snapshot.items) {
-            dict.set_item(key, get(py, &snapshot, key)?)?;
-        }
-        Ok(format!("Props({})", dict.repr()?))
+        Ok(format!("Props({})", self.dict(py)?.repr()?))
     }
 }
 

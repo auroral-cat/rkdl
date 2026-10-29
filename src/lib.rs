@@ -1,6 +1,7 @@
 mod args;
 mod children;
 mod document;
+mod edit;
 mod entry;
 mod errors;
 mod format;

@@ -120,6 +120,55 @@ def test_args_clear_keeps_props():
     assert str(d) == "n a=1 b=2\n"
 
 
+def test_props_equal_mappings():
+    _, n = node("n 1 a=1 b=#null\n")
+    assert n.props == {"b": None, "a": 1}
+    assert {"a": 1, "b": None} == n.props
+    assert n.props != {"a": 1}
+    assert n.props != {"a": 2, "b": None}
+    assert n.props == rkdl.Node("m", a=1, b=None).props
+    assert n.props != [("a", 1), ("b", None)]
+    with pytest.raises(TypeError):
+        hash(n.props)
+
+
+def test_props_popitem_takes_the_last():
+    d, n = node("n a=1 2 b=2\n")
+    assert n.props.popitem() == ("b", 2)
+    assert n.props.popitem() == ("a", 1)
+    assert str(d) == "n 2\n"
+    with pytest.raises(KeyError):
+        n.props.popitem()
+
+
+def test_args_reverse_keeps_layout():
+    d, n = node("n 1  (u8)2 a=3 0x10 /-x 4\n")
+    n.args.reverse()
+    assert str(d) == "n 4  0x10 a=3 (u8)2 /-x 1\n"
+    assert list(n.args) == [4, 16, 2, 1]
+    assert n.args.entry(2).type == "u8"
+
+
+def test_args_reverse_none_or_one():
+    d, n = node("n a=1\n")
+    n.args.reverse()
+    n.args.append(5)
+    n.args.reverse()
+    assert str(d) == "n 5 a=1\n"
+
+
+def test_args_iadd():
+    d, n = node("n 1 a=1\n")
+    args = n.args
+    args += (2, 3)
+    assert isinstance(args, rkdl.Args)
+    assert str(d) == "n 1 2 3 a=1\n"
+    args += args
+    assert list(n.args) == [1, 2, 3, 1, 2, 3]
+    with pytest.raises(TypeError):
+        args += 5
+
+
 # Arguments and properties interleaved
 
 
@@ -265,6 +314,14 @@ def test_duplicate_keys_read_and_write_the_last():
     assert n.props.entry("a") is n.entries[1]
 
 
+def test_duplicate_keys_equality_and_popitem():
+    d, n = node("n a=1 b=2 a=3\n")
+    assert n.props == {"a": 3, "b": 2}
+    assert n.props.popitem() == ("a", 3)
+    assert n.props == {"a": 1, "b": 2}
+    assert str(d) == "n a=1 b=2\n"
+
+
 def test_del_removes_the_duplicate_props_reads():
     n = rkdl.Node("n", props={"a": 1}, a=2)
     assert n.props["a"] == 2
@@ -331,6 +388,25 @@ def test_entry_attributes():
     assert (name, value) == ("port", 8080)
     with pytest.raises(AttributeError):
         prop.name = "other"
+
+
+def test_entry_repr_quotes_keys_and_types():
+    _, n = node('n "a b"=("my type")1 "+.7"=2\n')
+    assert repr(n.props.entry("a b")) == '<Entry "a b"=("my type")1>'
+    assert repr(n.props.entry("+.7")) == '<Entry "+.7"=2>'
+
+
+def test_entries_equality_is_by_identity():
+    _, n = node("n 1 a=1\n")
+    _, m = node("n 1 a=1\n")
+    assert n.entries == list(n.entries)
+    assert n.entries == n.entries
+    assert n.entries != m.entries
+    assert n.entries != list(n.entries)[::-1]
+    assert n.entries != [1, 1]
+    assert n.entries != tuple(n.entries)
+    with pytest.raises(TypeError):
+        hash(n.entries)
 
 
 def test_removed_entry_is_dead():
