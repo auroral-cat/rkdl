@@ -10,7 +10,10 @@ license = "MIT OR Apache-2.0"
 dynamic = ["version"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "hypothesis>=6.168.5",
+    "pytest",
+]
 
 [tool.maturin]
 python-source = "python"
