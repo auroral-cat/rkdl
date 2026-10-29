@@ -5,10 +5,13 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
+use crate::args::Args;
 use crate::children::{self, Children, Owner};
 use crate::document::Document;
+use crate::entry::Entries;
 use crate::handles::{self, Fail, Home, stale};
 use crate::parser::builtin_types;
+use crate::props::Props;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
 
@@ -111,6 +114,21 @@ impl Node {
     #[setter]
     fn set_type(&self, py: Python<'_>, ty: Option<String>) -> PyResult<()> {
         self.with_node(py, |n| *n.ty_mut() = ty.map(KdlIdentifier::from))
+    }
+
+    #[getter]
+    fn args(slf: &Bound<'_, Self>) -> Args {
+        Args::new(slf.clone().unbind())
+    }
+
+    #[getter]
+    fn props(slf: &Bound<'_, Self>) -> Props {
+        Props::new(slf.clone().unbind())
+    }
+
+    #[getter]
+    fn entries(slf: &Bound<'_, Self>) -> Entries {
+        Entries::new(slf.clone().unbind())
     }
 
     #[getter]

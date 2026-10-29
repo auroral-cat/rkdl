@@ -1,19 +1,26 @@
+mod args;
 mod children;
 mod document;
+mod entry;
 mod errors;
 mod format;
 mod handles;
 mod node;
 mod parser;
+mod props;
 mod tree;
 mod values;
 
 #[pyo3::pymodule]
 mod _rkdl {
     #[pymodule_export]
+    use crate::args::Args;
+    #[pymodule_export]
     use crate::children::Children;
     #[pymodule_export]
     use crate::document::Document;
+    #[pymodule_export]
+    use crate::entry::{Entries, Entry};
     #[pymodule_export]
     use crate::errors::{Diagnostic, ParseError};
     #[pymodule_export]
@@ -22,6 +29,8 @@ mod _rkdl {
     use crate::node::Node;
     #[pymodule_export]
     use crate::parser::{Parser, parse};
+    #[pymodule_export]
+    use crate::props::Props;
     #[pymodule_export]
     use crate::values::{_debug_from_python, _debug_to_python, Type};
 

@@ -1,0 +1,258 @@
+use kdl::KdlIdentifier;
+use pyo3::exceptions::{PyKeyError, PyTypeError};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+
+use crate::entry::{Entry, Item, Snapshot, chosen, edit, new_entry, read, store};
+use crate::node::Node;
+use crate::values;
+
+/// The entry `props[key]` reads and writes: the last one with that key, which is KdlNode::entry's rule.
+fn last<'a>(items: &'a [Item], key: &str) -> Option<&'a Item> {
+    items.iter().rev().find(|i| i.key() == Some(key))
+}
+
+/// The entry `del props[key]` removes. This mirrors KdlNode::remove on purpose, bugs included: it takes the *first*
+/// match, and compares whole identifiers, spelling too, against an unspelled `KdlIdentifier::from(key)`. So it can
+/// remove a different entry from the one `props[key]` reads, and it never finds a key as parsed, since the parser
+/// records every key's spelling.
+fn removable(items: &[Item], key: &str) -> Option<Item> {
+    let key = KdlIdentifier::from(key);
+    items.iter().find(|i| i.name.as_ref() == Some(&key)).cloned()
+}
+
+/// Each key once, in order of first appearance.
+fn keys(items: &[Item]) -> Vec<&str> {
+    let mut keys: Vec<&str> = Vec::new();
+    for key in items.iter().filter_map(Item::key) {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+fn get(py: Python<'_>, snapshot: &Snapshot, key: &str) -> PyResult<Option<Py<PyAny>>> {
+    last(&snapshot.items, key)
+        .map(|item| item.to_python(py, snapshot.types()))
+        .transpose()
+}
+
+fn key_error(key: &str) -> PyErr {
+    PyKeyError::new_err(key.to_owned())
+}
+
+/// Keys are str. Anything else is simply not there.
+fn str_key(key: &Bound<'_, PyAny>) -> Option<String> {
+    key.extract().ok()
+}
+
+/// A live dict of a node's properties, as plain Python values.
+#[pyclass(module = "rkdl", frozen)]
+pub struct Props {
+    node: Py<Node>,
+}
+
+impl Props {
+    pub(crate) fn new(node: Py<Node>) -> Self {
+        Props { node }
+    }
+
+    fn set(&self, key: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        edit(
+            value.py(),
+            self.node.get(),
+            |snapshot| {
+                let found = last(&snapshot.items, &key);
+                let (value, ty) = values::from_python(value, found.and_then(|i| i.ty.as_deref()), snapshot.types())?;
+                Ok((found.map(|i| i.id), value, ty))
+            },
+            |mut target, (found, value, ty)| match found {
+                Some(id) => store(target.entry_mut(id), value, ty),
+                None => {
+                    let end = target.len();
+                    target.insert(end, new_entry(Some(key.clone()), value, ty));
+                }
+            },
+        )
+    }
+
+    /// Removes the entry `del` picks, and returns the value `[]` reads, as `MutableMapping.pop` would.
+    fn take(&self, py: Python<'_>, key: &str) -> PyResult<Option<Py<PyAny>>> {
+        edit(
+            py,
+            self.node.get(),
+            |snapshot| {
+                let Some(value) = get(py, snapshot, key)? else {
+                    return Ok(None);
+                };
+                let item = removable(&snapshot.items, key).ok_or_else(|| key_error(key))?;
+                Ok(Some((item.id, value)))
+            },
+            |mut target, planned| {
+                planned.map(|(id, value)| {
+                    target.remove(id);
+                    value
+                })
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl Props {
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        Ok(keys(&read(py, self.node.get())?.items).len())
+    }
+
+    fn __getitem__<'py>(&self, key: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = key.py();
+        let found = match str_key(key) {
+            Some(k) => get(py, &read(py, self.node.get())?, &k)?,
+            None => None,
+        };
+        found.ok_or_else(|| PyKeyError::new_err(key.clone().unbind()))
+    }
+
+    /// Writes the entry `[]` reads, or adds a property at the end.
+    fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let key = str_key(key).ok_or_else(|| PyTypeError::new_err("property keys must be str"))?;
+        self.set(key, value)
+    }
+
+    fn __delitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = key.py();
+        let Some(k) = str_key(key) else {
+            return Err(PyKeyError::new_err(key.clone().unbind()));
+        };
+        edit(
+            py,
+            self.node.get(),
+            |snapshot| {
+                removable(&snapshot.items, &k)
+                    .map(|i| i.id)
+                    .ok_or_else(|| key_error(&k))
+            },
+            |mut target, id| target.remove(id),
+        )
+    }
+
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let Some(k) = str_key(key) else {
+            return Ok(false);
+        };
+        Ok(last(&read(key.py(), self.node.get())?.items, &k).is_some())
+    }
+
+    // Snapshots the keys first, so editing the node while iterating is well defined.
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = read(py, self.node.get())?;
+        Ok(PyList::new(py, keys(&snapshot.items))?.try_iter()?.into_any())
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let found = match str_key(key) {
+            Some(k) => get(py, &read(py, self.node.get())?, &k)?,
+            None => None,
+        };
+        Ok(found.or(default).unwrap_or_else(|| py.None()))
+    }
+
+    #[pyo3(signature = (key, *default))]
+    fn pop(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Vec<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        if default.len() > 1 {
+            return Err(PyTypeError::new_err("pop expected at most 2 arguments"));
+        }
+        let found = match str_key(key) {
+            Some(k) => self.take(py, &k)?,
+            None => None,
+        };
+        found
+            .or_else(|| default.into_iter().next())
+            .ok_or_else(|| PyKeyError::new_err(key.clone().unbind()))
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn setdefault(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        if let Ok(found) = self.__getitem__(key) {
+            return Ok(found);
+        }
+        let default = default.unwrap_or_else(|| py.None());
+        self.__setitem__(key, default.bind(py))?;
+        Ok(default)
+    }
+
+    #[pyo3(signature = (other=None, **kwargs))]
+    fn update(&self, other: Option<&Bound<'_, PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        if let Some(other) = other {
+            if other.hasattr("keys")? {
+                for key in other.call_method0("keys")?.try_iter()? {
+                    let key = key?;
+                    self.__setitem__(&key, &other.get_item(&key)?)?;
+                }
+            } else {
+                for pair in other.try_iter()? {
+                    let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = pair?.extract()?;
+                    self.__setitem__(&key, &value)?;
+                }
+            }
+        }
+        for (key, value) in kwargs.into_iter().flatten() {
+            self.__setitem__(&key, &value)?;
+        }
+        Ok(())
+    }
+
+    /// Removes every property. Not through `del`, which can't find parsed keys.
+    fn clear(&self, py: Python<'_>) -> PyResult<()> {
+        edit(
+            py,
+            self.node.get(),
+            |snapshot| {
+                Ok(snapshot
+                    .items
+                    .iter()
+                    .filter(|i| i.name.is_some())
+                    .map(|i| i.id)
+                    .collect::<Vec<_>>())
+            },
+            |mut target, ids| ids.into_iter().for_each(|id| target.remove(id)),
+        )
+    }
+
+    fn keys<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        abc_view(slf, "KeysView")
+    }
+
+    fn values<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        abc_view(slf, "ValuesView")
+    }
+
+    fn items<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        abc_view(slf, "ItemsView")
+    }
+
+    /// The handle for the entry `[key]` reads.
+    fn entry<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, Entry>> {
+        let mut found = chosen(py, self.node.get(), |items| {
+            Ok(vec![last(items, key).ok_or_else(|| key_error(key))?.id])
+        })?;
+        Ok(found.pop().expect("chose one entry"))
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let snapshot = read(py, self.node.get())?;
+        let dict = PyDict::new(py);
+        for key in keys(&snapshot.items) {
+            dict.set_item(key, get(py, &snapshot, key)?)?;
+        }
+        Ok(format!("Props({})", dict.repr()?))
+    }
+}
+
+// The standard views are live and only need the mapping methods above.
+fn abc_view<'py>(props: &Bound<'py, Props>, view: &str) -> PyResult<Bound<'py, PyAny>> {
+    let py = props.py();
+    py.import("collections.abc")?.getattr(view)?.call1((props,))
+}
