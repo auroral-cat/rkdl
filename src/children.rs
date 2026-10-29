@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kdl::{KdlDocument, KdlDocumentFormat, KdlNode, KdlNodeFormat};
+use kdl::{KdlDocument, KdlNode};
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
@@ -8,6 +8,7 @@ use pyo3::types::{PyList, PySlice};
 use crate::document::{DocState, Document, lock_both};
 use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
 use crate::index::{insert_at, not_in, pick_one, pick_slice, position};
+use crate::layout::{self, Style};
 use crate::node::Node;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
 
@@ -97,226 +98,10 @@ fn block_mut<'a>(kdl: &'a mut KdlDocument, ids: &IdTree, parent: Option<NodeId>)
     }
 }
 
-/// Cache keys for every node and entry under `root`, whose handles move with it.
-fn subtree_keys(ids: &IdTree, root: NodeId) -> Vec<u64> {
-    let mut keys = Vec::new();
-    let mut stack = vec![root];
-    while let Some(id) = stack.pop() {
-        keys.push(id.key());
-        keys.extend(ids.entries(id).iter().map(|e| e.key()));
-        stack.extend(ids.children(id).into_iter().flatten());
-    }
-    keys
-}
-
-// Whitespace and indentation. See notes/kdl-rs.md, "Editing".
-
-fn leading(node: &KdlNode) -> &str {
-    node.format().map_or("", |f| &f.leading)
-}
-
-/// The indentation in a leading: the whitespace that starts its last line.
-fn indent_of(leading: &str) -> &str {
-    let line = leading.rsplit('\n').next().unwrap_or("");
-    line.strip_suffix(line.trim_start()).unwrap_or_default()
-}
-
-fn is_blank(text: &str) -> bool {
-    text.chars().all(char::is_whitespace)
-}
-
-/// Whether `text` ends in a `\` line continuation that still needs its newline.
-fn ends_in_open_escline(text: &str) -> bool {
-    text.trim_end_matches(|c: char| c.is_whitespace() && c != '\n' && c != '\r')
-        .ends_with('\\')
-}
-
-/// Whether `text` ends in a line break, give or take spaces after it.
-fn ends_line(text: &str) -> bool {
-    text.trim_end_matches(|c: char| c.is_whitespace() && c != '\n')
-        .ends_with('\n')
-}
-
-fn fmt_mut(node: &mut KdlNode) -> &mut KdlNodeFormat {
-    if node.format().is_none() {
-        node.set_format(KdlNodeFormat {
-            before_children: " ".into(),
-            terminator: "\n".into(),
-            ..Default::default()
-        });
-    }
-    node.format_mut().expect("just set")
-}
-
-fn block_fmt_mut(block: &mut KdlDocument) -> &mut KdlDocumentFormat {
-    if block.format().is_none() {
-        block.set_format(KdlDocumentFormat::default());
-    }
-    block.format_mut().expect("just set")
-}
-
-/// One level of indentation, from the first indented child in the document.
-fn indent_unit(kdl: &KdlDocument) -> String {
-    kdl.nodes()
-        .iter()
-        .filter_map(|n| n.children()?.nodes().first())
-        .map(|child| indent_of(leading(child)))
-        .find(|indent| !indent.is_empty())
-        .unwrap_or("    ")
-        .to_owned()
-}
-
-/// Swaps an `old` indent for `new` at the start of each line. `line_start` says whether the text itself starts a
-/// line. Blank lines stay blank.
-fn reindent(text: &str, old: &str, new: &str, line_start: bool) -> String {
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut out = String::with_capacity(text.len());
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let blank = line.is_empty() && i + 1 < lines.len();
-        match line.strip_prefix(old) {
-            Some(rest) if (i > 0 || line_start) && !blank => {
-                out.push_str(new);
-                out.push_str(rest);
-            }
-            _ => out.push_str(line),
-        }
-    }
-    out
-}
-
-/// Moves everything under `node` from indent `old` to indent `new`, so a moved subtree lines up with its new place.
-fn reindent_children(node: &mut KdlNode, old: &str, new: &str) {
-    let Some(block) = node.children_mut() else {
-        return;
-    };
-    let mut line_start = false;
-    if let Some(f) = block.format_mut() {
-        f.leading = reindent(&f.leading, old, new, false);
-        line_start = f.leading.ends_with('\n');
-    }
-    for child in block.nodes_mut() {
-        if let Some(f) = child.format_mut() {
-            f.leading = reindent(&f.leading, old, new, line_start);
-            line_start = format!("{}{}", f.terminator, f.trailing).ends_with('\n');
-        }
-        reindent_children(child, old, new);
-    }
-    if let Some(f) = block.format_mut() {
-        f.trailing = reindent(&f.trailing, old, new, line_start);
-    }
-}
-
-/// Puts `node` into `block` at `index` and fixes up whitespace so it lines up with its siblings. `nested` is the
-/// parent's indent and one indent level, or None at the top level of a document.
-fn place(block: &mut KdlDocument, index: usize, mut node: KdlNode, nested: Option<(&str, &str)>) {
-    let len = block.nodes().len();
-    let (indent, newline) = match nested {
-        // A document's leading text can end in a comment with no line break, and a `// comment` would swallow the
-        // new node.
-        None if len == 0 => {
-            let leading = block.format().map_or("", |f| &f.leading);
-            (String::new(), !is_blank(leading) && !ends_line(leading))
-        }
-        None => (String::new(), false),
-        Some((parent_indent, unit)) if len == 0 => {
-            let f = block_fmt_mut(block);
-            // The new node brings its own newline after `{`, and the closing `}` lines up with the parent.
-            if is_blank(&f.leading) && is_blank(&f.trailing) {
-                f.leading.clear();
-                f.trailing = parent_indent.to_owned();
-            }
-            (format!("{parent_indent}{unit}"), !f.leading.ends_with('\n'))
-        }
-        Some(_) => {
-            let nodes = block.nodes_mut();
-            let sibling = index.saturating_sub(1);
-            let indent = indent_of(leading(&nodes[sibling])).to_owned();
-            // The newline after `{` is in the old first child's leading. It belongs to whichever node comes first.
-            let mut newline = false;
-            if index == 0 {
-                let f = fmt_mut(&mut nodes[0]);
-                if let Some(rest) = f.leading.strip_prefix('\n') {
-                    f.leading = rest.to_owned();
-                    newline = true;
-                }
-            }
-            (indent, newline)
-        }
-    };
-
-    let mut newline = newline;
-    if index > 0 {
-        let prev = &mut block.nodes_mut()[index - 1];
-        let ends_in_escline = ends_in_open_escline(&prev.to_string());
-        let f = fmt_mut(prev);
-        if f.terminator.is_empty() && ends_in_escline {
-            // A newline straight after the `\` would continue this node onto the new one's line. Finish the escline
-            // and end the node with `;` on its own line, which keeps the old text as it was.
-            f.before_terminator.push('\n');
-            f.terminator = ";".into();
-        } else if f.terminator.is_empty() {
-            // The last node of a block or file may have no terminator at all.
-            f.terminator = "\n".into();
-        }
-        // A `;` (or the `;` above) doesn't end the line, so the new node starts one of its own.
-        if !format!("{}{}", f.terminator, f.trailing).contains('\n') {
-            newline = true;
-            // A newline before `}` or the end of the file belonged to the old last node's line. The new node ends
-            // that line now and brings its own newline, so drop this one or it leaves a blank line.
-            if index == len
-                && let Some(bf) = block.format_mut()
-                && let Some(rest) = bf.trailing.strip_prefix('\n')
-            {
-                bf.trailing = rest.to_owned();
-            }
-        }
-    }
-
-    let f = fmt_mut(&mut node);
-    let old = indent_of(&f.leading).to_owned();
-    // Keep the node's own comments, but not the whitespace it had where it came from.
-    let own = reindent(f.leading.trim_start(), &old, &indent, false);
-    f.leading = format!("{}{indent}{own}", if newline { "\n" } else { "" });
-    if !f.terminator.ends_with('\n') {
-        f.terminator = "\n".into();
-    }
-    if is_blank(&f.trailing) {
-        f.trailing.clear();
-    }
-    if old != indent {
-        reindent_children(&mut node, &old, &indent);
-    }
-    block.nodes_mut().insert(index, node);
-}
-
-/// Takes the node at `index` out of `block`, the inverse of `place`.
-fn unplace(block: &mut KdlDocument, index: usize, nested: bool) -> KdlNode {
-    let node = block.nodes_mut().remove(index);
-    if !nested {
-        return node;
-    }
-    if index == 0
-        && leading(&node).starts_with('\n')
-        && let Some(next) = block.nodes_mut().first_mut()
-    {
-        let f = fmt_mut(next);
-        if !f.leading.starts_with('\n') {
-            f.leading.insert(0, '\n');
-        }
-    }
-    // An emptied block prints as `{}`.
-    if block.nodes().is_empty()
-        && let Some(f) = block.format_mut()
-        && is_blank(&f.leading)
-        && is_blank(&f.trailing)
-    {
-        f.leading.clear();
-        f.trailing.clear();
-    }
-    node
+/// How the parent's block lays out its nodes. Only called after `block_ids` has checked the parent.
+fn style(s: &DocState, parent: Option<NodeId>) -> Style {
+    let path = parent.map(|p| s.ids.path(p).expect("checked by block_ids"));
+    Style::of(&s.kdl, path.as_deref())
 }
 
 // Structural edits.
@@ -334,16 +119,77 @@ fn check_insertable(target: &Py<Document>, source: &Py<Document>) -> PyResult<()
     Ok(())
 }
 
-fn insert(py: Python<'_>, owner: &Owner, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
+/// A private document for a node about to be taken out. It's made before locking, so the edit itself needs no
+/// Python.
+struct NewHome {
+    doc: Py<Document>,
+    home: DocRef,
+}
+
+impl NewHome {
+    fn new(py: Python<'_>, from: &Py<Document>) -> PyResult<NewHome> {
+        let doc = Py::new(py, Document::empty_home(Arc::clone(&from.get().types)))?;
+        Ok(NewHome {
+            doc: doc.clone_ref(py),
+            home: Arc::new(doc),
+        })
+    }
+}
+
+/// Moves the node `id` out of the parent's block into `to`, along with its handles.
+fn detach(
+    s: &mut DocState,
+    parent: Option<NodeId>,
+    id: NodeId,
+    style: &Style,
+    to: &NewHome,
+    garbage: &mut Garbage,
+) -> Result<(), Fail> {
+    let index = block_ids(&s.ids, parent)?
+        .ok_or_else(no_block)?
+        .iter()
+        .position(|&n| n == id)
+        .expect("picked from this block");
+    let node = layout::unplace(block_mut(&mut s.kdl, &s.ids, parent), index, style);
+    let subtree = s.ids.take_subtree(id);
+    let keys = subtree.keys();
+    let mut kdl = KdlDocument::new();
+    kdl.nodes_mut().push(node);
+    to.doc.get().fill(kdl, IdTree::from_subtree(subtree));
+    handles::repoint(keys, &to.home, garbage);
+    Ok(())
+}
+
+/// Where `insert` puts a node.
+#[derive(Clone, Copy)]
+enum At {
+    /// Like `list.insert(index, node)`.
+    Insert(isize),
+    /// Like `list[index] = node`: the node there is detached first.
+    Replace(isize),
+}
+
+fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyResult<()> {
     let id = node.get().id;
     let home = &node.get().home;
     let garbage = owner.on_doc(py, |target, parent| {
         let source = home.doc();
         check_insertable(target, &source)?;
-        let new_home = Arc::new(target.clone_ref(py));
+        let here = Arc::new(target.clone_ref(py));
+        let replaced_home = match at {
+            At::Replace(_) => Some(NewHome::new(py, target)?),
+            At::Insert(_) => None,
+        };
         lock_both(py, target.get(), source.get(), |t, s| -> Result<Garbage, Fail> {
             let s = s.expect("checked that the documents differ");
-            let len = block_ids(&t.ids, parent)?.ok_or_else(no_block)?.len();
+            let ids = block_ids(&t.ids, parent)?.ok_or_else(no_block)?;
+            let (index, replaced) = match at {
+                At::Insert(index) => (insert_at(ids.len(), index), None),
+                At::Replace(index) => {
+                    let i = position(ids.len(), index, "children")?;
+                    (i, ids.get(i).copied())
+                }
+            };
             if s.ids.top() != [id] {
                 // Another thread inserted it first; the retry will find it attached. `on_doc` follows the target's
                 // home, not the node's, so this applies the `Fail::Missing` rule to the node's home itself.
@@ -353,22 +199,17 @@ fn insert(py: Python<'_>, owner: &Owner, index: isize, node: &Bound<'_, Node>) -
                     Fail::Err(stale())
                 });
             }
-            let index = insert_at(len, index);
-            let nested = match parent {
-                None => None,
-                Some(p) => {
-                    let parent_node = node_at(&t.kdl, &t.ids.path(p).expect("checked by block_ids"));
-                    Some((indent_of(leading(parent_node)).to_owned(), indent_unit(&t.kdl)))
-                }
-            };
-            let keys = subtree_keys(&s.ids, id);
+            let style = style(t, parent);
+            let mut garbage = Garbage::default();
+            if let (Some(old), Some(to)) = (replaced, &replaced_home) {
+                detach(t, parent, old, &style, to, &mut garbage)?;
+            }
             let kdl_node = s.kdl.nodes_mut().remove(0);
             let subtree = s.ids.take_subtree(id);
-            let nested = nested.as_ref().map(|(indent, unit)| (indent.as_str(), unit.as_str()));
-            place(block_mut(&mut t.kdl, &t.ids, parent), index, kdl_node, nested);
+            let keys = subtree.keys();
+            layout::place(block_mut(&mut t.kdl, &t.ids, parent), index, kdl_node, &style);
             t.ids.put_subtree(parent, index, subtree);
-            let mut garbage = Garbage::default();
-            handles::repoint(keys, &new_home, &mut garbage);
+            handles::repoint(keys, &here, &mut garbage);
             Ok(garbage)
         })
     })?;
@@ -394,13 +235,9 @@ fn take_out<'py>(
             return Ok(Vec::new());
         };
         let picked = pick(&snapshot)?;
-        // The new homes are made up front, so the edit itself needs no Python.
         let homes = picked
             .iter()
-            .map(|_| {
-                let home = Py::new(py, Document::empty_home(doc.get().types.clone()))?;
-                Ok((home.clone_ref(py), Arc::new(home)))
-            })
+            .map(|_| NewHome::new(py, doc))
             .collect::<PyResult<Vec<_>>>()?;
 
         let garbage = doc.get().with_state(py, |s| -> Result<Garbage, Fail> {
@@ -410,20 +247,10 @@ fn take_out<'py>(
                 None if close => return Err(Fail::Changed),
                 None => return Err(no_block().into()),
             }
+            let style = style(s, parent);
             let mut garbage = Garbage::default();
-            for (&id, (home, home_ref)) in picked.iter().zip(&homes) {
-                let index = block_ids(&s.ids, parent)?
-                    .ok_or_else(no_block)?
-                    .iter()
-                    .position(|&n| n == id)
-                    .expect("picked from this block");
-                let keys = subtree_keys(&s.ids, id);
-                let node = unplace(block_mut(&mut s.kdl, &s.ids, parent), index, parent.is_some());
-                let subtree = s.ids.take_subtree(id);
-                let mut kdl = KdlDocument::new();
-                kdl.nodes_mut().push(node);
-                home.get().fill(kdl, IdTree::from_subtree(subtree));
-                handles::repoint(keys, home_ref, &mut garbage);
+            for (&id, to) in picked.iter().zip(&homes) {
+                detach(s, parent, id, &style, to, &mut garbage)?;
             }
             if let (true, Some(p)) = (close, parent) {
                 node_at_mut(&mut s.kdl, &s.ids.path(p).expect("checked by block_ids")).clear_children();
@@ -435,7 +262,7 @@ fn take_out<'py>(
         Ok(picked
             .into_iter()
             .zip(homes)
-            .map(|(id, (home, _))| (id, home))
+            .map(|(id, home)| (id, home.doc))
             .collect::<Vec<_>>())
     })?;
 
@@ -451,39 +278,17 @@ fn take_all(ids: &[NodeId]) -> PyResult<Vec<NodeId>> {
 }
 
 /// `node.children = []`: an empty block, detaching any children it had.
-pub(crate) fn open_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
+pub(crate) fn open_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
     let had_block = owner.on_doc(py, |doc, parent| {
         let id = parent.expect("only nodes open blocks");
         doc.get().with_state(py, |s| -> Result<bool, Fail> {
             let path = s.ids.path(id).ok_or_else(|| Fail::Missing(stale()))?;
+            let eol = layout::line_ending(&s.kdl);
             let node = node_at_mut(&mut s.kdl, &path);
             if node.children().is_some() {
                 return Ok(true);
             }
-            let f = fmt_mut(node);
-            // Without a block, trailing slashdashed entries sit in before_terminator, which prints after the block.
-            // They have to stay in front of it.
-            if !is_blank(&f.before_terminator) {
-                let mut moved = std::mem::take(&mut f.before_terminator);
-                // Autoformat ends before_terminator with a newline. That line break goes after the block, not before
-                // `{`, where it would end the node early.
-                if ends_line(&moved) {
-                    moved.truncate(moved.trim_end().len());
-                    if f.terminator.is_empty() {
-                        f.terminator = "\n".into();
-                    }
-                }
-                if ends_in_open_escline(&moved) {
-                    moved.push('\n');
-                }
-                f.before_children = moved + &f.before_children;
-            }
-            if !f.before_children.ends_with(char::is_whitespace) {
-                f.before_children.push(' ');
-            }
-            let mut block = KdlDocument::new();
-            block.set_format(KdlDocumentFormat::default());
-            node.set_children(block);
+            layout::open_block(node, eol);
             s.ids.open_block(id);
             Ok(false)
         })
@@ -495,9 +300,28 @@ pub(crate) fn open_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
 }
 
 /// `node.children = None`: removes the block, detaching any children it had.
-pub(crate) fn close_block(owner: &Owner, py: Python<'_>) -> PyResult<()> {
+pub(crate) fn close_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
     take_out(py, owner, take_all, true)?;
     Ok(())
+}
+
+/// Reverses the block in place.
+fn reverse(py: Python<'_>, owner: &Owner) -> PyResult<()> {
+    owner.on_doc(py, |doc, parent| {
+        doc.get().with_state(py, |s| -> Result<(), Fail> {
+            let ids = block_ids(&s.ids, parent)?.ok_or_else(no_block)?.to_vec();
+            let style = style(s, parent);
+            // Moves the first node back to each place in turn, last place first. The block never empties, and the
+            // node that ends up last takes over the end of the block, so the block keeps its layout.
+            for (&id, to) in ids.iter().zip((1..ids.len()).rev()) {
+                let node = layout::unplace(block_mut(&mut s.kdl, &s.ids, parent), 0, &style);
+                let subtree = s.ids.take_subtree(id);
+                layout::place(block_mut(&mut s.kdl, &s.ids, parent), to, node, &style);
+                s.ids.put_subtree(parent, to, subtree);
+            }
+            Ok(())
+        })
+    })
 }
 
 // Lookups.
@@ -620,13 +444,7 @@ impl Children {
     }
 
     fn __setitem__(&self, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
-        let py = node.py();
-        let (doc, ids) = self.owner.ids(py)?;
-        // Checked first so a bad node doesn't cost the old one its place.
-        check_insertable(&doc, &node.get().home.doc())?;
-        let i = position(ids.len(), index, "children")?;
-        take_out(py, &self.owner, |ids| pick_id(ids, index), false)?;
-        insert(py, &self.owner, i.cast_signed(), node)
+        insert(node.py(), &self.owner, At::Replace(index), node)
     }
 
     fn __delitem__(&self, index: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -647,6 +465,12 @@ impl Children {
         Ok(PyList::new(py, found)?.try_iter()?.into_any())
     }
 
+    fn __reversed__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut found = self.owner.chosen(py, take_all)?;
+        found.reverse();
+        Ok(PyList::new(py, found)?.try_iter()?.into_any())
+    }
+
     fn __contains__(&self, node: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Ok(node) = node.cast::<Node>() else {
             return Ok(false);
@@ -659,23 +483,30 @@ impl Children {
         Ok(format!("Children({})", PyList::new(py, found)?.repr()?))
     }
 
+    fn __iadd__(&self, nodes: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.extend(nodes)
+    }
+
     fn index(&self, node: &Bound<'_, Node>) -> PyResult<usize> {
         find_node(&self.owner.ids(node.py())?.1, node)
     }
 
+    fn count(&self, node: &Bound<'_, PyAny>) -> PyResult<usize> {
+        Ok(usize::from(self.__contains__(node)?))
+    }
+
     fn insert(&self, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, index, node)
+        insert(node.py(), &self.owner, At::Insert(index), node)
     }
 
     fn append(&self, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, isize::MAX, node)
+        insert(node.py(), &self.owner, At::Insert(isize::MAX), node)
     }
 
     fn extend(&self, nodes: &Bound<'_, PyAny>) -> PyResult<()> {
-        for node in nodes.try_iter()? {
-            self.append(node?.cast::<Node>()?)?;
-        }
-        Ok(())
+        // Collected first, so `children.extend(children)` ends (by raising: those nodes are already attached).
+        let nodes: Vec<_> = nodes.try_iter()?.collect::<PyResult<_>>()?;
+        nodes.iter().try_for_each(|node| self.append(node.cast::<Node>()?))
     }
 
     #[pyo3(signature = (index=-1))]
@@ -692,6 +523,10 @@ impl Children {
             false,
         )?;
         Ok(())
+    }
+
+    fn reverse(&self, py: Python<'_>) -> PyResult<()> {
+        reverse(py, &self.owner)
     }
 
     fn clear(&self, py: Python<'_>) -> PyResult<()> {

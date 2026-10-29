@@ -52,6 +52,14 @@ pub struct Subtree {
     entries: HashMap<EntryId, NodeId>,
 }
 
+impl Subtree {
+    /// Handle cache keys for every node and entry in the subtree.
+    pub fn keys(&self) -> Vec<u64> {
+        let nodes = self.nodes.keys().map(|n| n.key());
+        nodes.chain(self.entries.keys().map(|e| e.key())).collect()
+    }
+}
+
 #[cfg(test)]
 impl Subtree {
     pub fn root(&self) -> NodeId {
@@ -239,12 +247,14 @@ impl IdTree {
         slot.children = Some(Vec::new());
     }
 
-    /// Some -> None. Returns the removed children.
-    pub fn close_block(&mut self, node: NodeId) -> Vec<Subtree> {
-        let children = self.slot(node).children.clone().expect("node has no children block");
-        let removed = children.into_iter().map(|c| self.take_subtree(c)).collect();
-        self.slot_mut(node).children = None;
-        removed
+    /// Some(empty) -> None. The children go first, with `take_subtree`.
+    pub fn close_block(&mut self, node: NodeId) {
+        let slot = self.slot_mut(node);
+        assert!(
+            slot.children.as_ref().is_some_and(Vec::is_empty),
+            "node has no empty children block"
+        );
+        slot.children = None;
     }
 
     pub fn insert_entry(&mut self, node: NodeId, index: usize) -> EntryId {
@@ -490,13 +500,16 @@ mod tests {
         let b = tree.top()[1];
         let (c, d) = (at(&tree, &[1, 0]), at(&tree, &[1, 1]));
         let e = at(&tree, &[1, 1, 0]);
-        let removed = tree.close_block(b);
+        let removed: Vec<Subtree> = [c, d].into_iter().map(|n| tree.take_subtree(n)).collect();
+        tree.close_block(b);
         node_at_mut(&mut doc, &[1]).clear_children();
         tree.check_shape(&doc);
         assert_eq!(removed.iter().map(Subtree::root).collect::<Vec<_>>(), vec![c, d]);
         for id in [c, d, e] {
             assert!(!tree.contains(id));
         }
+        let d_keys = removed[1].keys();
+        assert!(d_keys.contains(&d.key()) && d_keys.contains(&e.key()) && !d_keys.contains(&c.key()));
         let home = IdTree::from_subtree(removed.into_iter().nth(1).unwrap());
         assert_eq!(home.path(e), Some(vec![0, 0]));
     }

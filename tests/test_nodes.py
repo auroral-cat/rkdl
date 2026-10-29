@@ -218,6 +218,66 @@ def test_insert_after_trailing_line_continuation():
     assert [n.name for n in rkdl.parse(str(d)).children] == ["node", "added"]
 
 
+CRLF = "a {\r\n    b\r\n    c\r\n}\r\nd {}\r\n"
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [
+        (0, "a {\r\n    x\r\n    b\r\n    c\r\n}\r\n"),
+        (1, "a {\r\n    b\r\n    x\r\n    c\r\n}\r\n"),
+        (2, "a {\r\n    b\r\n    c\r\n    x\r\n}\r\n"),
+    ],
+)
+def test_insert_keeps_crlf_line_endings(index, expected):
+    d = rkdl.parse(CRLF)
+    d["a"].children.insert(index, rkdl.Node("x"))
+    assert str(d) == expected + "d {}\r\n"
+
+
+def test_append_into_empty_block_uses_crlf():
+    d = rkdl.parse(CRLF)
+    d["d"].children.append(rkdl.Node("x"))
+    d.children.append(rkdl.Node("y"))
+    assert str(d) == "a {\r\n    b\r\n    c\r\n}\r\nd {\r\n    x\r\n}\r\ny\r\n"
+
+
+def test_moved_subtree_takes_the_line_endings_of_its_new_place():
+    built = rkdl.Node("built")
+    built.children = []
+    built.children.append(rkdl.Node("inner"))
+    d = rkdl.parse(CRLF)
+    d["d"].children.append(built)
+    assert str(d).endswith("d {\r\n    built {\r\n        inner\r\n    }\r\n}\r\n")
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [
+        (0, "a { x; b; c }\n"),
+        (1, "a { b; x; c }\n"),
+        (2, "a { b; c; x }\n"),
+    ],
+)
+def test_insert_into_single_line_block(index, expected):
+    d = rkdl.parse("a { b; c }\n")
+    d["a"].children.insert(index, rkdl.Node("x"))
+    assert str(d) == expected
+
+
+def test_single_line_block_keeps_its_spacing():
+    d = rkdl.parse("a {b}\n")
+    d["a"].children.append(rkdl.Node("x", 1))
+    assert str(d) == "a {b;x 1}\n"
+
+
+def test_node_that_needs_lines_spreads_a_single_line_block():
+    node = rkdl.parse("// about x\nx\n").children.pop()
+    d = rkdl.parse("top {\n    a { b; c }\n}\n")
+    d["top"]["a"].children.insert(1, node)
+    assert str(d) == "top {\n    a {\n        b\n        // about x\n        x\n        c\n    }\n}\n"
+
+
 def test_moved_node_keeps_its_comment_and_reindents():
     d = doc()
     node = d["b"].children.pop(1)
@@ -269,6 +329,27 @@ def test_setitem_replaces():
     assert str(d) == "// header\na 1\nb {\n    new\n    // about d\n    d\n}\ne {}\n"
 
 
+def test_setitem_failures_keep_the_old_child():
+    d = doc()
+    c = d["b"]["c"]
+    with pytest.raises(ValueError, match="already in a document"):
+        d["b"].children[0] = d["a"]
+    with pytest.raises(IndexError):
+        d["b"].children[5] = rkdl.Node("new")
+    assert d["b"].children[0] is c
+    assert str(d) == TEXT
+
+
+def test_setitem_detaches_the_old_child():
+    d = doc()
+    c = d["b"]["c"]
+    d["b"].children[-2] = rkdl.Node("new")
+    assert c not in d["b"].children
+    other = rkdl.parse("")
+    other.children.append(c)
+    assert str(other) == "c\n"
+
+
 # Removing
 
 
@@ -303,6 +384,30 @@ def test_removing_last_child_empties_block():
     d = doc()
     del d["b"].children[:]
     assert str(d) == "// header\na 1\nb {}\ne {}\n"
+
+
+def test_remove_keeps_crlf_line_endings():
+    d = rkdl.parse(CRLF)
+    d["a"].children.pop(0)
+    assert str(d) == "a {\r\n    c\r\n}\r\nd {}\r\n"
+    d["a"].children.pop()
+    assert str(d) == "a {}\r\nd {}\r\n"
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [
+        (0, "a { c }\n"),
+        # The `;` before stays, so the text before the removed node is untouched.
+        (1, "a { b; }\n"),
+    ],
+)
+def test_remove_from_single_line_block(index, expected):
+    d = rkdl.parse("a { b; c }\n")
+    d["a"].children.pop(index)
+    assert str(d) == expected
+    d["a"].children.pop()
+    assert str(d) == "a {}\n"
 
 
 def test_del_and_errors():
@@ -435,6 +540,53 @@ def test_slices():
     assert str(d) == "b\nd\n"
     assert d["d"] in d.children
     assert d.children.index(d["d"]) == 1
+
+
+def test_count():
+    d = doc()
+    assert d.children.count(d["a"]) == 1
+    assert d.children.count(d["b"]["c"]) == 0
+    assert d.children.count(rkdl.Node("a")) == 0
+    assert d.children.count("a") == 0
+
+
+def test_reversed():
+    d = doc()
+    assert list(reversed(d["b"].children)) == [d["b"]["d"], d["b"]["c"]]
+    assert list(reversed(d["e"].children)) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a\nb\nc", "c\nb\na\n"),
+        ("n {\n    // about a\n    a\n    b\n    c\n}\n", "n {\n    c\n    b\n    // about a\n    a\n}\n"),
+        ("n { a; b; c }\n", "n { c; b; a }\n"),
+        ("n {\r\n  a\r\n  b\r\n}\r\n", "n {\r\n  b\r\n  a\r\n}\r\n"),
+        ("n {}\n", "n {}\n"),
+    ],
+)
+def test_reverse(text, expected):
+    d = rkdl.parse(text)
+    view = d.children if text.startswith("a") else d["n"].children
+    before = list(view)
+    view.reverse()
+    assert str(d) == expected
+    assert list(view) == before[::-1]
+
+
+def test_iadd_and_extend():
+    d = doc()
+    view = same = d["e"].children
+    view += [rkdl.Node("x"), rkdl.Node("y")]
+    assert view is same
+    assert [n.name for n in d["e"].children] == ["x", "y"]
+    d["e"].children.extend(n for n in [rkdl.Node("z")])
+    assert str(d).endswith("e {\n    x\n    y\n    z\n}\n")
+    # The argument is read in full first, and its nodes are already attached.
+    with pytest.raises(ValueError, match="already in a document"):
+        view.extend(view)
+    assert [n.name for n in view] == ["x", "y", "z"]
 
 
 # Untouched text stays identical
