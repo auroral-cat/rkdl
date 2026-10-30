@@ -332,11 +332,17 @@ def model_nodes(draw, level=0):
     return nodes
 
 
+HEADER = "// the header"
+
+
 @st.composite
 def generated_documents(draw):
     nodes = draw(model_nodes())
     indent = draw(st.sampled_from(["    ", "  ", "\t"]))
     text = render_nodes(draw, nodes, indent, 0)
+    if draw(st.booleans()):
+        # A blank line ends the header's claim on the first node: it stays at the top whatever happens to the nodes.
+        text = HEADER + "\n\n" + text
     # The generator never puts a line ending inside a value or comment, so this changes only the line ends.
     if draw(st.booleans()):
         text = text.replace("\n", "\r\n")
@@ -394,6 +400,7 @@ class EditSequences(RuleBasedStateMachine):
     def __init__(self):
         super().__init__()
         self.docs = []
+        self.header = []  # whether each document starts with a header comment that a blank line separates
         self.trees = []  # model of each document's top-level nodes
         self.detached = []  # (handle, model) of detached roots we still hold
         self.nodes = {}  # id(model) -> (handle, model): node handles kept from earlier steps
@@ -556,6 +563,7 @@ class EditSequences(RuleBasedStateMachine):
             self.docs.append(doc)
             self.trees.append(tree)
             self.crlf.append("\r\n" in text)
+            self.header.append(text.startswith(HEADER))
 
     # Layout bookkeeping
 
@@ -1077,6 +1085,8 @@ class EditSequences(RuleBasedStateMachine):
     @rule(k=st.integers(0, 1))
     def fmt(self, k):
         self.docs[k].fmt()
+        # Autoformat drops the blank line after the header, which makes the header the first node's.
+        self.header[k] = False
         # kdl-rs's autoformat spreads every block over lines. The line ending style stays.
         for root in self.trees[k]:
             for m in root.walk():
@@ -1108,6 +1118,12 @@ class EditSequences(RuleBasedStateMachine):
             text = str(doc)
             if self.crlf[k]:
                 assert re.search(r"(?<!\r)\n", text) is None, text
+
+    @invariant()
+    def the_header_stays_at_the_top(self):
+        for k, doc in enumerate(self.docs):
+            if self.header[k]:
+                assert str(doc).startswith(HEADER), str(doc)
 
     @invariant()
     def one_line_blocks_stay_on_one_line(self):

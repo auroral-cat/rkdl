@@ -439,3 +439,127 @@ def test_nodes_from_outside_the_replaced_range_still_raise():
         d["p"].children[:] = [d["p"]]
     # All or nothing.
     assert str(d) == "p {\n    q\n}\nr\ns\n"
+
+
+# Comments above a node are its own up to the last blank line. Above that, they stay where they are.
+
+HEADED = "// header\n\n// about a\na\n\nb\n"
+
+
+def test_the_header_stays_when_the_first_node_is_removed():
+    for remove in (
+        lambda d: d.children.pop(0),
+        lambda d: d.children.remove(d["a"]),
+        lambda d: d.children.__delitem__(0),
+        lambda d: d.children.__delitem__(slice(0, 1)),
+        lambda d: d["a"].detach(),
+    ):
+        d = rkdl.parse(HEADED)
+        remove(d)
+        assert str(d) == "// header\n\nb\n"
+
+
+def test_the_header_stays_when_every_node_goes():
+    d = rkdl.parse(HEADED)
+    d.children.clear()
+    assert str(d) == "// header\n"
+    d.children.append(N("x"))
+    assert str(d) == "// header\nx\n"
+    d = rkdl.parse(HEADED)
+    d.children = [N("x")]
+    assert str(d) == "// header\n\nx\n"
+
+
+def test_comments_right_above_go_with_the_node():
+    d = rkdl.parse(HEADED)
+    a = d.children.pop(0)
+    other = rkdl.parse("z\n")
+    other.children.append(a)
+    assert str(other) == "z\n// about a\na\n"
+
+
+def test_moving_the_first_node_leaves_the_header():
+    d = rkdl.parse(HEADED)
+    d.children.append(d["a"].detach())
+    assert str(d) == "// header\n\nb\n// about a\na\n"
+    d = rkdl.parse(HEADED)
+    other = rkdl.parse("z\n")
+    other.children.insert(0, d.children.pop(0))
+    assert str(d) == "// header\n\nb\n"
+    assert str(other) == "// about a\na\nz\n"
+
+
+def test_a_comment_a_blank_line_separates_stays():
+    d = rkdl.parse("a\n\n// about the rest\n\nb\nc\n")
+    d.children.remove(d["b"])
+    assert str(d) == "a\n\n// about the rest\n\nc\n"
+    d.children.remove(d["c"])
+    assert str(d) == "a\n\n// about the rest\n"
+
+
+def test_removing_between_two_blank_lines_leaves_one():
+    d = rkdl.parse("a\n\nb\n\nc\n")
+    d.children.remove(d["b"])
+    assert str(d) == "a\n\nc\n"
+    # At the end, no blank line is left over.
+    d.children.remove(d["c"])
+    assert str(d) == "a\n"
+
+
+def test_insert_before_the_first_goes_under_the_header():
+    d = rkdl.parse(HEADED)
+    d.children.insert(0, N("x"))
+    assert str(d) == "// header\n\nx\n// about a\na\n\nb\n"
+    # Without a blank line, the comment is the first node's, and the new node goes above it.
+    d = rkdl.parse("// about a\na\n")
+    d.children.insert(0, N("x"))
+    assert str(d) == "x\n// about a\na\n"
+
+
+def test_replacing_the_first_node_keeps_the_header():
+    d = rkdl.parse(HEADED)
+    d.children[0] = N("x")
+    assert str(d) == "// header\n\nx\n\nb\n"
+
+
+def test_sort_and_reverse_keep_the_header_at_the_top():
+    d = rkdl.parse("// header\n\n// about c\nc\nb\na\n")
+    d.children[:] = sorted(d.children, key=lambda n: n.name)
+    assert str(d) == "// header\n\na\nb\n// about c\nc\n"
+    d.children.reverse()
+    assert str(d) == "// header\n\n// about c\nc\nb\na\n"
+
+
+def test_a_copy_leaves_the_gap():
+    d = rkdl.parse(HEADED)
+    other = rkdl.parse("z\n")
+    other.children.append(d["a"].copy())
+    assert str(other) == "z\n// about a\na\n"
+    assert str(d) == HEADED
+
+
+def test_gaps_in_crlf_files():
+    d = rkdl.parse(HEADED.replace("\n", "\r\n"))
+    d.children.pop(0)
+    assert str(d) == "// header\r\n\r\nb\r\n"
+    d.children.insert(0, N("x"))
+    assert str(d) == "// header\r\n\r\nx\r\nb\r\n"
+
+
+def test_gaps_in_nested_blocks():
+    d = rkdl.parse("p {\n    // about the block\n\n    // about a\n    a\n\n    b\n}\n")
+    d["p"].children.pop(0)
+    assert str(d) == "p {\n    // about the block\n\n    b\n}\n"
+    d["p"].children.insert(0, N("x"))
+    assert str(d) == "p {\n    // about the block\n\n    x\n    b\n}\n"
+    d["p"].children.clear()
+    assert str(d) == "p {\n    // about the block\n}\n"
+
+
+def test_slashdashed_nodes_count_as_comments():
+    d = rkdl.parse("/- old 1\n\n/- older 2\na\nb\n")
+    a = d.children.pop(0)
+    assert str(d) == "/- old 1\n\nb\n"
+    other = rkdl.parse("")
+    other.children.append(a)
+    assert str(other) == "/- older 2\na\n"
