@@ -42,8 +42,14 @@ impl Node {
     }
 }
 
-/// Wraps one `KdlNode` in a private document of its own, with fresh ids, that reads and writes through `types`.
-pub(crate) fn detached(py: Python<'_>, node: KdlNode, types: Py<TypeRegistry>) -> PyResult<Bound<'_, Node>> {
+/// Wraps one `KdlNode` in a private document of its own, with fresh ids, that reads and writes through `types` and
+/// writes line endings in the style `eol`.
+pub(crate) fn detached<'py>(
+    py: Python<'py>,
+    node: KdlNode,
+    types: Py<TypeRegistry>,
+    eol: &'static str,
+) -> PyResult<Bound<'py, Node>> {
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
     let ids = IdTree::from_document(&kdl);
@@ -51,7 +57,7 @@ pub(crate) fn detached(py: Python<'_>, node: KdlNode, types: Py<TypeRegistry>) -
         return Err(stale());
     };
     let home = Bound::new(py, Document::empty_home(types))?;
-    home.get().fill(kdl, ids);
+    home.get().fill(kdl, ids, eol);
     // Nothing else can reach a new home, so the node is still there.
     Document::node_handle(&home, id)?.ok_or_else(stale)
 }
@@ -93,7 +99,7 @@ impl Node {
                 node.entries_mut().push(entry(&value, Some(key), types.get())?);
             }
         }
-        Ok(detached(py, node, types)?.unbind())
+        Ok(detached(py, node, types, "\n")?.unbind())
     }
 
     #[getter]
@@ -158,14 +164,14 @@ impl Node {
     }
 
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Node>> {
-        let (node, types) = handles::on_home(py, &self.home, |doc| {
+        let ((node, eol), types) = handles::on_home(py, &self.home, |doc| {
             let node = doc.get().with_state(py, |s| {
                 let path = s.ids.path(self.id).ok_or_else(|| Fail::Missing(stale()))?;
-                Ok::<_, Fail>(node_at(&s.kdl, &path).clone())
+                Ok::<_, Fail>((node_at(&s.kdl, &path).clone(), s.eol))
             })?;
             Ok((node, doc.get().types.clone_ref(py)))
         })?;
-        detached(py, node, types)
+        detached(py, node, types, eol)
     }
 
     fn __getitem__<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {

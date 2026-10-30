@@ -112,7 +112,7 @@ fn block_mut<'a>(kdl: &'a mut KdlDocument, ids: &IdTree, parent: Option<NodeId>)
 /// How the parent's block lays out its nodes. Only called after `block_ids` has checked the parent.
 fn style(s: &DocState, parent: Option<NodeId>) -> Style {
     let path = parent.map(|p| s.ids.path(p).expect("checked by block_ids"));
-    Style::of(&s.kdl, path.as_deref())
+    Style::of(&s.kdl, path.as_deref(), s.eol)
 }
 
 // Structural edits.
@@ -183,7 +183,7 @@ fn rehome(s: &mut DocState, id: NodeId, node: KdlNode, to: &NewHome, garbage: &m
     let keys = subtree.keys();
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
-    to.doc.get().fill(kdl, IdTree::from_subtree(subtree));
+    to.doc.get().fill(kdl, IdTree::from_subtree(subtree), s.eol);
     handles::repoint(keys, &to.shared, garbage);
 }
 
@@ -318,7 +318,7 @@ pub(crate) fn open_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
             if node_at(&s.kdl, &path).children().is_some() {
                 return Ok(true);
             }
-            layout::open_block(&mut s.kdl, &path);
+            layout::open_block(&mut s.kdl, &path, s.eol);
             s.ids.open_block(id);
             Ok(false)
         })
@@ -342,13 +342,10 @@ fn reverse(py: Python<'_>, owner: &Owner) -> PyResult<()> {
         doc.get().with_state(py, |s| -> Result<(), Fail> {
             let ids = block_ids(&s.ids, parent)?.ok_or_else(no_block)?.to_vec();
             let style = style(s, parent);
-            // Moves the first node back to each place in turn, last place first. The block never empties, and the
-            // node that ends up last takes over the end of the block, so the block keeps its layout.
-            for (&id, to) in ids.iter().zip((1..ids.len()).rev()) {
-                let node = layout::unplace(block_mut(&mut s.kdl, &s.ids, parent), 0, &style);
-                let subtree = s.ids.take_subtree(id);
-                layout::place(block_mut(&mut s.kdl, &s.ids, parent), to, node, &style);
-                s.ids.put_subtree(parent, to, subtree);
+            layout::reverse(block_mut(&mut s.kdl, &s.ids, parent), &style);
+            let subtrees: Vec<_> = ids.iter().map(|&id| s.ids.take_subtree(id)).collect();
+            for (index, subtree) in subtrees.into_iter().rev().enumerate() {
+                s.ids.put_subtree(parent, index, subtree);
             }
             Ok(())
         })
