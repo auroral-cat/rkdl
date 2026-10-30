@@ -244,9 +244,14 @@ def test_the_v1_help_leaves_the_rest_of_the_diagnostic_alone(name):
     assert first.label in ("not identifier string", "not quoted string")
 
 
-def test_kdl_rs_help_stays_after_the_v1_help():
+def test_the_v1_help_replaces_kdl_rs_help():
     first = parse_error('node r"raw"').diagnostics[0]
-    assert first.help.splitlines()[1].startswith("A valid value was partially parsed")
+    assert first.help == 'this looks like KDL v1: in KDL v2 it\'s #"raw"#'
+
+
+def test_kdl_rs_help_stays_where_there_is_no_v1_help():
+    first = parse_error('node "multi\nline"').diagnostics[0]
+    assert first.help.startswith("You can make a string multi-line")
 
 
 def test_the_v1_help_is_in_the_report():

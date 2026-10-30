@@ -136,7 +136,7 @@ class Diagnostic:
     @property
     def help(self) -> str | None:
         """A hint on how to fix it, if there is one. When the text there is a KDL v1 spelling, such as a bare `true`, it
-        starts by saying so and giving the v2 form: `this looks like KDL v1: in KDL v2 it's #true`.
+        says so and gives the v2 form: `this looks like KDL v1: in KDL v2 it's #true`.
         """
     @property
     def offset(self) -> int:

@@ -67,7 +67,7 @@ pub struct Diagnostic {
     /// A short note on the problem's span of text, if there is one.
     label: Option<String>,
     /// A hint on how to fix it, if there is one. When the text there is a KDL v1 spelling, such as a bare `true`, it
-    /// starts by saying so and giving the v2 form: `this looks like KDL v1: in KDL v2 it's #true`.
+    /// says so and gives the v2 form: `this looks like KDL v1: in KDL v2 it's #true`.
     help: Option<String>,
     /// Where the problem starts, in characters from the start of the text.
     offset: usize,
@@ -162,13 +162,10 @@ pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>)
     }
 }
 
-/// kdl-rs's help, with a note first when the problem is a KDL v1 spelling, such as a bare `true`.
+/// kdl-rs's help, or a note in its place when the problem is a KDL v1 spelling, such as a bare `true`. kdl-rs's help
+/// there is about v2 rules, such as "Did you want a space here?" for `r"C:\dir"`, which would contradict the note.
 fn help(input: &str, diag: &KdlDiagnostic) -> Option<String> {
-    let v1 = v1::hint(input, input.floor_char_boundary(diag.span.offset()));
-    match (v1, diag.help.clone()) {
-        (Some(v1), Some(theirs)) => Some(format!("{v1}\n{theirs}")),
-        (v1, theirs) => v1.or(theirs),
-    }
+    v1::hint(input, input.floor_char_boundary(diag.span.offset())).or_else(|| diag.help.clone())
 }
 
 /// The exception's text: a summary line naming the file and the first problem's position, then each problem as its own
