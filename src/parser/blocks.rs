@@ -7,17 +7,24 @@
 //! the node's level before the span's end, to the span's end, then the terminator after it. It goes back where kdl-rs
 //! keeps the same text after a node without a block: the spaces and comments at the end of `before_terminator`, and
 //! the `;`, line ending or line comment as the terminator.
+//!
+//! Finding the `}` takes the prescan's record of where blocks close, which it has only if it followed the whole text.
+//! The scan follows every valid document, so that's whenever kdl-rs parses one, unless kdl-rs takes text the spec
+//! doesn't. Without the record, or if the dropped text can't be placed, only the terminator comes back: the terminator
+//! is right after the node's span, so it's found without knowing where the `}` is. The spaces and comments between
+//! the `}` and the terminator stay lost, but the line ending or `;` that keeps the next node apart is back, and the
+//! printed text still parses.
 
 use kdl::{KdlDocument, KdlNode};
 
 use super::prescan::NEWLINES;
 
-/// `closes` is the scan's record of where blocks close, by depth.
-pub(crate) fn restore(text: &str, doc: &mut KdlDocument, closes: &[Vec<usize>]) {
+/// `closes` is the scan's record of where blocks close, by depth, or None if the scan didn't follow the text.
+pub(crate) fn restore(text: &str, doc: &mut KdlDocument, closes: Option<&[Vec<usize>]>) {
     // A work list rather than recursion: the parse thread has stack to spare, but this needn't use it.
     let mut pending = vec![(doc, 0)];
     while let Some((block, depth)) = pending.pop() {
-        let closes = closes.get(depth).map_or(&[][..], Vec::as_slice);
+        let closes = closes.map(|closes| closes.get(depth).map_or(&[][..], Vec::as_slice));
         for node in block.nodes_mut() {
             restore_node(text, node, closes);
             if let Some(children) = node.children_mut() {
@@ -27,7 +34,7 @@ pub(crate) fn restore(text: &str, doc: &mut KdlDocument, closes: &[Vec<usize>]) 
     }
 }
 
-fn restore_node(text: &str, node: &mut KdlNode, closes: &[usize]) {
+fn restore_node(text: &str, node: &mut KdlNode, closes: Option<&[usize]>) {
     if node.children().is_none() {
         return;
     }
@@ -39,20 +46,22 @@ fn restore_node(text: &str, node: &mut KdlNode, closes: &[usize]) {
     if !f.terminator.is_empty() {
         return;
     }
-    // The node's last `}`: its block's, or that of a slashdashed block after it, which ends `before_terminator`.
-    let Some(&close) = closes.get(closes.partition_point(|&c| c < end).wrapping_sub(1)) else {
+    let Some(rest) = text.get(end..) else {
         return;
     };
-    let after = close + 1;
-    let (Some(kept), Some(dropped), Some(rest)) = (text.get(start..after), text.get(after..end), text.get(end..))
+    f.terminator = terminator(rest).into();
+    // The node's last `}`: its block's, or that of a slashdashed block after it, which ends `before_terminator`.
+    let Some(&close) = closes.and_then(|closes| closes.get(closes.partition_point(|&c| c < end).wrapping_sub(1)))
     else {
         return;
     };
-    if close < start || dropped.is_empty() || !kept.ends_with(&*f.before_terminator) {
+    let after = close + 1;
+    let (Some(kept), Some(dropped)) = (text.get(start..after), text.get(after..end)) else {
         return;
+    };
+    if close >= start && kept.ends_with(&*f.before_terminator) {
+        f.before_terminator.push_str(dropped);
     }
-    f.before_terminator.push_str(dropped);
-    f.terminator = terminator(rest).into();
 }
 
 /// The node terminator `rest` starts with: `;`, a line ending, or a line comment and its line ending. Empty at the end
@@ -84,8 +93,32 @@ mod tests {
         let mut doc: KdlDocument = text.parse().expect("test documents parse");
         let scan = prescan::scan(text);
         assert_eq!(scan.broke_at, None);
-        restore(text, &mut doc, &scan.closes);
+        restore(text, &mut doc, Some(&scan.closes));
         doc.to_string()
+    }
+
+    /// As if the scan hadn't followed the text.
+    fn without_closes(text: &str) -> String {
+        let mut doc: KdlDocument = text.parse().expect("test documents parse");
+        restore(text, &mut doc, None);
+        doc.to_string()
+    }
+
+    #[test]
+    fn without_the_scan_the_terminator_comes_back() {
+        for (text, printed) in [
+            ("a {\n  b\n} // after\nc", "a {\n  b\n}// after\nc"),
+            ("a {}  \nb", "a {}\nb"),
+            ("a {} /* c */ ;b", "a {};b"),
+            ("a { b {}  \n}", "a { b {}\n}"),
+            ("a {} \\\n ;", "a {};"),
+            ("a {}  ", "a {}"),
+            ("a {};b", "a {};b"),
+        ] {
+            let out = without_closes(text);
+            assert_eq!(out, printed);
+            assert!(out.parse::<KdlDocument>().is_ok(), "{out:?}");
+        }
     }
 
     #[test]

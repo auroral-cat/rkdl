@@ -668,80 +668,69 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Where an escaped run of whitespace (`\` and then spaces and line breaks) starting at `at` ends, if one does.
-    fn escaped_whitespace(&self, at: usize) -> Option<usize> {
-        let rest = self.text.get(at..)?.strip_prefix('\\')?;
-        let run = rest.len() - rest.trim_start_matches(is_blank).len();
-        (run > 0).then_some(at + 1 + run)
-    }
-
-    /// The spaces at the start of the line at `at`, and where the line's leading whitespace ends. In a quoted string
-    /// that whitespace can include escaped runs, which reach over line breaks; the spaces stop at the first one.
-    fn leading_whitespace(&self, at: usize, quoted: bool) -> (&'a str, usize) {
-        let rest = self.text.get(at..).unwrap_or_default();
-        let spaces = rest.len() - rest.trim_start_matches(is_space).len();
-        let mut end = at + spaces;
-        while let Some(next) = self.escaped_whitespace(end).filter(|_| quoted) {
-            end = next;
-        }
-        (rest.get(..spaces).unwrap_or_default(), end)
-    }
-
-    /// A multi-line string's lines, from just after the opening line break through the closing quotes, the way kdl-rs
-    /// reads them, `start` being where the string starts. The closing quotes are the first that start a line, after its leading whitespace. Their line's
-    /// spaces are the prefix every other line starts with, unless it's blank. `quoted` strings have escapes, and an
-    /// escaped run of whitespace joins lines; raw strings have neither.
+    /// A multi-line string's body, from just after the opening line break through the closing quotes, `start` being
+    /// where the string starts. The string ends at the first closing quotes. In a quoted string the lines are split and
+    /// dedented after whitespace escapes (`\` and then spaces and line breaks) are taken out, as the spec says, so an
+    /// escape can join lines and add to or take from a line's indentation. Then the closing quotes' line has to be
+    /// spaces up to them, and every other line has to start with those spaces, unless it's all spaces. Raw strings
+    /// have no escapes.
     fn multi_line_body(&mut self, start: usize, close: &str, quoted: bool) -> Result<(), Stop> {
+        // Where each line that isn't all spaces starts, and the spaces it starts with.
         let mut lines = Vec::new();
-        let prefix = loop {
-            let line = self.pos;
-            let (spaces, end) = self.leading_whitespace(line, quoted);
-            if self.text.get(end..).is_some_and(|r| r.starts_with(close)) {
-                self.pos = end + close.len();
-                break spaces;
-            }
-            lines.push(line);
-            loop {
-                let at = self.pos;
-                match self.peek() {
-                    None => return Err(Stop::broken(start, "Unclosed string")),
-                    Some(c) if is_newline(c) => break,
-                    Some(c) if is_disallowed(c) => return Err(Stop::broken(at, "Character not allowed in KDL")),
-                    Some(_) if self.rest().starts_with(close) => {
+        let mut line = self.pos;
+        let mut indent = String::new();
+        let mut blank = true;
+        loop {
+            let at = self.pos;
+            match self.peek() {
+                None => return Err(Stop::broken(start, "Unclosed string")),
+                Some(_) if self.rest().starts_with(close) => {
+                    if !blank {
                         return Err(Stop::broken(at, "Closing quotes inside a multi-line string"));
                     }
-                    Some('\\') if quoted => {
-                        self.bump();
-                        self.escape()?;
+                    self.pos += close.len();
+                    break;
+                }
+                Some(c) if is_newline(c) => {
+                    self.eat_newline();
+                    let spaces = std::mem::take(&mut indent);
+                    if !blank {
+                        lines.push((line, spaces));
                     }
-                    Some(_) => {
-                        self.bump();
+                    line = self.pos;
+                    blank = true;
+                }
+                Some(c) if is_disallowed(c) => return Err(Stop::broken(at, "Character not allowed in KDL")),
+                Some('\\') if quoted => {
+                    self.bump();
+                    if self.peek().is_some_and(is_blank) {
+                        while self.peek().is_some_and(is_blank) {
+                            self.bump();
+                        }
+                    } else {
+                        self.escape()?;
+                        blank = false;
+                    }
+                }
+                Some(c) => {
+                    self.bump();
+                    if blank && is_space(c) {
+                        indent.push(c);
+                    } else {
+                        blank = false;
                     }
                 }
             }
-            self.eat_newline();
-        };
-        let end = self.pos;
-        for line in lines {
-            let (spaces, after) = self.leading_whitespace(line, true);
-            if after > line + spaces.len() {
-                // kdl-rs's handling of a body line that starts with escaped whitespace is subtle enough that the scan
-                // doesn't follow it.
-                return Err(Stop::broken(
-                    line,
-                    "Escaped whitespace starting a multi-line string line",
-                ));
-            }
-            let text = self.text.get(line..).unwrap_or_default();
-            let blank = text.get(spaces.len()..).is_some_and(|r| r.starts_with(is_newline));
-            if !text.starts_with(prefix) && !blank {
+        }
+        // `indent` is the closing quotes' line's now.
+        for (line, spaces) in lines {
+            if !spaces.starts_with(&indent) {
                 return Err(Stop::broken(
                     line,
                     "Line doesn't start with the indentation of the closing quotes",
                 ));
             }
         }
-        self.pos = end;
         Ok(())
     }
 
@@ -979,6 +968,70 @@ mod tests {
         ] {
             let scan = scan(text);
             assert_eq!(scan.broke_at, None, "{:?}", short(text));
+        }
+    }
+
+    /// The spec dedents a multi-line string after taking out its whitespace escapes, so an escape can stand in a
+    /// line's indentation, join lines, or come before the closing quotes. In raw strings `\` is just text.
+    #[test]
+    fn whitespace_escapes() {
+        let follows = |text: &str| scan(text).broke_at.is_none();
+        for text in [
+            "a \"x\\  y\"",
+            "a \"x\\\n   y\"",
+            "a \"x\\ \r\n\t\"",
+            "a \"\"\"\n  \\  x\n  \"\"\"",
+            "a \"\"\"\n  x\\\n  y\n  \"\"\"",
+            "a \"\"\"\n  x \\\ny\n  \"\"\"",
+            "a \"\"\"\n  x\n  \\   \"\"\"",
+            "a \"\"\"\n  x\n  \\\n  \"\"\"",
+            "a \"\"\"\n  \\\n  x\n  \"\"\"",
+            "a \"\"\"\n \\ \t x\n \"\"\"",
+            "a #\"\"\"\n  \\  x\n  \"\"\"#",
+            "a #\"x\\  y\"#",
+        ] {
+            assert!(text.parse::<kdl::KdlDocument>().is_ok(), "{text:?}");
+            assert!(follows(text), "{text:?}");
+        }
+        for text in [
+            // The escape takes the line break before the closing quotes.
+            "a \"\"\"\n  x\\\n  \"\"\"",
+            // `x` without the two spaces in front.
+            "a \"\"\"\n\\  x\n  \"\"\"",
+            // The escape takes the line break and the indentation after it.
+            "a \"\"\"\n\\\n  x\n  \"\"\"",
+            // Raw: the line starts with `\`, not the closing quotes' two spaces.
+            "a #\"\"\"\n\\  x\n  \"\"\"#",
+        ] {
+            assert!(text.parse::<kdl::KdlDocument>().is_err(), "{text:?}");
+            assert!(!follows(text), "{text:?}");
+        }
+    }
+
+    /// Every string kdl-rs takes, from a few characters that make escapes, quotes and line breaks, scans without a
+    /// break.
+    #[test]
+    fn strings_kdl_rs_takes_scan_without_a_break() {
+        let alphabet = [" ", "\\", "\n", "x", "\"", "\r", "\t"];
+        let mut bodies = vec![String::new()];
+        let mut longest = vec![String::new()];
+        for _ in 0..5 {
+            longest = longest
+                .iter()
+                .flat_map(|b| alphabet.iter().map(move |a| format!("{b}{a}")))
+                .collect();
+            bodies.extend(longest.iter().cloned());
+        }
+        for body in bodies {
+            for text in [
+                format!("a \"{body}\""),
+                format!("a \"\"\"\n{body}\"\"\""),
+                format!("a #\"\"\"\n{body}\"\"\"#"),
+            ] {
+                if text.parse::<kdl::KdlDocument>().is_ok() {
+                    assert_eq!(scan(&text).broke_at, None, "{text:?}");
+                }
+            }
         }
     }
 }

@@ -160,6 +160,67 @@ def test_text_after_a_closing_brace_survives_edits():
     assert str(doc) == "a {} // c\nb { x 1 {}  \n    y\n}\n"
 
 
+def test_text_after_a_closing_brace_survives_an_escape_starting_a_string_line():
+    text = 'a {\n  b\n} // after\nc """\n  \\  x\n  """\n'
+    doc = rkdl.parse(text)
+    assert str(doc) == text
+    assert doc["c"].args[0] == "x"
+
+
+# A `\` and the spaces and line breaks after it are left out of a quoted string. In a multi-line string that happens
+# before the lines are dedented. In a raw string `\` is just text.
+ESCAPED_WHITESPACE = [
+    ('"x\\  y"', "xy"),
+    ('"\\  x"', "x"),
+    ('"x\\\t "', "x"),
+    ('"x\\\n    y"', "xy"),
+    ('"x\\\r\n\r\n y"', "xy"),
+    ('"""\n    \\  x\n    """', "x"),
+    ('"""\n    \\\n  x\n    """', "x"),
+    ('"""\n    x\\   y\n    """', "xy"),
+    ('"""\n    x\\ \n    y\n    """', "xy"),
+    ('"""\n    x \\\n\n    y\n    z\n    """', "x y\nz"),
+    ('"""\n    x\n    \\  """', "x"),
+    ('"""\n    x\n  \\\n    """', "  x"),
+    ('#"x\\  y"#', "x\\  y"),
+    ('#"""\n    \\  x\n    """#', "\\  x"),
+]
+
+
+@pytest.mark.parametrize(("string", "value"), ESCAPED_WHITESPACE)
+def test_escaped_whitespace_round_trips(string, value):
+    text = (
+        "outer {\n"
+        "    inner {\n"
+        f"        deep {string} {{ leaf }}  // after deep\n"
+        "    } /* after inner */ ;\n"
+        f"    s {string}\n"
+        "}  // after outer\n"
+        f"tail k={string}\n"
+    )
+    doc = rkdl.parse(text)
+    assert str(doc) == text
+    assert doc["outer"]["inner"]["deep"].args[0] == value
+    assert doc["outer"]["s"].args[0] == value
+    assert doc["tail"].props["k"] == value
+    assert str(rkdl.parse(str(doc))) == text
+
+
+@pytest.mark.parametrize(
+    "string",
+    [
+        # The escape takes the line break before the closing quotes, so they end a line with `x` on it.
+        '"""\n    x\\\n    """',
+        # Without the escape, `x` doesn't start with the closing quotes' four spaces.
+        '"""\n\\    x\n    """',
+        '"""\n  \\\n    x\n    """',
+    ],
+)
+def test_escaped_whitespace_counts_before_dedenting(string):
+    with pytest.raises(rkdl.ParseError):
+        rkdl.parse(f"a {{}} // c\nb {string}\n")
+
+
 # kdl-rs reads what's inside a slashdashed block again for every level of them around it, doubling its time per
 # level (notes/upstream.md). rkdl refuses text it would spend too long on.
 

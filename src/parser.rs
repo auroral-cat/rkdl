@@ -126,11 +126,10 @@ fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<(KdlDocument,
         return Err(refused(text, refusal));
     }
     let mut kdl = text.parse::<KdlDocument>()?;
-    // The scan reads every document kdl-rs parses without a break, so this always runs. Without the scan's record of
-    // the blocks, the text after `}` would stay dropped.
-    if scan.broke_at.is_none() {
-        blocks::restore(text, &mut kdl, &scan.closes);
-    }
+    // The scan follows every valid document, but kdl-rs may take text the spec doesn't, and then the scan breaks and
+    // its record of the blocks is incomplete. Without it the text after a `}` comes back only in part (see blocks.rs).
+    let closes = scan.broke_at.is_none().then_some(&scan.closes[..]);
+    blocks::restore(text, &mut kdl, closes);
     annotation::restore(&mut kdl);
     // Positions come from the spans, which say where things were in `text`, so they're read before formatting.
     let ids = IdTree::from_parse(&kdl, text);

@@ -196,7 +196,13 @@ KEYWORDS = {"true", "false", "null", "inf", "nan"}
 ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
 
 
-def quote(s):
+KDL_SPACES = set(map(chr, [0x09, 0x20, 0xA0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000]))
+# What follows the `\` of a whitespace escape. A string drops the `\` and all of it.
+WS_ESCAPES = [" ", "\t", "   ", "\u3000", "\n", " \n  ", "\n\t", "\n\n"]
+
+
+def escaped(s):
+    """Each character of `s` as a quoted string writes it."""
     out = []
     for c in s:
         if c in ESCAPES:
@@ -205,21 +211,71 @@ def quote(s):
             out.append(f"\\u{{{ord(c):x}}}")
         else:
             out.append(c)
-    return '"' + "".join(out) + '"'
+    return out
 
 
-def render_string(draw, s):
-    style = draw(st.sampled_from(["quoted", "raw", "bare"]))
+def with_ws_escapes(draw, pieces, lines, at_end):
+    """`pieces` joined, sometimes with whitespace escapes between them, which change nothing: one goes only before a
+    piece that doesn't start with whitespace, or it would take that too. `lines`: an escape can hold line breaks.
+    `at_end`: one can go after the last piece."""
+    if draw(st.integers(0, 3)) != 0:
+        return "".join(pieces)
+    runs = st.sampled_from([r for r in WS_ESCAPES if lines or "\n" not in r])
+    out = []
+    for piece in pieces:
+        if piece[0] not in KDL_SPACES and draw(st.integers(0, 3)) == 0:
+            out.append("\\" + draw(runs))
+        out.append(piece)
+    if at_end and draw(st.booleans()):
+        out.append("\\" + draw(runs))
+    return "".join(out)
+
+
+def render_multi_line(draw, s, raw):
+    """`s` as a multi-line string, or None if it can't be one. Every line starts with the closing quotes' indentation;
+    an empty line sometimes has it too."""
+    lines = s.split("\n")
+    pad = draw(st.sampled_from(["", " ", "    ", "\t"]))
+    # A line of only whitespace reads as empty.
+    blank = [i for i, line in enumerate(lines) if line and all(c in KDL_SPACES for c in line)]
+    if raw:
+        # kdl-rs rejects a multi-line raw string whose one line is `"`.
+        if blank or s == '"' or '"#' in s or any(c in UNPRINTABLE or c in "\r\f\b" for c in s):
+            return None
+        body = [pad + line if line or draw(st.booleans()) else "" for line in lines]
+        return '#"""\n' + "\n".join(body) + "\n" + pad + '"""#'
+    body = []
+    for i, line in enumerate(lines):
+        if not line:
+            body.append(draw(st.sampled_from(["", pad])))
+            continue
+        pieces = escaped(line)
+        if i in blank:
+            pieces[0] = f"\\u{{{ord(line[0]):x}}}"
+        # An escape at the end of the line would take the line break.
+        body.append(pad + with_ws_escapes(draw, pieces, lines=True, at_end=False))
+    return '"""\n' + "\n".join(body) + "\n" + pad + '"""'
+
+
+def render_string(draw, s, lines=False):
+    """`s` as a bare, quoted or raw string. `lines`: it can take more than one line of text."""
+    style = draw(
+        st.sampled_from(["quoted", "raw", "bare", "multi", "raw multi"] if lines else ["quoted", "raw", "bare"])
+    )
     if style == "bare" and BARE.fullmatch(s) and s not in KEYWORDS:
         return s
+    if style in ("multi", "raw multi"):
+        text = render_multi_line(draw, s, raw=style == "raw multi")
+        if text is not None:
+            return text
     # `#"""#` would open a multi-line raw string.
     raw_ok = '"#' not in s and not s.startswith('"') and not any(c in UNPRINTABLE or c in "\r\n\f\b" for c in s)
     if style == "raw" and raw_ok:
         return '#"' + s + '"#'
-    return quote(s)
+    return '"' + with_ws_escapes(draw, escaped(s), lines, at_end=True) + '"'
 
 
-def render_value(draw, v):
+def render_value(draw, v, lines):
     if v is None:
         return "#null"
     if v is True:
@@ -236,24 +292,25 @@ def render_value(draw, v):
         if math.isinf(v):
             return "#inf" if v > 0 else "#-inf"
         return repr(v)
-    return render_string(draw, v)
+    return render_string(draw, v, lines)
 
 
-def render_entry(draw, key, entry):
-    ty = "" if entry.type is None else "(" + render_string(draw, entry.type) + ")"
-    text = ty + render_value(draw, entry.value)
-    return text if key is None else render_string(draw, key) + "=" + text
+def render_entry(draw, key, entry, lines):
+    ty = "" if entry.type is None else "(" + render_string(draw, entry.type, lines) + ")"
+    text = ty + render_value(draw, entry.value, lines)
+    return text if key is None else render_string(draw, key, lines) + "=" + text
 
 
-def render_head(draw, node):
-    """A node's type, name and entries, and a skipped block if it has a block. All on one line."""
+def render_head(draw, node, lines):
+    """A node's type, name and entries, and a skipped block if it has a block. All on one line, unless `lines`
+    lets strings take more than one."""
     parts = []
     if node.type is not None:
         pad = st.sampled_from(["", "", " ", "\t", "/* c */", " /* c */ "])
-        ty = draw(pad) + render_string(draw, node.type) + draw(pad)
-        parts.append("(" + ty + ")" + draw(pad) + render_string(draw, node.name))
+        ty = draw(pad) + render_string(draw, node.type, lines) + draw(pad)
+        parts.append("(" + ty + ")" + draw(pad) + render_string(draw, node.name, lines))
     else:
-        parts.append(render_string(draw, node.name))
+        parts.append(render_string(draw, node.name, lines))
     # Properties go between arguments, keeping their own order.
     entries = [(None, e) for e in node.args]
     lowest = 0
@@ -266,7 +323,7 @@ def render_head(draw, node):
             parts.append("/-" + draw(st.sampled_from(["0", "x=1", '"s"'])))
         if draw(st.integers(0, 8)) == 0:
             parts.append("/* c */")
-        parts.append(render_entry(draw, key, e))
+        parts.append(render_entry(draw, key, e, lines))
     line = draw(st.sampled_from([" ", "  ", "\t"])).join(parts)
     if node.children is not None and draw(st.integers(0, 6)) == 0:
         line += " /-{ skipped }"
@@ -279,7 +336,7 @@ def render_block_on_one_line(draw, nodes):
     for node in nodes:
         node.flat = True
         node.one_line = node.children is not None
-        line = render_head(draw, node)
+        line = render_head(draw, node, lines=False)
         if node.children:
             line += render_block_on_one_line(draw, node.children)
         elif node.children is not None:
@@ -306,7 +363,7 @@ def render_nodes(draw, nodes, indent, level):
             # No `;` after a slashdashed node: kdl-rs rejects it (notes/upstream.md).
             out.append(pad + "/- gone 1 {\n" + pad + indent + "x\n" + pad + "}\n")
             above = True
-        line = pad + render_head(draw, node)
+        line = pad + render_head(draw, node, lines=True)
         if node.children and draw(st.integers(0, 3)) == 0:
             line += render_block_on_one_line(draw, node.children)
         elif node.children:
@@ -334,6 +391,25 @@ def model_nodes(draw, level=0):
 
 
 HEADER = "// the header"
+STRING_START = re.compile(r'(#*)("""|")')
+
+
+def outside_strings(text):
+    """`text` without its quoted and raw strings. Only for generated text, whose comments hold no quotes."""
+    out = []
+    at = 0
+    while start := STRING_START.search(text, at):
+        out.append(text[at : start.start()])
+        hashes, quotes = start.groups()
+        at = start.end()
+        if hashes:
+            at = text.index(quotes + hashes, at) + len(quotes + hashes)
+            continue
+        while not text.startswith(quotes, at):
+            at += 2 if text[at] == "\\" else 1
+        at += len(quotes)
+    out.append(text[at:])
+    return "".join(out)
 
 
 @st.composite
@@ -344,7 +420,8 @@ def generated_documents(draw):
     if draw(st.booleans()):
         # A blank line ends the header's claim on the first node: it stays at the top whatever happens to the nodes.
         text = HEADER + "\n\n" + text
-    # The generator never puts a line ending inside a value or comment, so this changes only the line ends.
+    # Inside a value, a line ending is only in a multi-line string, which reads any line ending as `\n`, or in a
+    # whitespace escape, which drops it. So this changes only the line ends.
     if draw(st.booleans()):
         text = text.replace("\n", "\r\n")
     return text, nodes
@@ -1117,8 +1194,9 @@ class EditSequences(RuleBasedStateMachine):
     def line_endings_keep_the_document_style(self):
         for k, doc in enumerate(self.docs):
             text = str(doc)
+            # A line ending inside a string is part of the string, and stays as it was written.
             if self.crlf[k]:
-                assert re.search(r"(?<!\r)\n", text) is None, text
+                assert re.search(r"(?<!\r)\n", outside_strings(text)) is None, text
 
     @invariant()
     def the_header_stays_at_the_top(self):
