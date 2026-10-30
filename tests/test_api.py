@@ -472,6 +472,64 @@ def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
     assert str(doc) == "n (u8)3 x\n"
 
 
+@pytest.mark.parametrize(
+    ("ty", "old", "fits", "read", "misfit"),
+    [
+        ("date", '"2026-01-01"', "2029-01-01", "datetime.date(2029, 1, 1)", "next tuesday"),
+        ("date-time", '"2026-01-01T09:00:00"', "2029-01-01T10:00:00", "datetime.datetime(2029, 1, 1, 10, 0)", "soon"),
+        ("time", '"09:00:00"', "10:30:00", "datetime.time(10, 30)", "half past"),
+        ("ipv4", '"10.0.0.1"', "10.0.0.2", "IPv4Address('10.0.0.2')", "::1"),
+        ("ipv6", '"::1"', "::2", "IPv6Address('::2')", "10.0.0.2"),
+        (
+            "uuid",
+            '"00000000-0000-0000-0000-000000000000"',
+            "12345678-1234-5678-1234-567812345678",
+            "UUID('12345678-1234-5678-1234-567812345678')",
+            "not-a-uuid",
+        ),
+        ("regex", '"a+"', "b+", "re.compile('b+')", "(unclosed"),
+        ("base64", '"aGk="', "aGV5", "b'hey'", "not base64!"),
+        ("decimal", '"1.5"', "2.25", "Decimal('2.25')", "lots"),
+    ],
+)
+def test_a_plain_string_a_builtin_type_reads_keeps_the_annotation(ty, old, fits, read, misfit):
+    doc, n = node(f"n ({ty}){old} k=({ty}){old}\n")
+    n.args[0] = fits
+    n.props["k"] = misfit
+    assert str(doc) == f'n ({ty})"{fits}" k="{misfit}"\n'
+    assert repr(n.args[0]) == read
+    assert n.props["k"] == misfit
+    assert str(rkdl.parse(str(doc))) == str(doc)
+
+
+@pytest.mark.parametrize(
+    ("ty", "old", "value", "text"),
+    [
+        # A number the type reads keeps it, an int too.
+        ("decimal64", "1.5", 2, "(decimal64)2"),
+        ("decimal128", "1.5", 0.1, "(decimal128)0.1"),
+        # Any other kind of plain value doesn't.
+        ("u8", "1", 1.5, "1.5"),
+        ("u8", "1", True, "#true"),
+        ("f32", "1.5", "1.5", '"1.5"'),
+        ("date", '"2026-01-01"', 5, "5"),
+        ("date", '"2026-01-01"', None, "#null"),
+        ("decimal64", "1.5", "1.5", '"1.5"'),
+    ],
+)
+def test_other_plain_values_over_a_builtin_type(ty, old, value, text):
+    doc, n = node(f"n ({ty}){old}\n")
+    n.args[0] = value
+    assert str(doc) == f"n {text}\n"
+
+
+def test_a_kept_builtin_annotation_keeps_the_strings_spelling():
+    doc, n = node('n (date)#"2026-01-01"# (ipv4)"10.0.0.1"\n')
+    n.args[0] = "2029-01-01"
+    n.args[1] = "10.0.0.1"
+    assert str(doc) == 'n (date)#"2029-01-01"# (ipv4)"10.0.0.1"\n'
+
+
 OUT_OF_RANGE = "300 doesn't fit type u8: out of range 0..=255"
 
 

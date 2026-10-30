@@ -345,7 +345,13 @@ pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: 
                         value.repr()?
                     )));
                 }
-                kept
+                // A plain value keeps the annotation if the type reads it, as with custom types.
+                match kept {
+                    None if is_exact_plain(value) => plain_to_kdl(value)?
+                        .filter(|kdl| decode_builtin(value.py(), b, kdl, None).is_ok())
+                        .map(|kdl| (kdl, None)),
+                    kept => kept,
+                }
             }
             Some(Converter::User(user)) => match encode_user(user, value)? {
                 Some(kdl) => Some((kdl, None)),

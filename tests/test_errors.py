@@ -1,3 +1,4 @@
+import io
 import pickle
 
 import pytest
@@ -93,6 +94,54 @@ def test_parse_error_pickles_with_its_diagnostics():
     assert (again.line, again.column, again.offset) == (err.line, err.column, err.offset)
     assert again.diagnostics == err.diagnostics
     assert [d.message for d in again.diagnostics] == [d.message for d in err.diagnostics]
+
+
+BAD = "a 1\nb {\n"
+
+
+def load_error(source):
+    with pytest.raises(rkdl.ParseError) as info:
+        rkdl.load(source)
+    return info.value
+
+
+@pytest.mark.parametrize(
+    "open_it",
+    [
+        lambda path: path,
+        lambda path: str(path),
+        lambda path: open(path, "rb"),  # noqa: SIM115
+        lambda path: open(path, encoding="utf-8"),  # noqa: SIM115
+    ],
+    ids=["Path", "str", "binary file", "text file"],
+)
+def test_a_parse_error_from_load_names_the_file(tmp_path, open_it):
+    path = tmp_path / "config.kdl"
+    path.write_text(BAD)
+    source = open_it(path)
+    try:
+        err = load_error(source)
+    finally:
+        if hasattr(source, "close"):
+            source.close()
+    assert err.path == str(path)
+    lines = str(err).splitlines()
+    assert lines[0] == f"  × {path}:2:3: Failed to parse KDL document"
+    assert f"╭─[{path}:2:3]" in str(err)
+    assert (err.line, err.column) == (2, 3)
+    again = pickle.loads(pickle.dumps(err))
+    assert again.path == err.path
+    assert str(again) == str(err)
+
+
+def test_a_parse_error_from_text_has_no_path():
+    err = parse_error(BAD)
+    assert err.path is None
+    assert str(err).splitlines()[0] == "  × Failed to parse KDL document"
+    assert "╭─[2:3]" in str(err)
+    # A file object without a path, like one in memory.
+    assert load_error(io.StringIO(BAD)).path is None
+    assert load_error(io.BytesIO(BAD.encode())).path is None
 
 
 def test_diagnostics_compare_by_value():

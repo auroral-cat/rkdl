@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use crate::document::Document;
-use crate::errors::parse_error;
+use crate::errors::parse_error_in;
 use crate::format::Formatter;
 use crate::layout;
 use crate::node::{self, Node, Spec};
@@ -38,11 +38,7 @@ impl Parser {
     }
 
     fn parse(&self, py: Python<'_>, text: &str) -> PyResult<Document> {
-        let formatter = self.formatter.as_ref().map(Py::get);
-        let kdl = py
-            .detach(|| on_big_stack(|| parse_text(text, formatter)))?
-            .map_err(|e| parse_error(py, &e))?;
-        Ok(Document::new(kdl, self.types.clone_ref(py)))
+        self.parse_from(py, text, None)
     }
 
     /// A new detached node that reads and writes through this parser's types, so its values can be of custom types.
@@ -68,6 +64,17 @@ impl Parser {
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.types)
+    }
+}
+
+impl Parser {
+    /// `path` is the file the text came from, for the `ParseError`.
+    fn parse_from(&self, py: Python<'_>, text: &str, path: Option<&str>) -> PyResult<Document> {
+        let formatter = self.formatter.as_ref().map(Py::get);
+        let kdl = py
+            .detach(|| on_big_stack(|| parse_text(text, formatter)))?
+            .map_err(|e| parse_error_in(py, &e, path))?;
+        Ok(Document::new(kdl, self.types.clone_ref(py)))
     }
 }
 
@@ -165,4 +172,14 @@ pub fn parse(py: Python<'_>, text: &str) -> PyResult<Document> {
         formatter: None,
     };
     parser.parse(py, text)
+}
+
+/// `parse` for `load`, whose `ParseError` names the file the text came from.
+#[pyfunction]
+pub fn _parse_file(py: Python<'_>, text: &str, path: &str) -> PyResult<Document> {
+    let parser = Parser {
+        types: TypeRegistry::shared_builtin(py)?,
+        formatter: None,
+    };
+    parser.parse_from(py, text, Some(path))
 }

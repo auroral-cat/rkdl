@@ -1,5 +1,8 @@
 use kdl::{KdlDiagnostic, KdlError};
-use miette::{GraphicalReportHandler, GraphicalTheme};
+use std::fmt;
+use std::sync::Arc;
+
+use miette::{GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, Severity, SourceCode};
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -77,19 +80,32 @@ impl Diagnostic {
 }
 
 pub(crate) fn parse_error(py: Python<'_>, err: &KdlError) -> PyErr {
+    parse_error_in(py, err, None)
+}
+
+/// `parse_error` for text read from `path`, which the report names.
+pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>) -> PyErr {
     let diagnostics: Vec<Diagnostic> = err
         .diagnostics
         .iter()
         .map(|d| Diagnostic::from_kdl(&err.input, d))
         .collect();
     let first = diagnostics.first().map(|d| (d.line, d.column, d.offset));
-    let exc = ParseError::new_err(render(err));
+    let report = match path {
+        Some(path) => {
+            let (line, column) = first.map_or((1, 1), |f| (f.0, f.1));
+            render(&InFile::new(err, path, line, column))
+        }
+        None => render(err),
+    };
+    let exc = ParseError::new_err(report);
     let value = exc.value(py);
     let set = value
         .setattr("line", first.map(|f| f.0))
         .and_then(|()| value.setattr("column", first.map(|f| f.1)))
         .and_then(|()| value.setattr("offset", first.map(|f| f.2)))
-        .and_then(|()| value.setattr("diagnostics", diagnostics));
+        .and_then(|()| value.setattr("diagnostics", diagnostics))
+        .and_then(|()| value.setattr("path", path));
     match set {
         Ok(()) => exc,
         Err(e) => e,
@@ -97,11 +113,89 @@ pub(crate) fn parse_error(py: Python<'_>, err: &KdlError) -> PyErr {
 }
 
 /// Exception text ends up in log files, so render without colour or terminal hyperlinks.
-fn render(err: &KdlError) -> String {
+fn render(err: &dyn miette::Diagnostic) -> String {
     let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor()).with_links(false);
     let mut out = String::new();
     match handler.render_report(&mut out, err) {
         Ok(()) => out.trim_end().to_owned(),
         Err(_) => err.to_string(),
+    }
+}
+
+/// A kdl-rs error with its source named after a file, so the report's first line reads `config.kdl:4:9: ...` and each
+/// snippet's header is `[config.kdl:4:9]`, as miette prints named sources.
+#[derive(Debug)]
+struct InFile {
+    title: String,
+    source: NamedSource<Arc<String>>,
+    diagnostics: Vec<Located>,
+}
+
+#[derive(Debug)]
+struct Located {
+    diagnostic: KdlDiagnostic,
+    source: NamedSource<Arc<String>>,
+}
+
+impl InFile {
+    fn new(err: &KdlError, path: &str, line: usize, column: usize) -> Self {
+        let source = NamedSource::new(path, Arc::clone(&err.input));
+        InFile {
+            title: format!("{path}:{line}:{column}: {err}"),
+            diagnostics: err
+                .diagnostics
+                .iter()
+                .map(|d| Located {
+                    diagnostic: d.clone(),
+                    source: source.clone(),
+                })
+                .collect(),
+            source,
+        }
+    }
+}
+
+impl fmt::Display for InFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.title)
+    }
+}
+
+impl std::error::Error for InFile {}
+
+impl miette::Diagnostic for InFile {
+    fn source_code(&self) -> Option<&dyn SourceCode> {
+        Some(&self.source)
+    }
+
+    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn miette::Diagnostic> + 'a>> {
+        Some(Box::new(self.diagnostics.iter().map(|d| d as &dyn miette::Diagnostic)))
+    }
+}
+
+impl fmt::Display for Located {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.diagnostic.fmt(f)
+    }
+}
+
+impl std::error::Error for Located {}
+
+// Everything but the source is kdl-rs's.
+impl miette::Diagnostic for Located {
+    fn source_code(&self) -> Option<&dyn SourceCode> {
+        Some(&self.source)
+    }
+
+    fn severity(&self) -> Option<Severity> {
+        miette::Diagnostic::severity(&self.diagnostic)
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        miette::Diagnostic::help(&self.diagnostic)
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
+        miette::Diagnostic::labels(&self.diagnostic)
     }
 }

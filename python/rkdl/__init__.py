@@ -16,6 +16,7 @@ from ._rkdl import (
     Props,
     Type,
     __version__,
+    _parse_file,
     parse,
 )
 
@@ -52,13 +53,17 @@ def load(source):
     ``newline=""`` turns CRLF into LF as it reads.
     """
     if isinstance(source, (str, os.PathLike)):
+        path = os.fsdecode(source)
         with open(source, "rb") as f:
             data = f.read()
     else:
+        path = _path_of(source)
         data = source.read()
     if isinstance(data, (bytes, bytearray, memoryview)):
         data = bytes(data).decode("utf-8")
-    return parse(data)
+    if path is None:
+        return parse(data)
+    return _parse_file(data, path)
 
 
 def dump(doc, target):
@@ -74,6 +79,17 @@ def dump(doc, target):
         target.write(str(doc).encode("utf-8"))
     else:
         target.write(str(doc))
+
+
+def _path_of(f):
+    # open(fd) names the file by its descriptor, and sys.stdin is "<stdin>": neither is a path.
+    name = getattr(f, "name", None)
+    if not isinstance(name, (str, os.PathLike)):
+        return None
+    name = os.fsdecode(name)
+    if name.startswith("<") and name.endswith(">"):
+        return None
+    return name
 
 
 def _is_binary(f):
