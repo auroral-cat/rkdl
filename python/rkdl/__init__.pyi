@@ -16,9 +16,7 @@ from collections.abc import (
     Sequence,
     ValuesView,
 )
-from typing import Any, ClassVar, Protocol, SupportsIndex, TypeAlias, TypeVar, final, overload, type_check_only
-
-from typing_extensions import Self
+from typing import Any, ClassVar, Protocol, Self, SupportsIndex, TypeAlias, TypeVar, final, overload, type_check_only
 
 __all__ = [
     "Args",
@@ -77,12 +75,14 @@ class ParseError(ValueError):
         column: The first problem's column, starting at 1.
         offset: The first problem's offset from the start of the text, starting at 0.
         diagnostics: Every problem found, in order.
+        path: The file `load` read the text from, or None if it didn't come from a named file.
     """
 
     line: int | None
     column: int | None
     offset: int | None
     diagnostics: list[Diagnostic]
+    path: str | None
 
 @final
 class Diagnostic:
@@ -258,7 +258,7 @@ def load(source: str | os.PathLike[str] | _Readable) -> Document:
         The document.
 
     Raises:
-        ParseError: The text isn't valid KDL.
+        ParseError: The text isn't valid KDL. Its `path` names the file, when it has a name.
         UnicodeDecodeError: The bytes aren't UTF-8.
     """
 

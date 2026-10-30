@@ -59,7 +59,7 @@ def load(source):
         The document.
 
     Raises:
-        ParseError: The text isn't valid KDL.
+        ParseError: The text isn't valid KDL. Its `path` names the file, when it has a name.
         UnicodeDecodeError: The bytes aren't UTF-8.
     """
     if isinstance(source, (str, os.PathLike)):

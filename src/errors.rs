@@ -21,7 +21,8 @@ create_exception!(
         "    line: The first problem's line, starting at 1.\n",
         "    column: The first problem's column, starting at 1.\n",
         "    offset: The first problem's offset from the start of the text, starting at 0.\n",
-        "    diagnostics: Every problem found, in order.",
+        "    diagnostics: Every problem found, in order.\n",
+        "    path: The file `load` read the text from, or None if it didn't come from a named file.",
     )
 );
 

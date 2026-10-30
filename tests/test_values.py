@@ -65,7 +65,7 @@ KNOWN = [
     ("(decimal64)0.1", decimal.Decimal("0.1")),
     ("(decimal128)12", decimal.Decimal(12)),
     ('(decimal)"3.14159265358979323846264338327950288"', decimal.Decimal("3.14159265358979323846264338327950288")),
-    ('(date-time)"2024-05-06T07:08:09+00:00"', datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)),
+    ('(date-time)"2024-05-06T07:08:09+00:00"', datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.UTC)),
     ('(date)"2024-05-06"', datetime.date(2024, 5, 6)),
     ('(time)"07:08:09"', datetime.time(7, 8, 9)),
     ('(ipv4)"10.0.0.1"', ipaddress.IPv4Address("10.0.0.1")),

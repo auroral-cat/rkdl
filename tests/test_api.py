@@ -189,7 +189,7 @@ def test_an_equal_value_built_anew_keeps_the_spelling():
     import uuid
 
     doc, n = node('n (date-time)"2026-01-01T09:00:00Z" (uuid)"ABCDEF00-0000-0000-0000-000000000000"')
-    n.args[0] = datetime.datetime(2026, 1, 1, 9, tzinfo=datetime.timezone.utc)
+    n.args[0] = datetime.datetime(2026, 1, 1, 9, tzinfo=datetime.UTC)
     n.args[1] = uuid.UUID("abcdef00-0000-0000-0000-000000000000")
     assert str(doc) == 'n (date-time)"2026-01-01T09:00:00Z" (uuid)"ABCDEF00-0000-0000-0000-000000000000"'
 

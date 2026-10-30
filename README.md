@@ -1,13 +1,17 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/auroral-cat/rkdl/main/.github/assets/banner-dark.png">
-    <img alt="rkdl: KDL for Python, powered by kdl-rs" src="https://raw.githubusercontent.com/auroral-cat/rkdl/main/.github/assets/banner-light.png" width="100%">
+    <img alt="rkdl: KDL for Python, built on kdl-rs" src="https://raw.githubusercontent.com/auroral-cat/rkdl/main/.github/assets/banner-light.png" width="100%">
   </picture>
 </p>
 
 rkdl reads and edits [KDL](https://kdl.dev) v2 documents from Python, using [kdl-rs](https://github.com/kdl-org/kdl-rs)
-underneath. When you edit a file and save it, everything you didn't touch stays as it was, comments and spelling
-included.
+underneath. When you edit a file and save it, the parts you didn't touch keep their comments, hex numbers and quoting.
+Only the whitespace right next to an edit can move.
+
+A KDL document is a list of nodes. Each node has a name, then arguments (plain values like `"web"` or `4`) and
+properties (`key=value`), and optionally a block of child nodes in `{ }`. A node or a value can carry a type
+annotation in parentheses, like `(date)"2026-10-30"`.
 
 ## Install
 
@@ -19,10 +23,10 @@ uv add "rkdl @ git+https://github.com/auroral-cat/rkdl@v0.1.0"
 pip install "rkdl @ git+https://github.com/auroral-cat/rkdl@v0.1.0"
 ```
 
-This builds it from source, so you need a Rust toolchain (from [rustup](https://rustup.rs), for example). rkdl needs
-Python 3.10 or newer.
+This builds it from source, so you need Rust. The build uses the toolchain version rkdl pins in `rust-toolchain.toml`;
+with [rustup](https://rustup.rs) that version is fetched automatically. rkdl needs Python 3.11 or newer.
 
-## A short tour
+## Editing a file
 
 Say `server.kdl` looks like this:
 
@@ -43,8 +47,8 @@ import rkdl
 doc = rkdl.load("server.kdl")
 
 server = doc["server"]
-print(server.args[0])             # web
-print(server.props["port"])       # 8080
+print(server.args[0])  # web
+print(server.props["port"])  # 8080
 print(server["workers"].args[0])  # 4
 ```
 
@@ -53,8 +57,10 @@ Change two values, add a node, remove another, and save:
 ```python
 server.props["port"] = 9090
 server["workers"].args[0] = 8
-server.children.append(rkdl.Node("timeout", 30))
-doc["logging"].detach()
+timeout = rkdl.Node("timeout", 30)
+server.children.append(timeout)
+logging = doc["logging"]
+logging.detach()
 
 rkdl.dump(doc, "server.kdl")
 ```
@@ -70,8 +76,8 @@ server "web" port=0x2382 {
 }
 ```
 
-The comment is still there, the port is still written in hex, and the new node got the same indentation as its
-siblings. `rkdl.parse(text)` and `str(doc)` do the same as `load` and `dump` with strings.
+The comment stayed, the port is still hex, and `timeout` is indented like its siblings. `load` and `dump` take a path
+or an open file, text or binary. `rkdl.parse(text)` and `str(doc)` do the same with strings.
 
 ## Finding nodes
 
@@ -90,11 +96,11 @@ scripts {
 """
 doc = rkdl.parse(text)
 
-first_dependency = doc["dependency"]           # matches any type: this is (dev)dependency
+first_dependency = doc["dependency"]  # matches any type: this is (dev)dependency
 dev_dependency = doc[("dev", "dependency")]
 all_dependencies = doc.get_all("dependency")
-license_node = doc.get("license")              # None
-has_scripts = "scripts" in doc                 # True
+license_node = doc.get("license")  # None
+has_scripts = "scripts" in doc  # True
 ```
 
 Iterating over a document or a node gives its children. `iter()` walks all the descendants depth first, and
@@ -109,6 +115,8 @@ test_parents = [node.parent.name for node in doc.iter("test")]
 # ['scripts']
 ```
 
+A node's `name` and `type` can be set too.
+
 ## Arguments and properties
 
 `node.args` is a live list of the node's arguments, and `node.props` a live dict of its properties, both as plain
@@ -118,7 +126,7 @@ Python values. Changing them changes the document.
 doc = rkdl.parse('dependency (dev)"pytest" "hypothesis" version=">=8" optional=#true\n')
 dependency = doc["dependency"]
 
-print(dependency.args)   # Args(['pytest', 'hypothesis'])
+print(dependency.args)  # Args(['pytest', 'hypothesis'])
 print(dependency.props)  # Props({'version': '>=8', 'optional': True})
 
 dependency.args.append("ruff")
@@ -128,9 +136,11 @@ print(doc)
 # dependency (dev)"pytest" "hypothesis" ruff version=">=9"
 ```
 
+A new string is written without quotes when KDL allows it, like `ruff` here.
+
 `node.entries` lists every argument and property in file order, as `Entry` objects. An entry has a `name` (`None`
-for an argument), a `type` and a `value`, and you can set all three. `args.entry(index)` and `props.entry(key)` get
-a single one.
+for an argument), a `type` and a `value`. `args.entry(index)` and `props.entry(key)` get a single one. You can set an
+entry's `type` and `value`, and the `name` of a property; an argument can't become a property or the other way round.
 
 ```python
 for entry in dependency.entries:
@@ -151,8 +161,10 @@ print(doc)
 `node.children` is a live list of nodes. It's `None` when the node has no `{ }` block. Assigning `[]` adds an empty
 block and assigning `None` removes it.
 
-A node can only be in one place at a time. To move it, take it out first with `detach()` (or `pop`, `remove`,
-`del`), then insert it somewhere else. To put the same node in twice, insert `node.copy()`.
+A node can only be in one place at a time. To move it, take it out first with `node.detach()`, or with
+`parent.children.pop(index)`, `parent.children.remove(node)` or `del parent.children[index]`, then insert it
+somewhere else. The comments on the lines above it and at the end of its line go with it. To put the same node in
+twice, insert `node.copy()`.
 
 ```python
 text = """\
@@ -170,7 +182,8 @@ done.children = []
 finished_task = todo.children[0]
 finished_task.detach()
 done.children.append(finished_task)
-todo.children.insert(0, rkdl.Node("task", "push to GitHub"))
+new_task = rkdl.Node("task", "push to GitHub")
+todo.children.insert(0, new_task)
 print(doc)
 ```
 
@@ -184,16 +197,35 @@ done {
 }
 ```
 
-Appending `finished_task` without detaching it raises `ValueError`. `rkdl.Node(name, *args, type=None,
-children=None, **props)` builds a new node that isn't in any document yet; `props={...}` takes keys that aren't
-Python identifiers.
+Appending `finished_task` without detaching it raises `ValueError`. `rkdl.Node(name, *args, type=None, props=None,
+children=None, **props)` builds a new node that isn't in any document yet; `props={...}` takes keys that
+aren't Python identifiers.
 
 ## Type annotations
 
-The spec's reserved type annotations come back as the matching standard library type where there is one: `date-time`
-is a `datetime`, `decimal` a `Decimal`, `uuid` a `UUID`, `ipv4` an `IPv4Address`, and so on. Integer types like
-`u8` check their range. Writing a value keeps the entry's annotation when the value fits it, and picks one from the
-Python type otherwise.
+The spec's reserved type annotations come back as Python types:
+
+| Annotation | Python type |
+| --- | --- |
+| `i8` `i16` `i32` `i64` `i128` `isize` `u8` `u16` `u32` `u64` `u128` `usize` | `int`, range checked |
+| `f32` `f64` | `float` |
+| `decimal64` `decimal128` `decimal` | `decimal.Decimal` |
+| `date-time` | `datetime.datetime` |
+| `date` | `datetime.date` |
+| `time` | `datetime.time` |
+| `ipv4` | `ipaddress.IPv4Address` |
+| `ipv6` | `ipaddress.IPv6Address` |
+| `uuid` | `uuid.UUID` |
+| `regex` | `re.Pattern` |
+| `base64` | `bytes` |
+| `duration` `currency` `country-2` `country-3` `country-subdivision` `email` `idn-email` `hostname` `idn-hostname` `url` `url-reference` `irl` `irl-reference` `url-template` `base85` | `str` |
+
+A value that doesn't fit its annotation, like `(date)"2026-13-01"`, still parses. Reading it raises `ValueError`.
+
+When you write a value to an entry that has an annotation, the annotation stays if the value reads as that type:
+`"2029-01-01"` written over a `(date)` stays `(date)`. A number out of range for a numeric type raises `ValueError`.
+Anything else gets an annotation picked from its Python type, or none for a plain value. To annotate a value
+yourself, set its entry's `type`.
 
 ```python
 import datetime
@@ -206,7 +238,8 @@ started = backup.props["started"]
 
 backup.props["keep"] = 14
 backup.props["finished"] = datetime.date(2026, 10, 31)
-backup.props.entry("retries").type = "u8"
+retries_entry = backup.props.entry("retries")
+retries_entry.type = "u8"
 print(doc)
 # backup started=(date-time)"2026-10-30T09:00:00Z" keep=(u8)14 retries=(u8)3 finished=(date)"2026-10-31"
 
@@ -226,7 +259,16 @@ class Celsius:
     degrees: float
 
 
-celsius_type = rkdl.Type("celsius", Celsius, decode=Celsius, encode=lambda temperature: temperature.degrees)
+def celsius_to_number(temperature):
+    return temperature.degrees
+
+
+celsius_type = rkdl.Type(
+    "celsius",
+    Celsius,
+    decode=Celsius,
+    encode=celsius_to_number,
+)
 parser = rkdl.Parser(types=[celsius_type])
 
 doc = parser.parse("oven (celsius)180.0\n")
@@ -272,13 +314,16 @@ server web port=8080 {
 `Parser(formatter=...)` to format every document as it's parsed:
 
 ```python
-doc.fmt(rkdl.Formatter(indent="\t", no_comments=True))
+tab_formatter = rkdl.Formatter(indent="\t", no_comments=True)
+doc.fmt(tab_formatter)
 ```
 
 ## Parse errors
 
-Text that isn't valid KDL raises `rkdl.ParseError`, a subclass of `ValueError`. Its message shows where the problem
-is, `line` and `column` point at the first one, and `diagnostics` has the details of each.
+Text that isn't valid KDL raises `rkdl.ParseError`, a subclass of `ValueError`. Its message shows where each problem
+is. `line` and `column` point at the first one, counting characters from 1. `diagnostics` has a `Diagnostic` for each
+problem, with `message`, `label`, `help`, `line`, `column`, `offset` and `length`. When `load` read the text from a
+file, `path` names it and so does the message; otherwise `path` is `None`.
 
 ```python
 try:
@@ -303,17 +348,16 @@ Error:
 
 ## Stability
 
-rkdl is 0.x, so anything may change, and there's no stability promise yet. Some things will change in 0.2, because
-0.2 replaces kdl-rs with rkdl's own parser: the text of `ParseError` and its diagnostics, what `fmt()` produces and
-which options `Formatter` takes, and where whitespace ends up after a few kinds of edit (the space after a `}`, for
-example).
+rkdl is 0.x, so anything may change. Some things are likely to change, in particular: the text of `ParseError` and its
+diagnostics, what `fmt()` produces and which options `Formatter` takes, and where whitespace lands next to an edit.
 
 ## Known limits
 
 - KDL v2 only.
-- Documents nested deeper than 1000 levels are refused with a `ParseError`.
-- A few kdl-rs bugs remain; see the tests marked `xfail`.
+- Documents nested deeper than 1000 levels are refused with a `ParseError`, and an edit that would nest deeper raises
+  `ValueError`.
+- A few kdl-rs bugs remain; see the tests marked `xfail` in [`tests/`](https://github.com/auroral-cat/rkdl/tree/main/tests).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
