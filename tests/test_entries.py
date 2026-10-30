@@ -263,9 +263,9 @@ def test_annotation_kept_when_the_value_fits():
 
 def test_annotation_inferred_when_the_value_does_not_fit():
     d, n = node("n (u8)1 when=(u8)2\n")
-    n.args[0] = 300
+    n.args[0] = "x"
     n.props["when"] = datetime.date(2024, 1, 2)
-    assert str(d) == 'n 300 when=(date)"2024-01-02"\n'
+    assert str(d) == 'n x when=(date)"2024-01-02"\n'
 
 
 def test_unknown_annotation_is_kept():

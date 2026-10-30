@@ -333,7 +333,20 @@ pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: 
         let kept = match types.get(ty) {
             // An unknown annotation is the user's own label, so any plain value keeps it.
             None => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
-            Some(Converter::Builtin(b)) => encode_builtin(b, value)?,
+            Some(Converter::Builtin(b)) => {
+                let kept = encode_builtin(b, value)?;
+                // A number of the type's own kind that's outside its range is a mistake, as with `entry.type = ...`,
+                // rather than a reason to drop the annotation.
+                if kept.is_none()
+                    && let Some(range) = range_of(b, value)
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "{} doesn't fit type {ty}: out of range {range}",
+                        value.repr()?
+                    )));
+                }
+                kept
+            }
             Some(Converter::User(user)) => match encode_user(user, value)? {
                 Some(kdl) => Some((kdl, None)),
                 // A plain value keeps a custom annotation if the type reads it, as `(celsius)22.0` would be read.
@@ -748,6 +761,19 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
         | Builtin::Regex
         | Builtin::Base64
         | Builtin::PlainString => Ok(None),
+    }
+}
+
+/// The range of a numeric built-in type, if `value` is a number of the kind it holds: an `int` for an integer type,
+/// an `int` or `float` for a float type. `bool` isn't a number here.
+#[expect(clippy::wildcard_enum_match_arm, reason = "only the numeric types have a range")]
+fn range_of(b: Builtin, value: &Bound<'_, PyAny>) -> Option<String> {
+    let is_int = value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>();
+    match b {
+        Builtin::Int { min, max } if is_int => Some(format!("{min}..={max}")),
+        Builtin::F32 if is_int || value.is_instance_of::<PyFloat>() => Some("±3.4028234663852886e+38".to_owned()),
+        Builtin::F64 if is_int || value.is_instance_of::<PyFloat>() => Some("±1.7976931348623157e+308".to_owned()),
+        _ => None,
     }
 }
 

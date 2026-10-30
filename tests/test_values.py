@@ -261,14 +261,11 @@ def test_current_type_kept_when_value_fits(value, current, expected):
 @pytest.mark.parametrize(
     ("value", "current", "expected"),
     [
-        (256, "u8", ("256", None)),
-        (-1, "u32", ("-1", None)),
         # bool is checked before int.
         (True, "u8", ("#true", None)),
         (True, "i32", ("#true", None)),
         (1.5, "i32", ("1.5", None)),
         (True, "f64", ("#true", None)),
-        (1e39, "f32", ("1e39", None)),
         ("2024-05-06", "date", ('"2024-05-06"', None)),
         (datetime.datetime(2024, 5, 6), "date", ('"2024-05-06T00:00:00"', "date-time")),
         (datetime.date(2024, 5, 6), "date-time", ('"2024-05-06"', "date")),
@@ -285,12 +282,29 @@ def test_current_type_replaced_when_value_does_not_fit(value, current, expected)
         assert from_python(value, current) == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "current", "message"),
+    [
+        (256, "u8", "256 doesn't fit type u8: out of range 0..=255"),
+        (-1, "u32", "-1 doesn't fit type u32: out of range 0..=4294967295"),
+        (128, "i8", "128 doesn't fit type i8: out of range -128..=127"),
+        (1e39, "f32", "1e+39 doesn't fit type f32: out of range ±3.4028234663852886e+38"),
+        (2**200, "f32", "doesn't fit type f32: out of range ±3.4028234663852886e+38"),
+        (2**1024, "f64", "doesn't fit type f64: out of range ±1.7976931348623157e+308"),
+    ],
+)
+def test_a_number_out_of_its_types_range_raises(value, current, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        from_python(value, current)
+
+
 def test_int_outside_i128_overflows():
     with pytest.raises(OverflowError, match=re.escape("int doesn't fit in a KDL integer (i128)")):
         from_python(2**127)
     with pytest.raises(OverflowError, match=re.escape("(i128)")):
         from_python(-(2**127) - 1)
-    with pytest.raises(OverflowError, match=re.escape("(i128)")):
+    # Under an integer annotation it's out of that type's range instead.
+    with pytest.raises(ValueError, match=re.escape("doesn't fit type u128: out of range 0..=")):
         from_python(2**127, "u128")
 
 

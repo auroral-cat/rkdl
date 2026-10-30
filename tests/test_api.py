@@ -2,6 +2,7 @@
 
 import copy
 import io
+import re
 
 import pytest
 import rkdl
@@ -462,11 +463,56 @@ def test_a_plain_value_the_type_reads_keeps_the_annotation():
     assert str(doc) == "n (celsius)22.0 3\n"
 
 
-def test_a_plain_write_to_a_builtin_type_is_unchanged():
+def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
     doc, n = node("n (u8)1 (u8)2\n")
     n.args[0] = 3
-    n.args[1] = 300
-    assert str(doc) == "n (u8)3 300\n"
+    assert str(doc) == "n (u8)3 (u8)2\n"
+    # Another kind of value gets its own annotation, as with no annotation.
+    n.args[1] = "x"
+    assert str(doc) == "n (u8)3 x\n"
+
+
+OUT_OF_RANGE = "300 doesn't fit type u8: out of range 0..=255"
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda n: n.args.__setitem__(0, 300),
+        lambda n: n.args.__setitem__(slice(0, 2), [1, 300]),
+        lambda n: n.args.__setitem__(slice(None), [1, 300, 4]),
+        lambda n: setattr(n, "args", [1, 300]),
+        lambda n: n.args.entry(1).__setattr__("value", 300),
+        lambda n: n.props.__setitem__("k", 300),
+        lambda n: n.props.update({"j": 1, "k": 300}),
+        lambda n: setattr(n, "props", {"j": 1, "k": 300}),
+        lambda n: n.props.entry("k").__setattr__("value", 300),
+    ],
+)
+def test_an_out_of_range_write_to_a_builtin_type_raises_and_changes_nothing(write):
+    text = "n (u8)1 (u8)2 j=(u8)3 k=(u8)4\n"
+    doc, n = node(text)
+    with pytest.raises(ValueError, match=re.escape(OUT_OF_RANGE)):
+        write(n)
+    assert str(doc) == text
+
+
+def test_new_entries_have_no_range_to_check():
+    doc, n = node("n (u8)1\n")
+    n.args.append(300)
+    n.args.insert(0, 301)
+    n.args.extend([302])
+    n.props["k"] = 303
+    assert str(doc) == "n 301 (u8)1 300 302 k=303\n"
+
+
+def test_float_types_check_their_range():
+    doc, n = node("n (f32)1.5 (f64)2.5\n")
+    with pytest.raises(ValueError, match=re.escape("1e+39 doesn't fit type f32: out of range ±3.4028234663852886e+38")):
+        n.args[0] = 1e39
+    n.args[0] = 3
+    n.args[1] = 1e39
+    assert str(doc) == "n (f32)3.0 (f64)1e39\n"
 
 
 def test_a_decode_that_raises_a_base_exception_propagates():
