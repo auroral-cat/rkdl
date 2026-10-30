@@ -5,7 +5,9 @@
 //! parsed from other text can drop positions that belong to another file.
 
 use std::collections::HashMap;
+use std::iter::Peekable;
 use std::num::NonZeroU64;
+use std::str::CharIndices;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::parser::prescan::NEWLINES;
@@ -30,39 +32,64 @@ impl Origin {
 }
 
 /// The positions of byte `offsets` into `text`, by key, in one pass over the text.
+pub(crate) fn locate(text: &str, mut offsets: Vec<(usize, u64)>) -> HashMap<u64, Pos> {
+    offsets.sort_unstable_by_key(|&(offset, _)| offset);
+    let mut cursor = Cursor::new(text);
+    offsets
+        .into_iter()
+        .map(|(offset, key)| (key, cursor.advance_to(offset)))
+        .collect()
+}
+
+/// The position of one byte `offset` into `text`, counted as `locate` counts.
+pub(crate) fn locate_one(text: &str, offset: usize) -> Pos {
+    Cursor::new(text).advance_to(offset)
+}
+
+/// A walk forward through a text, keeping the line and column it's at.
 ///
 /// Lines break at every KDL newline, with CRLF as one. A byte order mark at the start isn't a column: editors don't
 /// show it.
-pub(crate) fn locate(text: &str, mut offsets: Vec<(usize, u64)>) -> HashMap<u64, Pos> {
-    offsets.sort_unstable_by_key(|&(offset, _)| offset);
-    let mut found = HashMap::with_capacity(offsets.len());
-    let start = if text.starts_with('\u{feff}') {
-        '\u{feff}'.len_utf8()
-    } else {
-        0
-    };
-    let mut chars = text.get(start..).unwrap_or_default().char_indices().peekable();
-    let (mut line, mut column) = (1u32, 1u32);
-    for (offset, key) in offsets {
-        while let Some(&(i, c)) = chars.peek() {
-            if start + i >= offset {
+struct Cursor<'a> {
+    start: usize,
+    chars: Peekable<CharIndices<'a>>,
+    at: Pos,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(text: &'a str) -> Self {
+        let start = if text.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        Cursor {
+            start,
+            chars: text.get(start..).unwrap_or_default().char_indices().peekable(),
+            at: Pos { line: 1, column: 1 },
+        }
+    }
+
+    /// The position of byte `offset`, which mustn't be before the last one asked for.
+    fn advance_to(&mut self, offset: usize) -> Pos {
+        while let Some(&(i, c)) = self.chars.peek() {
+            if self.start + i >= offset {
                 break;
             }
-            chars.next();
-            if c == '\r' && chars.peek().is_some_and(|&(_, next)| next == '\n') {
+            self.chars.next();
+            if c == '\r' && self.chars.peek().is_some_and(|&(_, next)| next == '\n') {
                 // The `\n` ends the line.
                 continue;
             }
             if NEWLINES.contains(&c) {
-                line = line.saturating_add(1);
-                column = 1;
+                self.at.line = self.at.line.saturating_add(1);
+                self.at.column = 1;
             } else {
-                column = column.saturating_add(1);
+                self.at.column = self.at.column.saturating_add(1);
             }
         }
-        found.insert(key, Pos { line, column });
+        self.at
     }
-    found
 }
 
 #[cfg(test)]
@@ -70,7 +97,7 @@ mod tests {
     use super::*;
 
     fn at(text: &str, offset: usize) -> (u32, u32) {
-        let pos = locate(text, vec![(offset, 0)])[&0];
+        let pos = locate_one(text, offset);
         (pos.line, pos.column)
     }
 

@@ -68,7 +68,8 @@ class ParseError(ValueError):
     """The text isn't valid KDL.
 
     `str(error)` is a report that points at each problem in the text. The attributes give the first problem's
-    position, counted in characters.
+    position, counted as `node.line` and `node.column` count: lines break at every KDL newline, and columns count
+    characters, not bytes, after any byte order mark.
 
     Attributes:
         line: The first problem's line, starting at 1.
@@ -88,7 +89,8 @@ class ParseError(ValueError):
 class Diagnostic:
     """One problem found while parsing.
 
-    Positions count characters, not bytes. Diagnostics compare equal when all their fields do, and can be pickled.
+    Positions count characters, not bytes, and lines and columns count as `ParseError`'s do. Diagnostics compare
+    equal when all their fields do, and can be pickled.
     """
 
     def __new__(

@@ -166,3 +166,50 @@ def test_diagnostics_compare_by_value():
     assert same == first
     assert hash(same) == hash(first)
     assert pickle.loads(pickle.dumps(first)) == first
+
+
+def lines(eol, last):
+    return eol.join(["a", "", f"  b 1; {last}", "c"])
+
+
+# Each case is a file with a stray `}` and its valid twin with a node `x` in the same spot.
+LINE_COUNTING = {
+    **{
+        name: (lines(eol, "}"), lines(eol, "x"), (3, 8))
+        for name, eol in [
+            ("LF", "\n"),
+            ("CRLF", "\r\n"),
+            ("CR", "\r"),
+            ("VT", "\x0b"),
+            ("FF", "\x0c"),
+            ("NEL", "\x85"),
+            ("LS", " "),
+            ("PS", " "),
+        ]
+    },
+    # The byte order mark isn't a column, and é is one column of two bytes.
+    "BOM": ("﻿b é; }\n", "﻿b é; x\n", (1, 6)),
+    "tab": ("a\n\tb 1; }\n", "a\n\tb 1; x\n", (2, 7)),
+}
+
+
+@pytest.mark.parametrize(("bad", "good", "at"), LINE_COUNTING.values(), ids=LINE_COUNTING.keys())
+def test_parse_errors_count_lines_as_node_line_does(tmp_path, bad, good, at):
+    twin = rkdl.parse(good)["x"]
+    assert (twin.line, twin.column) == at
+    line, column = at
+
+    err = parse_error(bad)
+    assert (err.line, err.column) == at
+    assert (err.diagnostics[0].line, err.diagnostics[0].column) == at
+    assert str(err).splitlines()[0] == f"{line}:{column}: Failed to parse KDL document"
+
+    path = tmp_path / "config.kdl"
+    path.write_bytes(bad.encode())
+    with pytest.raises(rkdl.ParseError) as info:
+        rkdl.load(path)
+    loaded = info.value
+    assert (loaded.line, loaded.column) == at
+    assert str(loaded).splitlines()[0] == f"{path}:{line}:{column}: Failed to parse KDL document"
+    # miette's snippet header agrees, though the snippet under it only breaks lines at LF and CRLF.
+    assert f"╭─[{path}:{line}:{column}]" in str(loaded)
