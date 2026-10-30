@@ -153,6 +153,28 @@ def test_indent_level_is_bounded():
         rkdl.Formatter(indent_level=2**40)
 
 
+def test_indent_level_indents_every_node_after_the_first():
+    level_2 = rkdl.Formatter(indent_level=2)
+    assert formatted("a\nb {\nc\n}\n", level_2).endswith("\n        b {\n            c\n        }\n")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="kdl-rs: KdlDocument::autoformat_config indents the document's leading text and then each node's, so the "
+    "first top-level node gets the indent twice",
+)
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a {\n  b 1 { c 2 }\n}", "        a {\n            b 1 {\n                c 2\n            }\n        }\n"),
+        ("a\nb\n", "        a\n        b\n"),
+        ("// hi\na\n", "        // hi\n        a\n"),
+    ],
+)
+def test_indent_level_indents_the_first_node_once(text, expected):
+    assert formatted(text, rkdl.Formatter(indent_level=2)) == expected
+
+
 @pytest.mark.parametrize("eol", ["\r\n", "\r", "\u2028"])
 def test_fmt_keeps_the_line_ending_style(eol):
     text = "a 1 { b; c }\n// d\ne\n".replace("\n", eol)

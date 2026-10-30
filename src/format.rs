@@ -14,7 +14,9 @@ const MAX_INDENT_LEVEL: usize = 1000;
 ///
 /// Args:
 ///     indent: The text for one level of indentation. Only KDL whitespace, such as spaces or tabs.
-///     indent_level: How many levels to indent the top-level nodes by.
+///     indent_level: How many levels of `indent` to put in front of every top-level node, with each block's
+///         contents one level deeper. Today the first top-level node, or a comment in front of it, gets twice that,
+///         a kdl-rs bug.
 ///     no_comments: Remove comments.
 ///     entry_autoformat_keep: Leave each argument and property as written, with the space in front of it, and only
 ///         reformat the nodes around them.
