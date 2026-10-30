@@ -159,7 +159,7 @@ CASES = [
         "datetime.datetime(2029, 1, 1, 9, 0) doesn't fit (date): would lose its time",
         id="wrong-class",
     ),
-    pytest.param(Value("weekly", type="u8"), None, "'weekly' doesn't fit (u8): not an integer", id="plain-misfit"),
+    pytest.param(Value("weekly", type="u8"), None, "'weekly' doesn't fit (u8): expected an integer", id="plain-misfit"),
     pytest.param(Value(NEW_YEAR, type="mine"), '(mine)"2029-01-01"', "2029-01-01", id="unknown-non-plain"),
     pytest.param(Value("x", type="mine"), "(mine)x", "x", id="unknown-plain"),
     pytest.param(Value(NEW_YEAR), '"2029-01-01"', "2029-01-01", id="none-non-plain"),
@@ -250,7 +250,7 @@ def test_setdefault_returns_what_the_property_reads_as():
         (Value(Celsius(3.0)), "n 3.0\n"),
         (Value(Celsius(3.0), type="mine"), "n (mine)3.0\n"),
         (Value(3, type="celsius"), "3 doesn't fit (celsius): its decode raised TypeError('celsius is a float')"),
-        (Value(NEW_YEAR, type="celsius"), "datetime.date(2029, 1, 1) doesn't fit (celsius): not a Celsius"),
+        (Value(NEW_YEAR, type="celsius"), "datetime.date(2029, 1, 1) doesn't fit (celsius): expected a Celsius"),
     ],
 )
 def test_a_value_with_a_custom_type(value, expected):

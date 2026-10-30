@@ -268,18 +268,17 @@ def test_current_type_kept_when_value_fits(value, current, expected):
     ("value", "current", "message"),
     [
         # bool is checked before int.
-        (True, "u8", "True doesn't fit (u8): not an integer"),
-        (True, "i32", "True doesn't fit (i32): not an integer"),
-        (True, "f64", "True doesn't fit (f64): not a number"),
-        ("7", "u8", "'7' doesn't fit (u8): not an integer"),
-        (None, "u8", "None doesn't fit (u8): not an integer"),
+        (True, "u8", "True doesn't fit (u8): expected an integer"),
+        (True, "i32", "True doesn't fit (i32): expected an integer"),
+        (True, "f64", "True doesn't fit (f64): expected a number"),
+        ("7", "u8", "'7' doesn't fit (u8): expected an integer"),
+        (None, "u8", "None doesn't fit (u8): expected an integer"),
         ("May 6th", "date", "'May 6th' doesn't fit (date): Invalid isoformat string: 'May 6th'"),
         (datetime.datetime(2024, 5, 6), "date", "doesn't fit (date): would lose its time"),
-        (datetime.date(2024, 5, 6), "date-time", "doesn't fit (date-time): not a datetime"),
-        (5, "duration", "5 doesn't fit (duration): not a str"),
-        (re.compile(rb"x"), "regex", "doesn't fit (regex): a bytes pattern has no KDL spelling"),
-        (b"hi", "uuid", "b'hi' doesn't fit (uuid): not a UUID"),
-        (decimal.Decimal("1.5"), "u8", "Decimal('1.5') doesn't fit (u8): not an integer"),
+        (datetime.date(2024, 5, 6), "date-time", "doesn't fit (date-time): expected a date-time"),
+        (5, "duration", "5 doesn't fit (duration): expected a string"),
+        (b"hi", "uuid", "b'hi' doesn't fit (uuid): expected a UUID"),
+        (decimal.Decimal("1.5"), "u8", "Decimal('1.5') doesn't fit (u8): expected an integer"),
     ],
 )
 def test_a_value_that_does_not_fit_its_annotation_raises(value, current, message):
@@ -310,9 +309,9 @@ def test_an_unknown_annotation_stays_over_a_non_plain_value(value, text):
         (1e39, "f32", "1e+39 doesn't fit (f32): out of range ±3.4028234663852886e+38"),
         (2**200, "f32", "doesn't fit (f32): out of range ±3.4028234663852886e+38"),
         (2**1024, "f64", "doesn't fit (f64): out of range ±1.7976931348623157e+308"),
-        (1.5, "i32", "1.5 doesn't fit (i32): not a whole number"),
-        (float("nan"), "u8", "nan doesn't fit (u8): not a whole number"),
-        (float("inf"), "u8", "inf doesn't fit (u8): not a whole number"),
+        (1.5, "i32", "1.5 doesn't fit (i32): expected an integer"),
+        (float("nan"), "u8", "nan doesn't fit (u8): expected an integer"),
+        (float("inf"), "u8", "inf doesn't fit (u8): expected an integer"),
         (300.0, "u8", "300.0 doesn't fit (u8): out of range 0..=255"),
         (1e40, "i128", "1e+40 doesn't fit (i128): out of range"),
     ],
@@ -478,7 +477,7 @@ def test_a_value_python_cant_read_says_how_to_read_it(text, shown, cls):
         list(doc["n"].args)
     # The message is for whoever wrote the file, and the advice is a note for the developer.
     value = shown[shown.index(")") + 1 :]
-    assert str(info.value).startswith(f"n arg 0: {value} doesn't fit ({ty}): ")
+    assert str(info.value).startswith(f"1:3: n arg 0: {value} doesn't fit ({ty}): ")
     assert "Type" not in str(info.value)
     hint = f'A Type named "{ty}" overrides the built-in one: '
     hint += f'Parser(types=[Type("{ty}", {cls}, {cls}, {cls})]) reads it as a plain {cls}'
@@ -667,7 +666,7 @@ def test_plain_string_reserved_type(ty):
     assert n.props["k"] == "y"
     # A string fits. An integer doesn't.
     n.args[0] = "z"
-    with pytest.raises(ValueError, match=re.escape(f"5 doesn't fit ({ty}): not a str")):
+    with pytest.raises(ValueError, match=re.escape(f"5 doesn't fit ({ty}): expected a string")):
         n.props["k"] = 5
     assert str(doc) == f'n ({ty})"z" k=({ty})"y"\n'
     with pytest.raises(ValueError, match=re.escape(f"({ty})")):
@@ -761,7 +760,7 @@ PROP_READS = {
     "unpack entry": lambda n: tuple(n.props.entry("k")),
 }
 
-# The annotated value, the parser's types, and the message after "server arg 1: " or "server prop k: ".
+# The annotated value, the parser's types, and the message after "1:10: server arg 1: " or "1:8: server prop k: ".
 BAD_VALUES = {
     "built-in": ("(u8)300", [], "300 doesn't fit (u8): out of range 0..=255"),
     "custom": (
@@ -785,7 +784,7 @@ def test_reading_an_arg_that_doesnt_fit(route, kind):
     doc = rkdl.Parser(types=types).parse(f"server 1 {bad}\n")
     err = read_error(ARG_READS[route], doc["server"])
     assert type(err) is ValueError
-    assert str(err) == f"server arg 1: {core}"
+    assert str(err) == f"1:10: server arg 1: {core}"
     if kind == "custom":
         assert isinstance(err.__cause__, TypeError)
         assert not hasattr(err, "__notes__")
@@ -802,32 +801,36 @@ def test_reading_a_prop_that_doesnt_fit(route, kind):
     doc = rkdl.Parser(types=types).parse(f"server k={bad}\n")
     err = read_error(PROP_READS[route], doc["server"])
     assert type(err) is ValueError
-    assert str(err) == f"server prop k: {core}"
+    assert str(err) == f"1:8: server prop k: {core}"
     assert isinstance(err.__cause__, TypeError) == (kind == "custom")
     assert str(doc) == f"server k={bad}\n"
 
 
 def test_the_arg_index_counts_args_only():
     n = rkdl.parse("server a=1 7 b=2 (u8)300\n")["server"]
-    assert str(read_error(lambda n: n.args[1], n)).startswith("server arg 1: ")
-    assert str(read_error(lambda n: n.entries[3].value, n)).startswith("server arg 1: ")
+    assert str(read_error(lambda n: n.args[1], n)).startswith("1:18: server arg 1: ")
+    assert str(read_error(lambda n: n.entries[3].value, n)).startswith("1:18: server arg 1: ")
 
 
 def test_read_errors_spell_names_as_a_file_does():
     n = rkdl.parse('"my server" (u8)-1 "a key"=(u8)300\n')["my server"]
-    assert str(read_error(lambda n: n.args[0], n)).startswith('"my server" arg 0: -1 doesn\'t fit')
-    assert str(read_error(lambda n: n.props["a key"], n)).startswith('"my server" prop "a key": 300 doesn\'t fit')
+    assert str(read_error(lambda n: n.args[0], n)).startswith('1:13: "my server" arg 0: -1 doesn\'t fit')
+    assert str(read_error(lambda n: n.props["a key"], n)).startswith('1:20: "my server" prop "a key": 300 doesn\'t fit')
 
 
 def test_read_errors_show_the_value_as_the_file_spells_it():
     n = rkdl.parse('n (u8)0x1_00 (date)"2020-1-1"\n')["n"]
-    assert str(read_error(lambda n: n.args[0], n)) == "n arg 0: 0x1_00 doesn't fit (u8): out of range 0..=255"
-    assert str(read_error(lambda n: n.args[1], n)).startswith('n arg 1: "2020-1-1" doesn\'t fit (date): ')
+    assert str(read_error(lambda n: n.args[0], n)) == "1:3: n arg 0: 0x1_00 doesn't fit (u8): out of range 0..=255"
+    assert str(read_error(lambda n: n.args[1], n)).startswith('1:14: n arg 1: "2020-1-1" doesn\'t fit (date): ')
 
 
-def test_a_detached_node_still_names_itself():
+def test_a_detached_node_still_names_itself_and_where_it_was(tmp_path):
     n = rkdl.parse("n (u8)300\n").children.pop()
-    assert str(read_error(lambda n: n.args[0], n)).startswith("n arg 0: 300 doesn't fit")
+    assert str(read_error(lambda n: n.args[0], n)).startswith("1:3: n arg 0: 300 doesn't fit")
+    path = tmp_path / "config.kdl"
+    path.write_text("a\nn (u8)300\n")
+    n = rkdl.load(path).children.pop()
+    assert str(read_error(lambda n: n.args[0], n)).startswith(f"{path}:2:3: n arg 0: 300 doesn't fit")
 
 
 def test_a_decode_that_raises_value_error_is_wrapped_too():
@@ -837,7 +840,7 @@ def test_a_decode_that_raises_value_error_is_wrapped_too():
     hot = rkdl.Type("celsius", Celsius, decode=decode, encode=lambda c: c.degrees)
     n = rkdl.Parser(types=[hot]).parse("server (celsius)99\n")["server"]
     err = read_error(lambda n: n.args[0], n)
-    assert str(err) == "server arg 0: 99 doesn't fit (celsius): its decode raised ValueError('too hot')"
+    assert str(err) == "1:8: server arg 0: 99 doesn't fit (celsius): its decode raised ValueError('too hot')"
     assert str(err.__cause__) == "too hot"
 
 
@@ -870,4 +873,141 @@ def test_a_read_error_uses_a_write_errors_words():
     n = rkdl.parse("server (u8)300 (u8)7\n")["server"]
     read = read_error(lambda n: n.args[0], n)
     write = read_error(lambda n: n.args.__setitem__(1, 300), n)
-    assert str(read) == f"server arg 0: {write}"
+    assert str(read) == f"1:8: server arg 0: {write}"
+
+
+# Where a read error is: the entry's position goes in front, as ParseError's first line does.
+
+
+def test_a_read_error_starts_with_the_files_path_and_the_entrys_position(tmp_path):
+    path = tmp_path / "config.kdl"
+    path.write_text("limits {\n    inner retries=(u8)300\n}\n")
+    inner = rkdl.load(path)["limits"]["inner"]
+    err = read_error(lambda n: n.props["retries"], inner)
+    assert str(err) == f"{path}:2:11: inner prop retries: 300 doesn't fit (u8): out of range 0..=255"
+
+
+def test_a_read_error_without_a_path_starts_with_the_position():
+    limits = rkdl.parse("limits {\n    inner (u8)300\n}\n")["limits"]
+    err = read_error(lambda n: n.args[0], limits["inner"])
+    assert str(err) == "2:11: inner arg 0: 300 doesn't fit (u8): out of range 0..=255"
+
+
+def test_a_read_error_tells_duplicate_nodes_apart(tmp_path):
+    path = tmp_path / "config.kdl"
+    path.write_text("inner retries=(u8)3\ninner retries=(u8)300\n")
+    first, second = rkdl.load(path).children
+    assert first.props["retries"] == 3
+    err = read_error(lambda n: n.props["retries"], second)
+    assert str(err).startswith(f"{path}:2:7: inner prop retries: 300 doesn't fit")
+
+
+def test_a_read_error_for_an_entry_without_a_position_starts_with_the_node():
+    # A copy, and a node moved into another document, have no positions: they aren't where the file put them.
+    as_int = rkdl.Type("u8", int, int, int)
+    n = rkdl.Parser(types=[as_int]).parse("n (u8)300\n").children.pop()
+    assert n.args[0] == 300
+    other = rkdl.parse("")
+    other.children.append(n)
+    assert str(read_error(lambda n: n.args[0], n)) == "n arg 0: 300 doesn't fit (u8): out of range 0..=255"
+    copied = rkdl.parse("n (u8)300\n")["n"].copy()
+    assert str(read_error(lambda n: n.args[0], copied)).startswith("n arg 0: 300 doesn't fit")
+
+
+def test_a_write_error_names_no_place_even_over_an_entry_with_a_position(tmp_path):
+    # A write error is about the program's value, not the file.
+    path = tmp_path / "config.kdl"
+    path.write_text("n (u8)7\n")
+    n = rkdl.load(path)["n"]
+    assert n.args.entry(0).line == 1
+    with pytest.raises(ValueError) as info:
+        n.args[0] = 300
+    assert str(info.value) == "300 doesn't fit (u8): out of range 0..=255"
+
+
+# One reason per misfit, whether the value is read from a file, checked by `entry.type`, or written by the program.
+
+MISFITS = {
+    "word over u8": ("u8", '"weekly"', "weekly", "expected an integer"),
+    "fraction over u8": ("u8", "3.5", 3.5, "expected an integer"),
+    "bool over u8": ("u8", "#true", True, "expected an integer"),
+    "over u8's range": ("u8", "300", 300, "out of range 0..=255"),
+    "over f32's range": ("f32", "1e39", 1e39, "out of range ±3.4028234663852886e+38"),
+    "bool over f64": ("f64", "#true", True, "expected a number"),
+    "string over decimal64": ("decimal64", '"2"', "2", "expected a number"),
+    "number over decimal": ("decimal", "1", 1, "expected a decimal"),
+    "number over date-time": ("date-time", "5", 5, "expected a date-time"),
+    "number over date": ("date", "5", 5, "expected a date"),
+    "bad date": ("date", '"May 6th"', "May 6th", "Invalid isoformat string: 'May 6th'"),
+    "null over time": ("time", "#null", None, "expected a time"),
+    "number over ipv4": ("ipv4", "5", 5, "expected an IPv4 address"),
+    "number over ipv6": ("ipv6", "5", 5, "expected an IPv6 address"),
+    "number over uuid": ("uuid", "5", 5, "expected a UUID"),
+    "number over regex": ("regex", "5", 5, "expected a regex"),
+    "number over base64": ("base64", "5", 5, "expected base64 data"),
+    "number over email": ("email", "5", 5, "expected a string"),
+    "decode refuses": ("celsius", '"hot"', "hot", "its decode raised TypeError('want a number')"),
+}
+
+
+def reason(err):
+    return str(err).split("doesn't fit ", 1)[1].split(": ", 1)[1]
+
+
+@pytest.mark.parametrize(("ty", "text", "value", "why"), MISFITS.values(), ids=MISFITS.keys())
+def test_a_misfit_has_one_reason_on_every_route(ty, text, value, why):
+    n = rkdl.Parser(types=[STRICT_CELSIUS]).parse(f"n ({ty}){text} {text}\n")["n"]
+    read = read_error(lambda n: n.args[0], n)
+    typed = read_error(lambda n: setattr(n.args.entry(1), "type", ty), n)
+    written = read_error(lambda n: n.args.append(rkdl.Value(value, type=ty)), n)
+    over = read_error(lambda n: n.args.__setitem__(0, value), n)
+    assert [reason(e) for e in (read, typed, written, over)] == [why] * 4
+
+
+@pytest.mark.parametrize(
+    ("value", "ty", "why"),
+    [
+        # Misfits only a write makes: a file can't hold a Python object.
+        (datetime.datetime(2029, 1, 1, 10), "date", "would lose its time"),
+        (datetime.date(2029, 1, 1), "celsius", "expected a Celsius"),
+    ],
+)
+def test_misfits_only_a_write_makes(value, ty, why):
+    with pytest.raises(ValueError) as info:
+        from_python(value, ty, [STRICT_CELSIUS])
+    assert reason(info.value) == why
+
+
+# A value nothing can write is a TypeError, whatever annotation it lands on.
+
+UNWRITABLE = {"list": [1], "object": object(), "bytes pattern": re.compile(rb"x")}
+STARTS = {"u8": "1", "date": '"2029-01-01"', "celsius": "1", "email": '"a@b.c"', "mine": "1"}
+
+
+@pytest.mark.parametrize("ty", STARTS)
+@pytest.mark.parametrize("value", UNWRITABLE.values(), ids=UNWRITABLE.keys())
+def test_an_unwritable_value_is_a_type_error_over_any_annotation(value, ty):
+    parser = rkdl.Parser(types=[STRICT_CELSIUS])
+    doc = parser.parse(f"n ({ty}){STARTS[ty]}\n")
+    n = doc["n"]
+    with pytest.raises(TypeError, match="can't convert .* to a KDL value"):
+        n.args[0] = value
+    with pytest.raises(TypeError, match="can't convert .* to a KDL value"):
+        n.args.append(rkdl.Value(value, type=ty))
+    with pytest.raises(TypeError, match="can't convert .* to a KDL value"):
+        parser.node("n", rkdl.Value(value, type=ty))
+    assert str(doc) == f"n ({ty}){STARTS[ty]}\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "ty", "why"),
+    [
+        (Celsius(3), "u8", "expected an integer"),
+        (datetime.date(2029, 1, 1), "u8", "expected an integer"),
+        (datetime.date(2029, 1, 1), "celsius", "expected a Celsius"),
+    ],
+)
+def test_a_class_some_type_claims_is_writable_so_fit_decides(value, ty, why):
+    with pytest.raises(ValueError) as info:
+        from_python(value, ty, [STRICT_CELSIUS])
+    assert reason(info.value) == why

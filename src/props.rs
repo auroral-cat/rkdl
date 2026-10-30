@@ -279,6 +279,8 @@ impl Props {
                     let place = Place {
                         node: &snapshot.node,
                         slot: Slot::Prop(&key),
+                        pos: None,
+                        path: None,
                     };
                     values::to_python_spelled(
                         py,

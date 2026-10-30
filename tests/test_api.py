@@ -498,7 +498,7 @@ def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
     doc, n = node("n (u8)1 (u8)2\n")
     n.args[0] = 3
     assert str(doc) == "n (u8)3 (u8)2\n"
-    with pytest.raises(ValueError, match=re.escape("'x' doesn't fit (u8): not an integer")):
+    with pytest.raises(ValueError, match=re.escape("'x' doesn't fit (u8): expected an integer")):
         n.args[1] = "x"
     assert str(doc) == "n (u8)3 (u8)2\n"
 
@@ -568,13 +568,13 @@ def test_a_plain_number_a_builtin_type_reads_keeps_it(ty, old, value, text):
 @pytest.mark.parametrize(
     ("ty", "old", "value", "message"),
     [
-        ("u8", "1", True, "True doesn't fit (u8): not an integer"),
-        ("f32", "1.5", "1.5", "'1.5' doesn't fit (f32): not a number"),
-        ("date", '"2026-01-01"', 5, "5 doesn't fit (date): not a date"),
-        ("date", '"2026-01-01"', None, "None doesn't fit (date): not a date"),
-        ("decimal64", "1.5", "1.5", "'1.5' doesn't fit (decimal64): not a number"),
-        ("decimal", '"1.5"', 1, "1 doesn't fit (decimal): not a Decimal"),
-        ("email", '"a@b.c"', 5, "5 doesn't fit (email): not a str"),
+        ("u8", "1", True, "True doesn't fit (u8): expected an integer"),
+        ("f32", "1.5", "1.5", "'1.5' doesn't fit (f32): expected a number"),
+        ("date", '"2026-01-01"', 5, "5 doesn't fit (date): expected a date"),
+        ("date", '"2026-01-01"', None, "None doesn't fit (date): expected a date"),
+        ("decimal64", "1.5", "1.5", "'1.5' doesn't fit (decimal64): expected a number"),
+        ("decimal", '"1.5"', 1, "1 doesn't fit (decimal): expected a decimal"),
+        ("email", '"a@b.c"', 5, "5 doesn't fit (email): expected a string"),
     ],
 )
 def test_other_plain_values_over_a_builtin_type_raise(ty, old, value, message):
@@ -611,9 +611,9 @@ def test_an_unknown_annotation_isnt_checked():
 
 FIT_CASES = [
     # (annotation, old value text, value of its class, read back as, plain value it reads, read back as, misfit, message)
-    ("u8", "1", 200, 200, 7.0, 7, "weekly", "'weekly' doesn't fit (u8): not an integer"),
+    ("u8", "1", 200, 200, 7.0, 7, "weekly", "'weekly' doesn't fit (u8): expected an integer"),
     ("i32", "1", -5, -5, -3.0, -3, 2**40, "1099511627776 doesn't fit (i32): out of range -2147483648..=2147483647"),
-    ("f64", "1.5", 2.5, 2.5, 2, 2.0, True, "True doesn't fit (f64): not a number"),
+    ("f64", "1.5", 2.5, 2.5, 2, 2.0, True, "True doesn't fit (f64): expected a number"),
     ("f32", "1.5", 0.5, 0.5, 3, 3.0, 1e39, "1e+39 doesn't fit (f32): out of range"),
     (
         "decimal64",
@@ -623,7 +623,7 @@ FIT_CASES = [
         2,
         decimal.Decimal(2),
         "2",
-        "'2' doesn't fit (decimal64): not a number",
+        "'2' doesn't fit (decimal64): expected a number",
     ),
     (
         "decimal",
@@ -633,7 +633,7 @@ FIT_CASES = [
         "2.5",
         decimal.Decimal("2.5"),
         1.5,
-        "1.5 doesn't fit (decimal): not a Decimal",
+        "1.5 doesn't fit (decimal): expected a decimal",
     ),
     (
         "date",
@@ -653,7 +653,7 @@ FIT_CASES = [
         "2029-01-01T10:00:00",
         datetime.datetime(2029, 1, 1, 10),
         datetime.date(2029, 1, 1),
-        "datetime.date(2029, 1, 1) doesn't fit (date-time): not a datetime",
+        "datetime.date(2029, 1, 1) doesn't fit (date-time): expected a date-time",
     ),
     (
         "time",
@@ -663,7 +663,7 @@ FIT_CASES = [
         "11:00:00",
         datetime.time(11),
         None,
-        "None doesn't fit (time): not a time",
+        "None doesn't fit (time): expected a time",
     ),
     (
         "ipv4",
@@ -673,7 +673,7 @@ FIT_CASES = [
         "10.0.0.3",
         ipaddress.IPv4Address("10.0.0.3"),
         ipaddress.IPv6Address("::1"),
-        "IPv6Address('::1') doesn't fit (ipv4): not an IPv4Address",
+        "IPv6Address('::1') doesn't fit (ipv4): expected an IPv4 address",
     ),
     (
         "ipv6",
@@ -693,11 +693,11 @@ FIT_CASES = [
         "00000000-0000-0000-0000-000000000002",
         uuid.UUID(int=2),
         2,
-        "2 doesn't fit (uuid): not a UUID",
+        "2 doesn't fit (uuid): expected a UUID",
     ),
     ("regex", '"a+"', re.compile("b+"), re.compile("b+"), "c+", re.compile("c+"), "(", "'(' doesn't fit (regex): "),
     ("base64", '"aGk="', b"hey", b"hey", "aGk=", b"hi", "hi", "'hi' doesn't fit (base64): "),
-    ("email", '"a@b.c"', "d@e.f", "d@e.f", "g@h.i", "g@h.i", 5, "5 doesn't fit (email): not a str"),
+    ("email", '"a@b.c"', "d@e.f", "d@e.f", "g@h.i", "g@h.i", 5, "5 doesn't fit (email): expected a string"),
 ]
 
 WRITE_ROUTES = {
@@ -742,7 +742,7 @@ CUSTOM_CASES = [
     (4.0, Celsius(4.0), "(celsius)4.0"),
     (3, None, "3 doesn't fit (celsius): its decode raised TypeError('celsius is a float')"),
     ("x", None, "'x' doesn't fit (celsius): its decode raised TypeError('celsius is a float')"),
-    (datetime.date(2029, 1, 1), None, "datetime.date(2029, 1, 1) doesn't fit (celsius): not a Celsius"),
+    (datetime.date(2029, 1, 1), None, "datetime.date(2029, 1, 1) doesn't fit (celsius): expected a Celsius"),
 ]
 
 
@@ -821,7 +821,7 @@ def test_an_out_of_range_write_to_a_builtin_type_raises_and_changes_nothing(writ
 def test_a_fractional_float_over_an_integer_type_raises_and_changes_nothing(write):
     text = "n (u8)1 (u8)2 j=(u8)3 k=(u8)4\n"
     doc, n = node(text)
-    with pytest.raises(ValueError, match=re.escape("3.5 doesn't fit (u8): not a whole number")):
+    with pytest.raises(ValueError, match=re.escape("3.5 doesn't fit (u8): expected an integer")):
         write(n)
     assert str(doc) == text
 

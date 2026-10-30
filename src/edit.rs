@@ -10,6 +10,7 @@ use crate::document::{DocState, Document};
 use crate::entry::Entry;
 use crate::handles::{self, Fail, Garbage, removed, stale};
 use crate::node::Node;
+use crate::positions::Pos;
 use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, Encoded, Place, Slot, TypeRegistry};
 
@@ -24,13 +25,16 @@ pub(crate) struct Item {
     /// reading them (`decimal64`) or to the error saying they can't be read.
     text: Option<String>,
     /// The node's name and, for an argument, its index in `node.args`: where the entry is, for the error when its
-    /// value can't be read.
+    /// value can't be read. With the entry's position in the file it was parsed from, if it has one, and that file's
+    /// path, if it has one.
     node: Arc<str>,
     arg: usize,
+    pos: Option<Pos>,
+    path: Option<Arc<str>>,
 }
 
 impl Item {
-    fn new(id: EntryId, entry: &KdlEntry, node: &Arc<str>, arg: usize) -> Self {
+    fn new(s: &DocState, id: EntryId, entry: &KdlEntry, node: &Arc<str>, arg: usize, file: Option<&Arc<str>>) -> Self {
         Item {
             id,
             name: entry.name().cloned(),
@@ -39,6 +43,8 @@ impl Item {
             text: entry.ty().and(entry.format()).map(|f| f.value_repr.clone()),
             node: Arc::clone(node),
             arg,
+            pos: s.ids.pos(id.key()),
+            path: file.cloned(),
         }
     }
 
@@ -50,6 +56,8 @@ impl Item {
         let place = Place {
             node: &self.node,
             slot: self.key().map_or(Slot::Arg(self.arg), Slot::Prop),
+            pos: self.pos,
+            path: self.path.as_deref(),
         };
         values::to_python_spelled(
             py,
@@ -126,7 +134,8 @@ impl Item {
     }
 }
 
-fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
+/// `file` is the document's path, for the errors.
+fn items(s: &DocState, node: NodeId, file: Option<&Arc<str>>) -> Result<Vec<Item>, Fail> {
     let path = s.ids.path(node).ok_or_else(|| Fail::Missing(stale()))?;
     let kdl = node_at(&s.kdl, &path);
     let name: Arc<str> = kdl.name().value().into();
@@ -136,7 +145,7 @@ fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
         .iter()
         .zip(kdl.entries())
         .map(|(&id, e)| {
-            let item = Item::new(id, e, &name, args);
+            let item = Item::new(s, id, e, &name, args, file);
             if e.name().is_none() {
                 args += 1;
             }
@@ -146,14 +155,14 @@ fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
 }
 
 /// One entry, found by its id under its document's lock. If it isn't there and the handle didn't move meanwhile, it
-/// was removed.
-pub(crate) fn item(s: &DocState, id: EntryId) -> Result<Item, Fail> {
+/// was removed. `file` is the document's path, for the errors.
+pub(crate) fn item(s: &DocState, id: EntryId, file: Option<&Arc<str>>) -> Result<Item, Fail> {
     let (node, index) = s.ids.entry_position(id).ok_or_else(|| Fail::Missing(removed()))?;
     let path = s.ids.path(node).expect("an entry's node is in the tree");
     let kdl = node_at(&s.kdl, &path);
     let entry = kdl.entries().get(index).ok_or_else(|| Fail::Missing(stale()))?;
     let arg = kdl.entries().iter().take(index).filter(|e| e.name().is_none()).count();
-    Ok(Item::new(id, entry, &kdl.name().value().into(), arg))
+    Ok(Item::new(s, id, entry, &kdl.name().value().into(), arg, file))
 }
 
 /// A node's entries in file order, and the document they were read from.
@@ -172,8 +181,9 @@ impl Snapshot {
 
 /// Reads the node's entries from `doc`, once. The caller runs it under `on_home`, which retries.
 fn snapshot(py: Python<'_>, doc: &Py<Document>, node: NodeId) -> Result<Snapshot, Fail> {
+    let file = doc.get().path.as_ref();
     let (name, items) = doc.get().with_state(py, |s| {
-        let items = items(s, node)?;
+        let items = items(s, node, file)?;
         let path = s.ids.path(node).expect("found by items");
         Ok::<_, Fail>((Arc::from(node_at(&s.kdl, &path).name().value()), items))
     })?;
@@ -250,7 +260,7 @@ pub(crate) fn edit<P: Send, R: Send>(
         // A plan that can't be applied goes back out unapplied: it may hold Python objects, which are dropped only
         // once the lock is released.
         let applied = doc.get().with_state(py, |s| {
-            let now = match items(s, node.id) {
+            let now = match items(s, node.id, None) {
                 Ok(now) => now,
                 Err(fail) => return Err((fail, planned)),
             };

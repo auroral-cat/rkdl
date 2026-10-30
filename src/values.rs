@@ -11,6 +11,7 @@ use pyo3::{PyTraverseError, PyTypeInfo};
 
 use crate::annotated::Value;
 use crate::errors::parse_error;
+use crate::positions::Pos;
 
 // Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
 // reference cycle.
@@ -265,11 +266,15 @@ impl TypeRegistry {
     }
 }
 
-/// Where an entry is in a document, for the error when its value can't be read: `server arg 0`, `server prop
-/// retries`.
+/// Where an entry is in a document, for the error when its value can't be read: `config.kdl:2:9: server prop
+/// retries`, `2:9: server arg 0` with no path, `server arg 0` with no position. Writes name no place: their errors are
+/// about the program's value, not the file.
 pub(crate) struct Place<'a> {
     pub(crate) node: &'a str,
     pub(crate) slot: Slot<'a>,
+    /// The entry's position in the file, which goes in front as `ParseError`'s does, with `path` if there is one.
+    pub(crate) pos: Option<Pos>,
+    pub(crate) path: Option<&'a str>,
 }
 
 pub(crate) enum Slot<'a> {
@@ -280,6 +285,12 @@ pub(crate) enum Slot<'a> {
 
 impl fmt::Display for Place<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(Pos { line, column }) = self.pos {
+            if let Some(path) = self.path {
+                write!(f, "{path}:")?;
+            }
+            write!(f, "{line}:{column}: ")?;
+        }
         write!(f, "{}", identifier(self.node))?;
         match self.slot {
             Slot::Arg(index) => write!(f, " arg {index}"),
@@ -292,8 +303,9 @@ impl fmt::Display for Place<'_> {
 /// one, and where the entry is, for the error. `decimal64` and `decimal128` read their digits from the text, since the
 /// parsed value is only an f64.
 ///
-/// A value that doesn't fit raises `ValueError`, whose message is meant for whoever wrote the file: `server prop
-/// retries: 300 doesn't fit (u8): out of range 0..=255`. An `Exception` from a custom decode is its `__cause__`.
+/// A value that doesn't fit raises `ValueError`, whose message is meant for whoever wrote the file: `config.kdl:2:9:
+/// server prop retries: 300 doesn't fit (u8): out of range 0..=255`, starting the way `ParseError`'s first line does.
+/// An `Exception` from a custom decode is its `__cause__`.
 /// Anything else a decode raises, such as `KeyboardInterrupt`, propagates.
 pub(crate) fn to_python_spelled(
     py: Python<'_>,
@@ -314,7 +326,7 @@ pub(crate) fn to_python_spelled(
             match decode.call1((plain,)) {
                 Ok(decoded) => Ok(decoded.unbind()),
                 Err(err) if err.is_instance_of::<PyException>(py) => {
-                    let reason = format!("its decode raised {}", err.value(py).repr()?);
+                    let reason = decode_raised(py, &err)?;
                     let refused = unreadable(ty, value, text, &reason, place);
                     refused.set_cause(py, Some(err));
                     Err(refused)
@@ -333,7 +345,8 @@ pub(crate) fn to_python_spelled(
     }
 }
 
-/// `server prop retries: 300 doesn't fit (u8): out of range 0..=255`, in the same words as a write that doesn't fit.
+/// `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`, in the same words as a write
+/// that doesn't fit. Without a position, the place starts at the node's name.
 fn unreadable(ty: &str, value: &KdlValue, text: Option<&str>, reason: &str, place: Option<&Place<'_>>) -> PyErr {
     let text = text.map_or_else(|| canonical_repr(value), str::to_owned);
     let place = place.map_or_else(String::new, |place| format!("{place}: "));
@@ -403,8 +416,8 @@ fn encode_under(value: &Bound<'_, PyAny>, ty: Option<&str>, types: &TypeRegistry
             let inferred = infer(value, types)?;
             (inferred.value, inferred.repr)
         }
-        Some(Converter::Builtin(b)) => encode_kept_builtin(b, value, ty)?,
-        Some(Converter::User(user)) => encode_kept_user(user, value, ty)?,
+        Some(Converter::Builtin(b)) => encode_kept_builtin(b, value, ty, types)?,
+        Some(Converter::User(user)) => encode_kept_user(user, value, ty, types)?,
     };
     Ok(Encoded {
         value: kdl,
@@ -440,10 +453,62 @@ fn infer(value: &Bound<'_, PyAny>, types: &TypeRegistry) -> PyResult<Encoded> {
     if let Some(kdl) = plain_to_kdl(value)? {
         return Ok(Encoded::new(kdl, None));
     }
-    Err(PyTypeError::new_err(format!(
+    Err(unconvertible(value)?)
+}
+
+/// The `TypeError` for a value no KDL value or registered `Type` can hold.
+fn unconvertible(value: &Bound<'_, PyAny>) -> PyResult<PyErr> {
+    Ok(PyTypeError::new_err(format!(
         "can't convert {} to a KDL value",
         value.get_type().qualname()?
     )))
+}
+
+/// Whether `value` is of a class rkdl can write with no annotation to keep: a plain type or a subclass of one, a
+/// registered `Type`'s class, or a built-in type's class. Checked by class alone, so nothing is converted. A value
+/// that isn't raises `TypeError` whatever annotation it's written over, before any check that it fits.
+fn writable(value: &Bound<'_, PyAny>, types: &TypeRegistry) -> PyResult<bool> {
+    if value.is_none()
+        || value.is_instance_of::<PyBool>()
+        || value.is_instance_of::<PyInt>()
+        || value.is_instance_of::<PyFloat>()
+        || value.is_instance_of::<PyString>()
+    {
+        return Ok(true);
+    }
+    for user in types.active_user_types() {
+        if value.is_instance(Type::hook(user.ty.bind(value.py()), |h| &h.cls)?.as_any())? {
+            return Ok(true);
+        }
+    }
+    for &(name, b) in INFERRED {
+        if matches!(types.get(name), Some(Converter::Builtin(_))) && claims(b, value)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `value` is of the class built-in type `b` writes. A bytes pattern isn't: KDL can't spell it.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "only the inferred types have a class of their own"
+)]
+fn claims(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match b {
+        Builtin::DecimalString => is_instance(value, "decimal", "Decimal"),
+        Builtin::DateTime => is_instance(value, "datetime", "datetime"),
+        Builtin::Date => is_instance(value, "datetime", "date"),
+        Builtin::Time => is_instance(value, "datetime", "time"),
+        Builtin::Ipv4 => is_instance(value, "ipaddress", "IPv4Address"),
+        Builtin::Ipv6 => is_instance(value, "ipaddress", "IPv6Address"),
+        Builtin::Uuid => is_instance(value, "uuid", "UUID"),
+        Builtin::Regex => {
+            Ok(is_instance(value, "re", "Pattern")? && value.getattr("pattern")?.is_instance_of::<PyString>())
+        }
+        Builtin::Base64 => Ok(value.is_instance_of::<PyBytes>()),
+        _ => Ok(false),
+    }
 }
 
 /// Canonical KDL text for a value, written into `KdlEntryFormat::value_repr` after every value write.
@@ -650,15 +715,15 @@ fn is_instance(value: &Bound<'_, PyAny>, module: &str, attr: &str) -> PyResult<b
 fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&str>) -> Result<Py<PyAny>, String> {
     let string = || match value {
         KdlValue::String(s) => Ok(s.as_str()),
-        _ => Err("expected a string".to_owned()),
+        _ => Err(expected(b).to_owned()),
     };
     let decoded = match b {
         Builtin::Int { min, max } => {
             let KdlValue::Integer(i) = value else {
-                return Err("expected an integer".to_owned());
+                return Err(expected(b).to_owned());
             };
             if *i < min || *i > max {
-                return Err(format!("out of range {min}..={max}"));
+                return Err(int_range(min, max));
             }
             i.into_bound_py_any(py)
         }
@@ -667,10 +732,10 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
                 #[expect(clippy::cast_precision_loss, reason = "an f64 annotation asks for the nearest float")]
                 KdlValue::Integer(i) => *i as f64,
                 KdlValue::Float(f) => *f,
-                _ => return Err("expected a number".to_owned()),
+                _ => return Err(expected(b).to_owned()),
             };
             if matches!(b, Builtin::F32) && !fits_f32(f) {
-                return Err("out of range for f32".to_owned());
+                return Err(F32_RANGE.to_owned());
             }
             f.into_bound_py_any(py)
         }
@@ -684,7 +749,7 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
                 KdlValue::Float(f) if *f == f64::INFINITY => "Infinity".to_owned(),
                 KdlValue::Float(f) if *f == f64::NEG_INFINITY => "-Infinity".to_owned(),
                 KdlValue::Float(f) => text.and_then(decimal_digits).unwrap_or_else(|| format!("{f:?}")),
-                _ => return Err("expected a number".to_owned()),
+                _ => return Err(expected(b).to_owned()),
             };
             call(py, "decimal", "Decimal", digits)
         }
@@ -811,20 +876,27 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
 
 /// What writing `value` over a built-in annotation stores, or the `ValueError` saying why it doesn't fit: the
 /// annotation's own class, a plain value the annotation reads (`"2029-01-01"` over `(date)`), or a number it converts
-/// without loss.
-fn encode_kept_builtin(b: Builtin, value: &Bound<'_, PyAny>, ty: &str) -> PyResult<(KdlValue, Option<String>)> {
+/// without loss. A value nothing can write raises `TypeError` instead.
+fn encode_kept_builtin(
+    b: Builtin,
+    value: &Bound<'_, PyAny>,
+    ty: &str,
+    types: &TypeRegistry,
+) -> PyResult<(KdlValue, Option<String>)> {
     if let Some(kept) = encode_builtin(b, value)? {
         return Ok(kept);
+    }
+    if !writable(value, types)? {
+        return Err(unconvertible(value)?);
     }
     let reason = if let Some(reason) = number_misfit(b, value)? {
         reason
     } else if is_exact_plain(value) {
+        // A plain value fits if the annotation reads it, and if it doesn't, the reason is the one reading it gives.
         let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
         match decode_builtin(value.py(), b, &kdl, None) {
             Ok(_) => return Ok((kdl, None)),
-            // A string that doesn't read says why; any other plain value is just the wrong kind.
-            Err(reason) if matches!(kdl, KdlValue::String(_)) && reads_strings(b) => reason,
-            Err(_) => wrong_class(b, value)?,
+            Err(reason) => reason,
         }
     } else {
         wrong_class(b, value)?
@@ -833,21 +905,30 @@ fn encode_kept_builtin(b: Builtin, value: &Bound<'_, PyAny>, ty: &str) -> PyResu
 }
 
 /// What writing `value` over a custom annotation stores, or the `ValueError` saying why it doesn't fit: an instance of
-/// the Type's class, or a plain value its decode accepts, as `(celsius)22.0` would be read.
-fn encode_kept_user(user: &UserType, value: &Bound<'_, PyAny>, ty: &str) -> PyResult<(KdlValue, Option<String>)> {
+/// the Type's class, or a plain value its decode accepts, as `(celsius)22.0` would be read. A value nothing can write
+/// raises `TypeError` instead.
+fn encode_kept_user(
+    user: &UserType,
+    value: &Bound<'_, PyAny>,
+    ty: &str,
+    types: &TypeRegistry,
+) -> PyResult<(KdlValue, Option<String>)> {
     let py = value.py();
     if let Some(kdl) = encode_user(user, value)? {
         return Ok((kdl, None));
     }
+    if !writable(value, types)? {
+        return Err(unconvertible(value)?);
+    }
     if !is_exact_plain(value) {
         let cls = Type::hook(user.ty.bind(py), |h| &h.cls)?.qualname()?;
-        return Err(misfit(value, ty, &format!("not a {cls}"))?);
+        return Err(misfit(value, ty, &format!("expected a {cls}"))?);
     }
     // Only an `Exception` from decode means "doesn't fit"; anything else, such as `KeyboardInterrupt`, propagates.
     match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
         Ok(_) => Ok((plain_to_kdl(value)?.expect("exact plain types always convert"), None)),
         Err(err) if err.is_instance_of::<PyException>(py) => {
-            let refused = misfit(value, ty, &format!("its decode raised {}", err.value(py).repr()?))?;
+            let refused = misfit(value, ty, &decode_raised(py, &err)?)?;
             refused.set_cause(py, Some(err));
             Err(refused)
         }
@@ -855,7 +936,7 @@ fn encode_kept_user(user: &UserType, value: &Bound<'_, PyAny>, ty: &str) -> PyRe
     }
 }
 
-/// `'weekly' doesn't fit (u8): not an integer`.
+/// `'weekly' doesn't fit (u8): expected an integer`.
 fn misfit(value: &Bound<'_, PyAny>, ty: &str, reason: &str) -> PyResult<PyErr> {
     Ok(PyValueError::new_err(format!(
         "{} doesn't fit {}: {reason}",
@@ -877,7 +958,7 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
             if f.is_finite() && f.fract() == 0.0 {
                 range_of(b)
             } else {
-                Some("not a whole number".to_owned())
+                Some(expected(b).to_owned())
             }
         }
         Builtin::Int { .. } | Builtin::F32 | Builtin::F64 if is_int || is_float => range_of(b),
@@ -887,48 +968,57 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
     })
 }
 
-/// Whether a plain string over `b` is read as text, so the reason it can't be read is worth showing.
-const fn reads_strings(b: Builtin) -> bool {
-    !matches!(
-        b,
-        Builtin::Int { .. } | Builtin::F32 | Builtin::F64 | Builtin::DecimalNumber
-    )
-}
-
-/// Why a value of the wrong class doesn't fit `b`.
+/// Why a value that isn't plain and isn't of `b`'s class doesn't fit `b`.
 fn wrong_class(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<String> {
-    let expected = match b {
-        Builtin::Int { .. } => "an integer",
-        Builtin::F32 | Builtin::F64 | Builtin::DecimalNumber => "a number",
-        Builtin::DecimalString => "a Decimal",
-        Builtin::DateTime => "a datetime",
-        // A datetime is a date too, but writing it as one would drop the time.
-        Builtin::Date if is_instance(value, "datetime", "datetime")? => return Ok("would lose its time".to_owned()),
-        Builtin::Date => "a date",
-        Builtin::Time => "a time",
-        Builtin::Ipv4 => "an IPv4Address",
-        Builtin::Ipv6 => "an IPv6Address",
-        Builtin::Uuid => "a UUID",
-        Builtin::Regex if is_instance(value, "re", "Pattern")? => {
-            return Ok("a bytes pattern has no KDL spelling".to_owned());
-        }
-        Builtin::Regex => "a re.Pattern",
-        Builtin::Base64 => "bytes",
-        Builtin::PlainString => "a str",
-    };
-    Ok(format!("not {expected}"))
+    // A datetime is a date too, but writing it as one would drop the time.
+    if matches!(b, Builtin::Date) && is_instance(value, "datetime", "datetime")? {
+        return Ok("would lose its time".to_owned());
+    }
+    Ok(expected(b).to_owned())
 }
 
-/// "out of range ..." for a numeric built-in type.
+/// The reason a value of the wrong kind doesn't fit `b`, the same whether it's read from a file (`(u8)"weekly"`) or
+/// written over one (`"weekly"` over `(u8)`). It names what fits in words that suit both: the file's author writes a
+/// date as a string, and the program writes a `date` or that string.
+const fn expected(b: Builtin) -> &'static str {
+    match b {
+        Builtin::Int { .. } => "expected an integer",
+        Builtin::F32 | Builtin::F64 | Builtin::DecimalNumber => "expected a number",
+        Builtin::DecimalString => "expected a decimal",
+        Builtin::DateTime => "expected a date-time",
+        Builtin::Date => "expected a date",
+        Builtin::Time => "expected a time",
+        Builtin::Ipv4 => "expected an IPv4 address",
+        Builtin::Ipv6 => "expected an IPv6 address",
+        Builtin::Uuid => "expected a UUID",
+        Builtin::Regex => "expected a regex",
+        Builtin::Base64 => "expected base64 data",
+        Builtin::PlainString => "expected a string",
+    }
+}
+
+/// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing.
+fn decode_raised(py: Python<'_>, err: &PyErr) -> PyResult<String> {
+    Ok(format!("its decode raised {}", err.value(py).repr()?))
+}
+
+/// "out of range ..." for a numeric built-in type, reading or writing.
 #[expect(clippy::wildcard_enum_match_arm, reason = "only the numeric types have a range")]
 fn range_of(b: Builtin) -> Option<String> {
     match b {
-        Builtin::Int { min, max } => Some(format!("out of range {min}..={max}")),
-        Builtin::F32 => Some("out of range ±3.4028234663852886e+38".to_owned()),
-        Builtin::F64 => Some("out of range ±1.7976931348623157e+308".to_owned()),
+        Builtin::Int { min, max } => Some(int_range(min, max)),
+        Builtin::F32 => Some(F32_RANGE.to_owned()),
+        Builtin::F64 => Some(F64_RANGE.to_owned()),
         _ => None,
     }
 }
+
+fn int_range(min: i128, max: i128) -> String {
+    format!("out of range {min}..={max}")
+}
+
+const F32_RANGE: &str = "out of range ±3.4028234663852886e+38";
+const F64_RANGE: &str = "out of range ±1.7976931348623157e+308";
 
 /// An annotation spelled the way a file does: `(u8)`, or `("my type")`.
 fn annotation(ty: &str) -> String {

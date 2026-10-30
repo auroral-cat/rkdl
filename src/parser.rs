@@ -114,12 +114,7 @@ impl Parser {
         let (kdl, ids) = py
             .detach(|| on_big_stack(|| parse_text(text, formatter)))?
             .map_err(|e| parse_error_in(py, &e, path))?;
-        Ok(Document::parsed(
-            kdl,
-            ids,
-            self.types.clone_ref(py),
-            path.map(str::to_owned),
-        ))
+        Ok(Document::parsed(kdl, ids, self.types.clone_ref(py), path))
     }
 }
 

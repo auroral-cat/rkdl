@@ -174,7 +174,9 @@ impl Entry {
 
     fn item(&self, py: Python<'_>) -> PyResult<(Item, Py<Document>)> {
         handles::on_home(py, &self.home, |doc| {
-            let item = doc.get().with_state(py, |s| edit::item(s, self.id))?;
+            let item = doc
+                .get()
+                .with_state(py, |s| edit::item(s, self.id, doc.get().path.as_ref()))?;
             Ok((item, doc.clone_ref(py)))
         })
     }
@@ -234,9 +236,11 @@ impl Entry {
     ///
     /// Raises:
     ///     ValueError: The value doesn't fit its annotation, or the new value doesn't fit it, like 300, 3.5 or
-    ///         "weekly" written over `(u8)`. An exception from a custom Type's decode is the `__cause__`. A
-    ///         write that raises doesn't change the document.
-    ///     TypeError: The new value can't be converted to KDL.
+    ///         "weekly" written over `(u8)`. Reading says where the entry was, as `ParseError` does:
+    ///         `config.kdl:2:9: inner prop retries: 300 doesn't fit (u8): out of range 0..=255`. An exception
+    ///         from a custom Type's decode is the `__cause__`. A write that raises doesn't change the document.
+    ///     TypeError: The new value can't be converted to KDL, whatever the annotation: its class isn't one rkdl
+    ///         or a custom Type writes.
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let (item, doc) = self.item(py)?;
@@ -247,7 +251,9 @@ impl Entry {
     fn set_value(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = value.py();
         handles::on_home(py, &self.home, |doc| {
-            let before = doc.get().with_state(py, |s| edit::item(s, self.id))?;
+            let before = doc
+                .get()
+                .with_state(py, |s| edit::item(s, self.id, doc.get().path.as_ref()))?;
             // Converting may call Python, so it happens between two locks.
             let encoded = before.encode_over(value, doc.get().types.get())?;
             doc.get().with_state(py, |s| {

@@ -151,7 +151,10 @@ struct NewHome {
 impl NewHome {
     /// The node keeps reading and writing through the types of the document it left.
     fn new(py: Python<'_>, from: &Py<Document>) -> PyResult<NewHome> {
-        let doc = Py::new(py, Document::empty_home(from.get().types.clone_ref(py)))?;
+        let doc = Py::new(
+            py,
+            Document::empty_home(from.get().types.clone_ref(py), from.get().path.clone()),
+        )?;
         Ok(NewHome {
             shared: Arc::new(doc.clone_ref(py)),
             doc,

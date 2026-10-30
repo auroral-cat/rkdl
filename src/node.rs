@@ -103,7 +103,7 @@ pub(crate) fn detached<'py>(
     let &[id] = ids.top() else {
         return Err(stale());
     };
-    let home = Bound::new(py, Document::empty_home(types))?;
+    let home = Bound::new(py, Document::empty_home(types, None))?;
     home.get().fill(kdl, ids, eol);
     // Nothing else can reach a new home, so the node is still there.
     Document::node_handle(&home, id)?.ok_or_else(stale)

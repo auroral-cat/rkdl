@@ -1,4 +1,4 @@
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use kdl::KdlDocument;
 use pyo3::PyTraverseError;
@@ -59,8 +59,9 @@ pub struct Document {
     pub(crate) types: Py<TypeRegistry>,
     /// A detached node's private one-node document. Never handed to Python as a Document.
     pub(crate) home: bool,
-    /// The file `load` read the text from.
-    path: Option<String>,
+    /// The file `load` read the text from. A detached node's home has the path of the document the node left, for
+    /// the errors that name where its entries were.
+    pub(crate) path: Option<Arc<str>>,
 }
 
 impl Document {
@@ -71,17 +72,17 @@ impl Document {
     }
 
     /// A document parsed from text: `ids` holds the positions, and `path` names the file the text came from.
-    pub(crate) fn parsed(kdl: KdlDocument, ids: IdTree, types: Py<TypeRegistry>, path: Option<String>) -> Self {
+    pub(crate) fn parsed(kdl: KdlDocument, ids: IdTree, types: Py<TypeRegistry>, path: Option<&str>) -> Self {
         let eol = layout::line_ending(&kdl);
-        Document::build(kdl, ids, types, false, eol, path)
+        Document::build(kdl, ids, types, false, eol, path.map(Arc::from))
     }
 
     /// A private home for a detached node, empty until `fill` puts the node in. It starts empty so the caller can
-    /// create its Python object before locking anything.
-    pub(crate) fn empty_home(types: Py<TypeRegistry>) -> Self {
+    /// create its Python object before locking anything. `path` is the file the node came from, if any.
+    pub(crate) fn empty_home(types: Py<TypeRegistry>, path: Option<Arc<str>>) -> Self {
         let kdl = KdlDocument::new();
         let ids = IdTree::from_document(&kdl);
-        Document::build(kdl, ids, types, true, "\n", None)
+        Document::build(kdl, ids, types, true, "\n", path)
     }
 
     fn build(
@@ -90,7 +91,7 @@ impl Document {
         types: Py<TypeRegistry>,
         home: bool,
         eol: &'static str,
-        path: Option<String>,
+        path: Option<Arc<str>>,
     ) -> Self {
         Document {
             state: Mutex::new(DocState { kdl, ids, eol }),

@@ -274,9 +274,9 @@ def test_annotation_kept_when_the_value_fits():
 
 def test_a_value_that_does_not_fit_raises():
     d, n = node("n (u8)1 when=(u8)2\n")
-    with pytest.raises(ValueError, match="doesn't fit \\(u8\\): not an integer"):
+    with pytest.raises(ValueError, match="doesn't fit \\(u8\\): expected an integer"):
         n.args[0] = "x"
-    with pytest.raises(ValueError, match="doesn't fit \\(u8\\): not an integer"):
+    with pytest.raises(ValueError, match="doesn't fit \\(u8\\): expected an integer"):
         n.props["when"] = datetime.date(2024, 1, 2)
     assert str(d) == "n (u8)1 when=(u8)2\n"
 
