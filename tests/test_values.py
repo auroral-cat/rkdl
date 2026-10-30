@@ -213,6 +213,7 @@ def test_inferred_from_python(value, expected):
     [
         (255, "u8", ("255", "u8")),
         (-1, "i8", ("-1", "i8")),
+        (1, "i32", ("1", "i32")),
         (2**64 - 1, "usize", ("18446744073709551615", "usize")),
         (1.5, "f64", ("1.5", "f64")),
         (2, "f64", ("2.0", "f64")),
@@ -235,7 +236,9 @@ def test_current_type_kept_when_value_fits(value, current, expected):
     [
         (256, "u8", ("256", None)),
         (-1, "u32", ("-1", None)),
+        # bool is checked before int.
         (True, "u8", ("#true", None)),
+        (True, "i32", ("#true", None)),
         (1.5, "i32", ("1.5", None)),
         (True, "f64", ("#true", None)),
         (1e39, "f32", ("1e39", None)),
@@ -255,11 +258,6 @@ def test_current_type_replaced_when_value_does_not_fit(value, current, expected)
         assert from_python(value, current) == expected
 
 
-def test_bool_is_not_int():
-    assert from_python(True, "i32") == ("#true", None)
-    assert from_python(1, "i32") == ("1", "i32")
-
-
 def test_int_outside_i128_overflows():
     with pytest.raises(OverflowError):
         from_python(2**127)
@@ -267,6 +265,13 @@ def test_int_outside_i128_overflows():
         from_python(-(2**127) - 1)
     with pytest.raises(OverflowError):
         from_python(2**127, "u128")
+
+
+@pytest.mark.xfail(strict=True, reason="kdl-rs doesn't parse the i128::MIN literal, which rkdl writes for -(2**127)")
+def test_i128_min_round_trips():
+    doc = rkdl.parse("n 1\n")
+    doc["n"].args[0] = -(2**127)
+    assert rkdl.parse(str(doc))["n"].args[0] == -(2**127)
 
 
 def test_lone_surrogate_raises_value_error():
@@ -375,7 +380,7 @@ def test_type_attributes():
 
 
 def test_parser_accepts_types():
-    rkdl.Parser(types=[CELSIUS]).parse("a (celsius)1")
+    assert rkdl.Parser(types=[CELSIUS]).parse("a (celsius)1")["a"].args[0] == Celsius(1)
 
 
 def test_types_come_from_the_document_a_node_is_in():

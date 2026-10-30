@@ -459,24 +459,26 @@ def test_children_empty_list():
     assert str(d) == "// header\na 1 {\n    x\n}\nb {}\ne {}\n"
 
 
+# Only the text up to `{}` is checked: what fmt() leaves after it hits two kdl-rs bugs, the blank line after a
+# trailing comment (test_fmt_leaves_no_blank_line_after_a_trailing_comment) and the dropped `// end`
+# (test_fmt_keeps_a_line_comment_ending_a_node).
 @pytest.mark.parametrize(
-    ("text", "formatted", "expected"),
+    ("text", "start"),
     [
         # fmt() ends the comment with a newline of its own, which mustn't land before `{`.
-        ("a 1 /* end */\n", "a 1 /* end */\n\n", "a 1 /* end */ {}\n"),
-        ("x {\n  a 1 /* end */\n}\n", "x {\n    a 1 /* end */\n\n}\n", "x {\n    a 1 /* end */ {}\n}\n"),
-        ("a /-b \\\n  /-c\n", "a /-b \\\n  /-c\n\n", "a /-b \\\n  /-c {}\n"),
-        # fmt() drops a `//` comment at the end of a node.
-        ("a 1 // end\n", "a 1\n", "a 1 {}\n"),
+        ("a 1 /* end */\n", "a 1 /* end */ {}"),
+        ("x {\n  a 1 /* end */\n}\n", "x {\n    a 1 /* end */ {}"),
+        ("a /-b \\\n  /-c\n", "a /-b \\\n  /-c {}"),
+        ("a /-{}\n", "a /-{} {}"),
+        ("a 1 // end\n", "a 1 {}"),
     ],
 )
-def test_children_empty_list_after_fmt(text, formatted, expected):
+def test_children_empty_list_after_fmt(text, start):
     d = rkdl.parse(text)
     d.fmt()
-    assert str(d) == formatted
     (d["x"]["a"] if "x" in text else d["a"]).children = []
-    assert str(d) == expected
-    assert str(rkdl.parse(str(d))) == expected
+    assert str(d).startswith(start)
+    assert str(rkdl.parse(str(d))) == str(d)
 
 
 def test_children_assignment_errors():

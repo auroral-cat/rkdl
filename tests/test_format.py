@@ -1,4 +1,5 @@
 import pytest
+from conftest import formatted
 
 import rkdl
 
@@ -10,12 +11,6 @@ node1   1    2 {
   }
    node2   #true
 """
-
-
-def formatted(text, formatter=None):
-    doc = rkdl.parse(text)
-    doc.fmt(formatter)
-    return str(doc)
 
 
 def test_default_indent():
@@ -109,6 +104,21 @@ def test_fmt_keeps_comments_at_the_end_of_a_line(comment):
 @pytest.mark.parametrize("text", ["a 1 // end\nb\n", "p {\n    a 1 // end\n}\n"])
 def test_fmt_keeps_a_line_comment_ending_a_node(text):
     assert "// end" in formatted(text)
+
+
+@pytest.mark.xfail(strict=True, reason="kdl-rs: KdlEntry::autoformat resets the entry format, comments included")
+def test_fmt_keeps_comments_between_entries():
+    assert formatted("a 1 /* mid */ 2\n") == "a 1 /* mid */ 2\n"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="kdl-rs: autoformat_trailing ends a node's trailing comment or `/-` with a newline, and the terminator "
+    "adds another",
+)
+@pytest.mark.parametrize("text", ["a 1 /* end */\n", "a /-b\n", "a /-{}\n"])
+def test_fmt_leaves_no_blank_line_after_a_trailing_comment(text):
+    assert formatted(text) == text
 
 
 def test_defaults_and_repr():

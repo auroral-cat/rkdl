@@ -9,13 +9,15 @@ parent 1 key=v {
     child /* inline */ 2
     /-gone
     other { deep; }
-} // after
+}
+// after
 next
 """
 
 
 def test_str_node_keeps_inner_comments():
     doc = rkdl.parse(NESTED)
+    assert str(doc) == NESTED
     assert str(doc["parent"]) == (
         "parent 1 key=v {\n"
         "    // above child\n"
@@ -24,10 +26,16 @@ def test_str_node_keeps_inner_comments():
         "    other { deep; }\n"
         "}"
     )
-    # kdl-rs gives a comment after `}` to the next node, as leading text.
+    # The comment above a node is part of that node's leading text, which str(node) leaves out.
     assert str(doc["next"]) == "next"
     assert str(doc["parent"]["child"]) == "child /* inline */ 2"
-    assert str(doc["next"]) == "next"
+
+
+@pytest.mark.xfail(strict=True, reason="kdl-rs: comments between `}` and the newline are dropped, newline and all")
+@pytest.mark.parametrize("comment", ["// end", "/* end */"])
+def test_comment_after_a_block_survives(comment):
+    text = f"a {{}} {comment}\nb\n"
+    assert str(rkdl.parse(text)) == text
 
 
 def test_str_node_reflects_edits():

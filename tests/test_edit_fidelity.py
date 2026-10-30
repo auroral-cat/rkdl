@@ -6,40 +6,13 @@ edit did, leaves the text outside the edited node alone, and indents new nodes l
 
 import functools
 import math
-import os
-import pathlib
 
 import pytest
+from conftest import SPEC_INPUT, is_valid_case, read_case, skip_module_without_kdl_rs, spec_inputs, walk
 
 import rkdl
 
-CASES_DIR = pathlib.Path(
-    os.environ.get("RKDL_SPEC_CASES", "/home/aurora/code/rust/rkdl/refs/kdl-rs/tests/test_cases")
-)
-INPUT = CASES_DIR / "input"
-EXPECTED = CASES_DIR / "expected_kdl"
-
-if not INPUT.is_dir() or not EXPECTED.is_dir():
-    pytest.skip(f"spec test cases not found at {CASES_DIR}", allow_module_level=True)
-
-
-EMPTIED_BLOCK = (
-    "by design: removing the last child prints the block as `{}`, dropping the whitespace before `}` "
-    "(test_removing_last_child_empties_block)"
-)
-NODE_TYPE_FORMAT = "kdl-rs 6.7.1: a node's Display drops whitespace and comments in and after `(type)`"
-SPACE_AFTER_BLOCK = "kdl-rs: whitespace between `}` and the newline is dropped, so `} \\nb` prints `}b`, which doesn't parse"
-
-# Known failures: (check, case id) -> reason.
-XFAIL = {
-    ("untouched", "nested_children.kdl:0.0.0:pop"): EMPTIED_BLOCK,
-    ("untouched", "semicolon_in_child.kdl:0.0:pop"): EMPTIED_BLOCK,
-    ("round_trip", "comment_after_node_type.kdl"): NODE_TYPE_FORMAT,
-    ("round_trip", "comment_in_node_type.kdl"): NODE_TYPE_FORMAT,
-    ("round_trip", "space_after_node_type.kdl"): NODE_TYPE_FORMAT,
-    ("round_trip", "space_in_node_type.kdl"): NODE_TYPE_FORMAT,
-    ("round_trip", "space_after_node.kdl"): SPACE_AFTER_BLOCK,
-}
+skip_module_without_kdl_rs()
 
 
 # A small KDL scanner, independent of rkdl, that finds where each node's text starts and ends. A node's text runs
@@ -428,7 +401,7 @@ HEADER_EDITS = {"new_prop", "append_arg", "set_first", "type_on", "type_off", "r
 
 def applies(edit, node):
     if edit == "set_first":
-        return len(node.entries) > 0 and (len(node.args) > 0 or len(node.props) > 0)
+        return len(node.args) > 0 or len(node.props) > 0
     if edit == "type_off":
         return node.type is not None
     return True
@@ -437,20 +410,8 @@ def applies(edit, node):
 # Collecting the cases.
 
 
-def read(path):
-    return path.read_text(encoding="utf-8").replace("\r\n", "\n")
-
-
-def walk(nodes, prefix=()):
-    for i, node in enumerate(nodes):
-        path = (*prefix, i)
-        yield path, node
-        if node.children is not None:
-            yield from walk(node.children, path)
-
-
 def valid_files():
-    return [f for f in sorted(INPUT.glob("*.kdl")) if (EXPECTED / f.name).exists()]
+    return [p for p in spec_inputs() if is_valid_case(p)]
 
 
 def reparses(text):
@@ -465,40 +426,23 @@ def reparses(text):
 def collect():
     cases = []
     for file in valid_files():
-        text = read(file)
+        text = read_case(file)
         if not reparses(text):
-            continue  # reported by test_round_trip
-        doc = rkdl.parse(text)
-        for path, node in walk(doc.children):
+            continue  # test_spec.py's test_round_trip reports these
+        for path, node in walk(rkdl.parse(text)):
             for edit in EDITS:
                 if applies(edit, node):
-                    cases.append((file.name, path, edit))
+                    cases.append(pytest.param(file.name, path, edit, id=f"{file.name}:{'.'.join(map(str, path))}:{edit}"))
     return cases
-
-
-def case_id(case):
-    file, path, edit = case
-    return f"{file}:{'.'.join(map(str, path))}:{edit}"
 
 
 CASES = collect()
 
 
-def params(check):
-    out = []
-    for case in CASES:
-        cid = case_id(case)
-        marks = []
-        if (check, cid) in XFAIL:
-            marks.append(pytest.mark.xfail(strict=True, reason=XFAIL[check, cid]))
-        out.append(pytest.param(*case, id=cid, marks=marks))
-    return out
-
-
 @functools.lru_cache(maxsize=None)
 def run(file, path, edit):
     """Returns the text before and after the edit, and the expected snapshot."""
-    doc = rkdl.parse(read(INPUT / file))
+    doc = rkdl.parse(read_case(SPEC_INPUT / file))
     old = str(doc)
     expected = snapshot(doc)
     model = EDITS[edit](doc, path)
@@ -512,13 +456,7 @@ ARGS = ("file", "path", "edit")
 # The checks.
 
 
-@pytest.mark.parametrize(ARGS, params("parses"))
-def test_parses(file, path, edit):
-    _, new, _ = run(file, path, edit)
-    rkdl.parse(new)
-
-
-@pytest.mark.parametrize(ARGS, params("meaning"))
+@pytest.mark.parametrize(ARGS, CASES)
 def test_meaning(file, path, edit):
     _, new, expected = run(file, path, edit)
     assert snapshot(rkdl.parse(new)) == expected
@@ -540,10 +478,11 @@ def common_suffix(a, b):
     return i
 
 
-@pytest.mark.parametrize(ARGS, params("untouched"))
+@pytest.mark.parametrize(ARGS, CASES)
 def test_untouched(file, path, edit):
     old, new, _ = run(file, path, edit)
-    span = span_at(scan(old), path)
+    spans = scan(old)
+    span = span_at(spans, path)
     p, s = common_prefix(old, new), common_suffix(old, new)
     if edit in SIBLING_EDITS:
         # A pure insertion, at the node's start (before) or after its body (after).
@@ -554,6 +493,11 @@ def test_untouched(file, path, edit):
         return
     if edit == "pop":
         lo, hi = span.start, span.end
+        parent = span_at(spans, path[:-1]) if len(path) > 1 else None
+        if parent is not None and len(parent.children) == 1:
+            # Emptying a block prints it as `{}` by design, dropping the whitespace before `}`
+            # (test_removing_last_child_empties_block).
+            hi = parent.block[1]
     elif edit in HEADER_EDITS:
         lo, hi = span.core, span.block[0] if span.block else span.end
     else:
@@ -582,7 +526,7 @@ def single_line(text, block):
     return not any(nl in text[a:b] for nl in NEWLINES)
 
 
-@pytest.mark.parametrize(ARGS, [p for p in params("indent") if p.values[2] in CHILD_EDITS | SIBLING_EDITS])
+@pytest.mark.parametrize(ARGS, [p for p in CASES if p.values[2] in CHILD_EDITS | SIBLING_EDITS])
 def test_indent(file, path, edit):
     old, new, _ = run(file, path, edit)
     old_spans, new_spans = scan(old), scan(new)
@@ -608,20 +552,6 @@ def test_indent(file, path, edit):
     assert got == want, f"new node placed after {got!r}, sibling indent {want!r}"
 
 
-@pytest.mark.parametrize(
-    "file",
-    [
-        pytest.param(f.name, marks=[pytest.mark.xfail(strict=True, reason=XFAIL["round_trip", f.name])])
-        if ("round_trip", f.name) in XFAIL
-        else f.name
-        for f in valid_files()
-    ],
-)
-def test_round_trip(file):
-    text = read(INPUT / file)
-    assert str(rkdl.parse(text)) == text
-
-
 def test_scanner_agrees_with_rkdl():
     """The scanner finds the same tree as rkdl on every document it's used on, before any edit."""
 
@@ -632,11 +562,7 @@ def test_scanner_agrees_with_rkdl():
         return [None if s.block is None else span_shape(s.children) for s in spans]
 
     for file in valid_files():
-        if reparses(read(file)):
-            doc = rkdl.parse(read(file))
+        if reparses(read_case(file)):
+            doc = rkdl.parse(read_case(file))
             assert span_shape(scan(str(doc))) == shape(doc.children), file.name
 
-
-def test_xfail_table_names_real_cases():
-    known = {case_id(c) for c in CASES} | {f.name for f in valid_files()}
-    assert [cid for _, cid in XFAIL if cid not in known] == []

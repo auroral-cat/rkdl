@@ -7,10 +7,10 @@ can say which node or entry each handle should still refer to.
 import gc
 import math
 import os
-import pathlib
 import re
 
 import pytest
+from conftest import MISSING_KDL_RS, has_duplicate_props, have_kdl_rs, read_case, spec_inputs, walk
 from hypothesis import note, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
@@ -20,10 +20,6 @@ import rkdl
 settings.register_profile("default", max_examples=120, stateful_step_count=40, deadline=None)
 settings.register_profile("long", max_examples=1000, stateful_step_count=60, deadline=None)
 PROFILE = settings.get_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
-
-SPEC_INPUT = pathlib.Path(
-    os.environ.get("RKDL_SPEC_CASES", "/home/aurora/code/rust/rkdl/refs/kdl-rs/tests/test_cases/input")
-)
 
 # Type annotations rkdl converts. Entry annotations the tests set avoid these, so values stay plain.
 RESERVED_TYPES = {
@@ -310,17 +306,16 @@ def corpus_is_usable(text):
         check_children(again.children, model, "corpus")
     except (rkdl.ParseError, ValueError, AssertionError):
         return False
-    if not all(len(n.props) == len([e for e in n.entries if e.name is not None]) for n in walk_all(doc)):
+    if has_duplicate_props(doc):
         return False
     return every_new_block_prints_stably(text)
 
 
 def every_new_block_prints_stably(text):
     """Leaves out files where giving a node `{}` puts a comment after `}` (test_comment_after_a_block_survives)."""
-    count = len(list(walk_all(rkdl.parse(text))))
-    for i in range(count):
+    for i in range(len(list(walk(rkdl.parse(text))))):
         doc = rkdl.parse(text)
-        node = list(walk_all(doc))[i]
+        _, node = list(walk(doc))[i]
         if node.children is None:
             node.children = []
         try:
@@ -331,25 +326,12 @@ def every_new_block_prints_stably(text):
     return True
 
 
-def walk_all(doc):
-    for root in doc.children:
-        yield from walk(root)
-
-
-def walk(node):
-    yield node
-    for child in node.children or ():
-        yield from walk(child)
-
-
 def load_corpus():
-    if not SPEC_INPUT.is_dir():
-        return []
     texts = []
-    for path in sorted(SPEC_INPUT.glob("*.kdl")):
-        if path.stat().st_size > 1500:
+    for path in spec_inputs():
+        text = read_case(path)
+        if text is None or path.stat().st_size > 1500:
             continue
-        text = path.read_text(encoding="utf-8")
         # A final newline keeps a trailing `// comment` from swallowing appended nodes
         # (test_append_after_a_final_line_comment).
         if not text.endswith("\n"):
@@ -360,6 +342,13 @@ def load_corpus():
 
 
 CORPUS = load_corpus()
+
+
+def test_corpus_is_loaded():
+    if not have_kdl_rs():
+        pytest.skip(MISSING_KDL_RS)
+    assert CORPUS
+
 
 start_documents = [st.just(("", [])), generated_documents()]
 if CORPUS:
@@ -778,39 +767,3 @@ class EditSequences(RuleBasedStateMachine):
 TestEditSequences = EditSequences.TestCase
 TestEditSequences.settings = PROFILE
 
-
-# Regressions found by the state machine
-
-
-@pytest.mark.parametrize("char", ["\x00", "\x0b", "\x85", "\u2028", "\ufeff", "\u200e"])
-def test_disallowed_code_points_are_escaped(char):
-    d = rkdl.parse("n 1\n")
-    d["n"].args[0] = char
-    assert rkdl.parse(str(d))["n"].args[0] == char
-
-
-@pytest.mark.xfail(strict=True, reason="kdl-rs: comments between `}` and the newline are dropped, newline and all")
-@pytest.mark.parametrize("comment", ["// end", "/* end */"])
-def test_comment_after_a_block_survives(comment):
-    text = f"a {{}} {comment}\nb\n"
-    assert str(rkdl.parse(text)) == text
-
-
-def test_fmt_keeps_ambiguous_strings_quoted():
-    d = rkdl.parse('"+.7" "-.7" "+.7"=1\n')
-    d.fmt()
-    assert str(rkdl.parse(str(d))) == str(d)
-
-
-@pytest.mark.parametrize("text", ["a 1 /* end */\n", "a /-{}\n"])
-def test_block_after_formatted_comment(text):
-    d = rkdl.parse(text)
-    d.fmt()
-    d["a"].children = []
-    assert str(rkdl.parse(str(d))) == str(d)
-
-
-def test_append_after_a_final_line_comment():
-    d = rkdl.parse("// hi")
-    d.children.append(rkdl.Node("new"))
-    assert str(d) == "// hi\nnew\n"

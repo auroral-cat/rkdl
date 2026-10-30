@@ -229,16 +229,23 @@ def test_args_search_methods():
 
 
 def test_iteration_snapshots():
-    _, n = node("n 1 2 3\n")
+    d, n = node("n 1 2 3 a=1 b=2\n")
     seen = []
     for v in n.args:
         seen.append(v)
         n.args.append(v)
     assert seen == [1, 2, 3]
+    keys = []
     for k in n.props:
-        pass
+        keys.append(k)
+        del n.props[k]
+    assert keys == ["a", "b"]
+    values = []
     for e in n.entries:
+        values.append(e.value)
         n.args.remove(e.value)
+    assert values == [1, 2, 3, 1, 2, 3]
+    assert str(d) == "n\n"
 
 
 # Type annotations

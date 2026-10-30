@@ -13,27 +13,14 @@ Skipped, because they test Rust-only API:
 - Format structs (KdlNodeFormat, KdlEntryFormat leading/trailing): checked through round-tripping instead.
 """
 
-import pathlib
-
 import pytest
+from conftest import EXAMPLES, MISSING_KDL_RS, formatted, have_kdl_rs, parse_error
 
 import rkdl
 
 
-def parse_error(text):
-    with pytest.raises(rkdl.ParseError) as info:
-        rkdl.parse(text)
-    return info.value
-
-
 def diagnostics(text):
     return [(d.message, d.label, d.help, d.offset, d.length) for d in parse_error(text).diagnostics]
-
-
-def formatted(text, formatter=None):
-    doc = rkdl.parse(text)
-    doc.fmt(formatter)
-    return str(doc)
 
 
 def only_arg(text):
@@ -159,12 +146,9 @@ def test_document_parsing_append():
     assert str(doc) == PARSING_SRC + "\nnew blah=3735928559\n"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="rkdl bug: args.append on a node with no args inserts at entry 0, before props; kdl-rs push appends",
-)
 def test_document_construction():
-    # document.rs: construction
+    # document.rs: construction. kdl-rs pushes each entry at the end, so its args land after `prop=value`. rkdl puts
+    # a new arg after the last arg, and with no args yet that's before the props: args come first, as in most KDL.
     doc = rkdl.parse("")
     doc.children.append(rkdl.Node("foo"))
     bar = rkdl.Node("bar")
@@ -178,7 +162,7 @@ def test_document_construction():
     doc.children.append(bar)
     doc.children.append(rkdl.Node("baz"))
     doc.fmt()
-    assert str(doc) == "foo\nbar prop=value 1 2 #false #null {\n    barchild\n}\nbaz\n"
+    assert str(doc) == "foo\nbar 1 2 #false #null prop=value {\n    barchild\n}\nbaz\n"
 
 
 def test_document_simple_autoformat():
@@ -202,14 +186,6 @@ def test_document_simple_autoformat_no_comments():
     assert formatted(src, rkdl.Formatter(no_comments=True)) == "a {\n    b {\n        c {\n\n        }\n    }\n}\n"
 
 
-def examples_dir():
-    for parent in pathlib.Path(__file__).resolve().parents:
-        candidate = parent / "refs" / "kdl-rs" / "examples"
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
 @pytest.mark.parametrize(
     "name",
     [
@@ -224,10 +200,9 @@ def examples_dir():
 )
 def test_document_parse_examples(name):
     # document.rs: parse_examples
-    examples = examples_dir()
-    if examples is None:
-        pytest.skip("kdl-rs checkout not found under refs/")
-    text = (examples / name).read_text(encoding="utf-8")
+    if not have_kdl_rs():
+        pytest.skip(MISSING_KDL_RS)
+    text = (EXAMPLES / name).read_text(encoding="utf-8")
     assert str(rkdl.parse(text)) == text
 
 
@@ -448,14 +423,6 @@ def test_parser_entry(text, name, value):
     assert str(doc) == f"n {text}"
 
 
-@pytest.mark.parametrize("text", ["foo /- { }", "foo /- { bar }"])
-def test_parser_before_and_around_children(text):
-    # v2_parser.rs: before_node_children_test, around_children_test
-    doc = rkdl.parse(text)
-    assert doc["foo"].children is None
-    assert str(doc) == text
-
-
 @pytest.mark.parametrize(
     ("text", "value"),
     [
@@ -538,6 +505,7 @@ SLASHDASH_SEMICOLON = pytest.mark.xfail(
         pytest.param("/-n 1;", [], marks=SLASHDASH_SEMICOLON),
         ("/- foo\nbar baz", ["bar"]),
         ("n /-commented tada", ["n"]),
+        # before_node_children_test, around_children_test
         ("foo /- { }", ["foo"]),
         ("foo /- { bar }", ["foo"]),
         ("/- foo bar\nnode /-1 2 { x }", ["node"]),

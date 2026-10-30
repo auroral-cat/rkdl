@@ -1,12 +1,7 @@
 import pytest
+from conftest import parse_error
 
 import rkdl
-
-
-def parse_error(text):
-    with pytest.raises(rkdl.ParseError) as info:
-        rkdl.parse(text)
-    return info.value
 
 
 def test_parse_error_is_value_error():
@@ -45,3 +40,19 @@ def test_report_has_snippet_and_no_ansi():
     assert "\x1b]" not in report
     assert "child }}" in report
     assert err.diagnostics[0].message in report
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="kdl-rs: an integer outside i128 fails as 'Expected end of document' and 'Found invalid node name'",
+)
+@pytest.mark.parametrize("number", ["170141183460469231731687303715884105728", "-170141183460469231731687303715884105729"])
+def test_integer_outside_i128_is_reported_as_one(number):
+    report = str(parse_error(f"n {number}"))
+    assert "end of document" not in report
+    assert "node name" not in report
+
+
+@pytest.mark.xfail(strict=True, reason="kdl-rs accepts U+007F inside a quoted string")
+def test_delete_inside_a_quoted_string_is_rejected():
+    parse_error('n "a\x7fb"')

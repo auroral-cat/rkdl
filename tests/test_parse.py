@@ -1,7 +1,5 @@
 import io
 
-import pytest
-
 import rkdl
 
 SOURCE = """\
@@ -24,12 +22,6 @@ def test_round_trip_is_byte_for_byte():
 
 def test_parser_parses_like_parse():
     assert str(rkdl.Parser().parse(SOURCE)) == SOURCE
-
-
-def test_parse_error_is_value_error():
-    with pytest.raises(rkdl.ParseError) as info:
-        rkdl.parse("a {")
-    assert isinstance(info.value, ValueError)
 
 
 def test_load_dump_round_trip():
