@@ -151,3 +151,13 @@ def test_indent_level_is_bounded():
     # Far past that, kdl-rs's autoformat would loop until allocation fails and abort the process.
     with pytest.raises(ValueError, match="indent_level must be at most 1000"):
         rkdl.Formatter(indent_level=2**40)
+
+
+@pytest.mark.parametrize("eol", ["\r\n", "\r", "\u2028"])
+def test_fmt_keeps_the_line_ending_style(eol):
+    text = "a 1 { b; c }\n// d\ne\n".replace("\n", eol)
+    doc = rkdl.parse(text)
+    doc.fmt()
+    assert str(doc) == "a 1 {\n    b\n    c\n}\n// d\ne\n".replace("\n", eol)
+    parsed = rkdl.Parser(formatter=rkdl.Formatter()).parse(text)
+    assert str(parsed) == str(doc)

@@ -14,14 +14,25 @@
 //! Costs are in steps of about 4 KB of stack, measured on a debug build (a release build uses a fifth of that): a
 //! block level takes 32 KB, a block comment piece 3.4 KB, a nested `/*` 8.9 KB, and a skipped character up to 3.2 KB.
 //! All three limits together come to about 140 MB of the parser thread's 256 MB.
+//!
+//! kdl-rs also reads what's inside a slashdashed block (`/-{`, or the block of a `/-` node) twice: once trying it as
+//! one thing, again after backtracking. Nested ones double again per level, so the time grows as the text inside
+//! times 2 to the number of slashdashed levels around it. The scan adds that up and refuses text that would take
+//! kdl-rs more than twice as long as reading it once, plus a fixed allowance.
+//!
+//! The scan also records where each block closes, which `blocks.rs` uses to find the text kdl-rs drops after a `}`.
 
 /// Block levels, at 8 steps each.
-const MAX_DEPTH: usize = 1000;
+pub(crate) const MAX_DEPTH: usize = 1000;
 const LEVEL_STEPS: usize = 8;
 /// Steps within one block comment, nested ones included: a piece is 1, a nested `/*` is 3.
 const MAX_COMMENT_STEPS: usize = 10_000;
 /// Steps from the first break to the end: a `{` is a level, anything else 2.
 const MAX_UNCHECKED_STEPS: usize = 18_000;
+/// Extra bytes kdl-rs may read because of nested slashdashed blocks, beyond the length of the document: a byte inside
+/// `k` of them costs `2^k - 1`. Empty blocks reach it at 13 levels; the slowest text at the limit takes about 0.2 s on
+/// a release build.
+const MAX_DASHED_WORK: u64 = 64 << 10;
 
 /// Why the scan refused the text. Offsets are in bytes.
 #[derive(Debug)]
@@ -33,12 +44,14 @@ pub(crate) struct Refusal {
     pub(crate) help: String,
 }
 
-/// A refusal, or none. Tests also look at where the scan stopped trusting the text, and the most steps kdl-rs could
+/// A refusal, or none, and where the scan stopped trusting the text. Tests also look at the most steps kdl-rs could
 /// need, to compare with real stack use.
 #[derive(Debug)]
 pub(crate) struct Scan {
     pub(crate) refusal: Option<Refusal>,
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
+    /// Where each block's `}` is, by depth: `closes[0]` for the blocks of top-level nodes, in text order. Complete only
+    /// if the scan didn't break.
+    pub(crate) closes: Vec<Vec<usize>>,
     pub(crate) broke_at: Option<usize>,
     #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     pub(crate) peak_steps: usize,
@@ -53,6 +66,7 @@ pub(crate) fn scan(text: &str) -> Scan {
     };
     Scan {
         refusal,
+        closes: lexer.closes,
         broke_at,
         peak_steps: lexer.peak,
     }
@@ -65,7 +79,7 @@ pub(crate) const KDL_SPACES: &[char] = &[
 ];
 
 /// KDL's line endings, apart from `\r\n`, which reads as one.
-const NEWLINES: &[char] = &['\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}'];
+pub(crate) const NEWLINES: &[char] = &['\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}'];
 
 fn is_space(c: char) -> bool {
     KDL_SPACES.contains(&c)
@@ -137,8 +151,12 @@ impl Stop {
 struct Lexer<'a> {
     text: &'a str,
     pos: usize,
-    /// Whether each open block is slashdashed (`/-{`).
-    blocks: Vec<bool>,
+    blocks: Vec<Block>,
+    closes: Vec<Vec<usize>>,
+    /// Where the `/-` of each open slashdashed block is, outermost first.
+    dashed_blocks: Vec<usize>,
+    /// The extra bytes kdl-rs reads because of nested slashdashed blocks so far.
+    dashed_work: u64,
     peak: usize,
     in_type: bool,
     type_start: usize,
@@ -160,6 +178,28 @@ struct Lexer<'a> {
     after_dashed_block: bool,
     /// The last token was `/-`.
     dashed: bool,
+    /// Where the last `/-` was.
+    dash_at: usize,
+    /// Where the `/-` of the current node is, if it's slashdashed.
+    node_dashed: Option<usize>,
+}
+
+struct Block {
+    /// `/-{`
+    dashed: bool,
+    /// The block is slashdashed, by `/-{` or as the block of a `/-` node.
+    commented: bool,
+    /// `node_dashed` of the node the block belongs to, for after the block.
+    node_dashed: Option<usize>,
+}
+
+/// What kdl-rs reads beyond one pass for a byte inside `levels` slashdashed blocks.
+fn dashed_cost(levels: usize) -> u64 {
+    u32::try_from(levels)
+        .ok()
+        .and_then(|k| 1u64.checked_shl(k))
+        .filter(|&n| n != 1 << 63)
+        .map_or(u64::MAX, |n| n - 1)
 }
 
 impl<'a> Lexer<'a> {
@@ -168,6 +208,9 @@ impl<'a> Lexer<'a> {
             text,
             pos: 0,
             blocks: Vec::new(),
+            closes: Vec::new(),
+            dashed_blocks: Vec::new(),
+            dashed_work: 0,
             peak: 0,
             in_type: false,
             type_start: 0,
@@ -180,6 +223,8 @@ impl<'a> Lexer<'a> {
             after_block: false,
             after_dashed_block: false,
             dashed: false,
+            dash_at: 0,
+            node_dashed: None,
         }
     }
 
@@ -221,6 +266,7 @@ impl<'a> Lexer<'a> {
     fn run(&mut self) -> Result<(), Stop> {
         self.eat("\u{feff}");
         while let Some(c) = self.peek() {
+            let start = self.pos;
             // kdl-rs can go back to the start of a type annotation that turns out bad, and read it as something else.
             self.step(c).map_err(|stop| {
                 if self.in_type {
@@ -229,8 +275,25 @@ impl<'a> Lexer<'a> {
                     stop
                 }
             })?;
+            let read = (self.pos - start) as u64;
+            let cost = read.saturating_mul(dashed_cost(self.dashed_blocks.len()));
+            self.dashed_work = self.dashed_work.saturating_add(cost);
+            if self.dashed_work > self.dashed_allowance() {
+                let at = self.dashed_blocks.last().copied().unwrap_or(start);
+                return Err(Stop::Refuse(Refusal {
+                    offset: at,
+                    len: 2,
+                    message: "Slashdashed blocks nest too deeply".into(),
+                    label: format!("{} slashdashed blocks deep", self.dashed_blocks.len()),
+                    help: DASHED_HELP.into(),
+                }));
+            }
         }
         Ok(())
+    }
+
+    fn dashed_allowance(&self) -> u64 {
+        (self.text.len() as u64).saturating_add(MAX_DASHED_WORK)
     }
 
     /// Reads one piece of the text, starting with `c`.
@@ -266,6 +329,7 @@ impl<'a> Lexer<'a> {
             if self.dashed {
                 return self.broken("Expected something for `/-` to comment out");
             }
+            self.dash_at = self.pos;
             self.pos += 2;
             self.dashed = true;
             self.key = false;
@@ -284,11 +348,20 @@ impl<'a> Lexer<'a> {
         self.typed = false;
         self.after_block = false;
         self.after_dashed_block = false;
+        self.node_dashed = None;
     }
 
     fn open_block(&mut self, dashed: bool) -> Result<(), Stop> {
         self.bump();
-        self.blocks.push(dashed);
+        let commented = if dashed { Some(self.dash_at) } else { self.node_dashed };
+        if let Some(at) = commented {
+            self.dashed_blocks.push(at);
+        }
+        self.blocks.push(Block {
+            dashed,
+            commented: commented.is_some(),
+            node_dashed: self.node_dashed,
+        });
         self.note(self.blocks.len() * LEVEL_STEPS);
         if self.blocks.len() > MAX_DEPTH {
             return Err(Stop::Refuse(Refusal {
@@ -307,14 +380,25 @@ impl<'a> Lexer<'a> {
     }
 
     fn close_block(&mut self) -> Result<(), Stop> {
-        let Some(dashed) = self.blocks.pop() else {
+        let Some(block) = self.blocks.pop() else {
             return self.broken("Unexpected `}`: no block is open");
         };
+        let depth = self.blocks.len();
+        if self.closes.len() <= depth {
+            self.closes.resize_with(depth + 1, Vec::new);
+        }
+        if let Some(closes) = self.closes.get_mut(depth) {
+            closes.push(self.pos);
+        }
+        if block.commented {
+            self.dashed_blocks.pop();
+        }
         self.bump();
         self.end_node();
         self.node_start = false;
         self.after_block = true;
-        self.after_dashed_block = dashed;
+        self.after_dashed_block = block.dashed;
+        self.node_dashed = block.node_dashed;
         Ok(())
     }
 
@@ -333,6 +417,9 @@ impl<'a> Lexer<'a> {
         }
         if dashed && "});=".contains(c) {
             return self.broken("Expected something for `/-` to comment out");
+        }
+        if dashed && self.node_start && !self.in_type {
+            self.node_dashed = Some(self.dash_at);
         }
         match c {
             '{' | '}' | ';' | '=' if self.in_type => self.broken("Expected `)` to close the type annotation"),
@@ -658,12 +745,30 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    /// From a break on, every character counts. None if the rest of the text fits the allowance.
+    /// From a break on, every character counts, and every `/-` might open one more slashdashed block. None if the rest
+    /// of the text fits the allowances.
     fn unchecked(&mut self, at: usize, from: usize, what: &'static str) -> Option<Refusal> {
         let rest = self.text.get(from..).unwrap_or_default();
         let steps: usize = rest.chars().map(|c| if c == '{' { LEVEL_STEPS } else { 2 }).sum();
         self.note(self.blocks.len() * LEVEL_STEPS + steps);
-        (steps > MAX_UNCHECKED_STEPS).then(|| Refusal {
+        let mut levels = self.dashed_blocks.len();
+        let mut work = self.dashed_work;
+        for (i, c) in rest.char_indices() {
+            if rest.get(i..).is_some_and(|r| r.starts_with("/-")) {
+                levels += 1;
+            }
+            work = work.saturating_add((c.len_utf8() as u64).saturating_mul(dashed_cost(levels)));
+        }
+        let help = if steps > MAX_UNCHECKED_STEPS {
+            "rkdl stopped at the first error: after an error, kdl-rs's parser can't be trusted not to run out of stack \
+             on a document this long"
+        } else if work > self.dashed_allowance() {
+            "rkdl stopped at the first error: after an error, kdl-rs's parser can't be trusted not to take too long \
+             over the slashdashes (`/-`) that follow"
+        } else {
+            return None;
+        };
+        Some(Refusal {
             offset: at,
             len: self
                 .text
@@ -672,12 +777,14 @@ impl<'a> Lexer<'a> {
                 .map_or(0, char::len_utf8),
             message: what.into(),
             label: "here".into(),
-            help: "rkdl stopped at the first error: after an error, kdl-rs's parser can't be trusted not to run out \
-                   of stack on a document this long"
-                .into(),
+            help: help.into(),
         })
     }
 }
+
+const DASHED_HELP: &str = "kdl-rs's parser reads what's inside a slashdashed block twice, so its time doubles with every \
+                           level of `/-` blocks around the text. rkdl refuses text that would take it too long: nest \
+                           fewer slashdashed blocks, or delete the text they comment out.";
 
 #[cfg(test)]
 mod tests {
@@ -827,6 +934,25 @@ mod tests {
             assert_eq!(scan.broke_at, Some(at), "{:?}", short(&text));
             assert!(scan.refusal.is_some(), "{:?}", short(&text));
         }
+    }
+
+    #[test]
+    fn slashdashed_blocks_cost_by_the_text_inside() {
+        let refused = |text: String| scan(&text).refusal.map(|r| (r.message, r.offset));
+        let dashed = |n: usize, inside: &str| "a /-{".repeat(n) + inside + &"}".repeat(n);
+        assert_eq!(refused(dashed(12, "")), None);
+        let message = "Slashdashed blocks nest too deeply".to_owned();
+        // Pointing at the `/-` of the innermost level open when the allowance ran out.
+        assert_eq!(refused(dashed(14, "")), Some((message, 5 * 12 + 2)));
+        // One level costs at most the text again, however long. Two cost it three times over.
+        assert_eq!(refused(dashed(1, &"b\n".repeat(1_000_000))), None);
+        assert_eq!(refused(dashed(2, &"b\n".repeat(10_000))), None);
+        assert!(refused(dashed(2, &"b\n".repeat(100_000))).is_some());
+        // The block of a slashdashed node counts, ones inside it don't unless they're slashdashed too.
+        assert!(refused("/- a { ".repeat(14) + &"}".repeat(14)).is_some());
+        assert!(refused("/- a { b { ".repeat(14)).is_some());
+        assert_eq!(refused("/- a { }\nb { ".repeat(14)), None);
+        assert_eq!(refused(format!("/- a /-{{}} {{ {} }}", "b { ".repeat(500))), None);
     }
 
     #[test]

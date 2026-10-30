@@ -12,7 +12,8 @@ use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
 use crate::index::{Index, Splice, insert_at, not_in, pick_one, pick_slice, position, search_range};
 use crate::layout::{self, Style};
 use crate::node::Node;
-use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
+use crate::parser::{self, prescan::MAX_DEPTH};
+use crate::tree::{IdTree, NodeId, Subtree, node_at, node_at_mut};
 
 /// Whose children a view or lookup is over. A node's view follows the node when it moves between documents.
 pub(crate) enum Owner {
@@ -252,8 +253,9 @@ fn shared_home(py: Python<'_>, target: &Py<Document>, nodes: &[(NodeId, &Home)],
 
 /// Puts detached `nodes` into the owner's block in place of the nodes `at` picks, by list rules, all in one step: if
 /// any of them can't go in, nothing changes. A picked node that gets a new one in its place hands it its
-/// whitespace, as `children[i] = node` does; the rest are detached. `open` gives a node without a children block one
-/// first.
+/// whitespace, as `children[i] = node` does; the rest are detached. As with a list, the picked nodes themselves may be
+/// among `nodes`, which moves them: `children[:] = sorted(children, key=...)`. `open` gives a node without a children
+/// block one first.
 pub(crate) fn splice(
     py: Python<'_>,
     owner: &Owner,
@@ -277,21 +279,42 @@ pub(crate) fn splice(
             (None, false) => return Err(no_block().into()),
         };
         let splice = at.splice(len, nodes.len())?;
+        let old = snapshot.clone().unwrap_or_default();
+        let picked: Vec<NodeId> = splice
+            .picked
+            .iter()
+            .map(|&i| old.get(i).copied())
+            .collect::<Option<_>>()
+            .expect("picked from this block");
         // Only a node's home, never an entry's, empties.
         let sources = moving
             .iter()
             .map(|(_, home)| home.doc(py).ok_or_else(stale))
             .collect::<PyResult<Vec<_>>>()?;
+        // Picked nodes that go back in, moved. The snapshot check under the lock makes sure they're still there.
+        let reused: Vec<bool> = moving
+            .iter()
+            .zip(&sources)
+            .map(|((id, _), source)| source.is(target) && picked.contains(id))
+            .collect();
+        let (incoming, sources): (Vec<(NodeId, &Home)>, Vec<DocRef>) = moving
+            .iter()
+            .zip(sources)
+            .zip(&reused)
+            .filter(|&(_, &reused)| !reused)
+            .map(|(pair, _)| pair)
+            .unzip();
         if sources.iter().any(|source| !source.get().home) {
             return Err(attached().into());
         }
-        if let Some(fail) = shared_home(py, target, &moving, &sources) {
+        if let Some(fail) = shared_home(py, target, &incoming, &sources) {
             return Err(fail);
         }
-        let homes = splice
-            .picked
-            .iter()
-            .map(|_| NewHome::new(py, target))
+        let back: Vec<NodeId> = (moving.iter().zip(&reused))
+            .filter_map(|(&(id, _), &reused)| reused.then_some(id))
+            .collect();
+        let homes = (picked.iter())
+            .map(|id| (!back.contains(id)).then(|| NewHome::new(py, target)).transpose())
             .collect::<PyResult<Vec<_>>>()?;
         let here = Arc::new(target.clone_ref(py));
         let docs: Vec<&Document> = std::iter::once(target.get())
@@ -299,13 +322,13 @@ pub(crate) fn splice(
             .collect();
         lock_all(py, &docs, |states| -> Result<Garbage, Fail> {
             let (t, from) = states.split_first_mut().expect("the target is locked first");
-            for ((id, home), (source, s)) in moving.iter().zip(sources.iter().zip(from.iter())) {
+            for ((id, home), (source, s)) in incoming.iter().zip(sources.iter().zip(from.iter())) {
                 check_detached(*id, home, source, s)?;
             }
             if block_ids(&t.ids, parent)?.map(<[NodeId]>::to_vec) != snapshot {
                 return Err(Fail::Changed);
             }
-            let old = snapshot.clone().unwrap_or_default();
+            check_depth(t, parent, snapshot.is_none(), from)?;
             if let (None, Some(p)) = (&snapshot, parent) {
                 let path = t.ids.path(p).expect("checked by block_ids");
                 layout::open_block(&mut t.kdl, &path, t.eol);
@@ -313,21 +336,38 @@ pub(crate) fn splice(
             }
             let style = style(t, parent);
             let mut garbage = Garbage::default();
-            let mut new = moving.iter().zip(from.iter_mut()).map(|(&(id, _), s)| {
-                let node = s.kdl.nodes_mut().remove(0);
-                (node, s.ids.take_subtree(id))
+            if back.len() == moving.len() && back.len() == picked.len() && reorder(t, parent, &splice.picked, &back) {
+                return Ok(garbage);
+            }
+            let mut old = old.clone();
+            let pulled: Vec<Option<(KdlNode, Subtree)>> = (moving.iter())
+                .map(|&(id, _)| back.contains(&id).then(|| pull_back(t, parent, id, &mut old, &style)))
+                .collect();
+            let mut from = from.iter_mut();
+            let mut new = moving.iter().zip(pulled).map(|(&(id, _), pulled)| {
+                pulled.unwrap_or_else(|| {
+                    let s = from.next().expect("a source for every node that isn't picked");
+                    let node = s.kdl.nodes_mut().remove(0);
+                    (node, s.ids.take_subtree(id))
+                })
             });
             // Replacements come first and leave every position where it was; only then are any left over detached.
             for (&index, to) in splice.picked.iter().zip(&homes) {
                 let replaced = *old.get(index).expect("picked from this block");
                 let Some((node, subtree)) = new.next() else {
-                    detach(t, parent, replaced, &style, to, &mut garbage)?;
+                    match to {
+                        Some(to) => detach(t, parent, replaced, &style, to, &mut garbage)?,
+                        None => drop_stand_in(t, parent, replaced, &style),
+                    }
                     continue;
                 };
                 // The new node takes the old one's place in one step, so the block never empties on the way.
                 let keys = subtree.keys();
                 let replaced_node = layout::replace(block_mut(&mut t.kdl, &t.ids, parent), index, node, &style);
-                rehome(t, replaced, replaced_node, to, &mut garbage);
+                match to {
+                    Some(to) => rehome(t, replaced, replaced_node, to, &mut garbage),
+                    None => drop(t.ids.take_subtree(replaced)),
+                }
                 t.ids.put_subtree(parent, index, subtree);
                 handles::repoint(keys, &here, &mut garbage);
             }
@@ -343,6 +383,92 @@ pub(crate) fn splice(
     })?;
     handles::edited();
     garbage.release(py);
+    Ok(())
+}
+
+/// Puts the picked nodes `ids` in the places `places`, a new order for them and nothing else, if `layout::permute`
+/// can keep every place's whitespace.
+fn reorder(t: &mut DocState, parent: Option<NodeId>, places: &[usize], ids: &[NodeId]) -> bool {
+    let block = block_ids(&t.ids, parent).ok().flatten().unwrap_or_default();
+    let Some(from) = (ids.iter())
+        .map(|id| block.iter().position(|n| n == id))
+        .collect::<Option<Vec<usize>>>()
+    else {
+        return false;
+    };
+    if !layout::permute(block_mut(&mut t.kdl, &t.ids, parent), places, &from) {
+        return false;
+    }
+    let mut subtrees: Vec<(usize, Subtree)> = (places.iter().zip(ids))
+        .map(|(&to, &id)| (to, t.ids.take_subtree(id)))
+        .collect();
+    subtrees.sort_by_key(|&(to, _)| to);
+    for (to, subtree) in subtrees {
+        t.ids.put_subtree(parent, to, subtree);
+    }
+    true
+}
+
+/// Takes the picked node `id` out of its place to go back in elsewhere, leaving a stand-in. The stand-in keeps the
+/// place's whitespace and is replaced or detached like any other picked node, then dropped. `old` holds the block's ids
+/// as the splice picked them, and gets the stand-in's.
+fn pull_back(
+    t: &mut DocState,
+    parent: Option<NodeId>,
+    id: NodeId,
+    old: &mut [NodeId],
+    style: &Style,
+) -> (KdlNode, Subtree) {
+    let mut doc = KdlDocument::new();
+    doc.nodes_mut().push(KdlNode::new("-"));
+    let mut stand_in_ids = IdTree::from_document(&doc);
+    let stand_in_id = *stand_in_ids.top().first().expect("one node in, one id out");
+    let stand_in = stand_in_ids.take_subtree(stand_in_id);
+    let place = old.iter_mut().find(|n| **n == id).expect("picked from this block");
+    *place = stand_in_id;
+    let index = (block_ids(&t.ids, parent).ok().flatten())
+        .and_then(|ids| ids.iter().position(|&n| n == id))
+        .expect("picked from this block");
+    let node = layout::replace(
+        block_mut(&mut t.kdl, &t.ids, parent),
+        index,
+        doc.nodes_mut().remove(0),
+        style,
+    );
+    let subtree = t.ids.take_subtree(id);
+    t.ids.put_subtree(parent, index, stand_in);
+    (node, subtree)
+}
+
+/// Takes a stand-in out of the block, as a detached node would leave.
+fn drop_stand_in(s: &mut DocState, parent: Option<NodeId>, id: NodeId, style: &Style) {
+    let index = (block_ids(&s.ids, parent).ok().flatten())
+        .and_then(|ids| ids.iter().position(|&n| n == id))
+        .expect("the stand-in is in this block");
+    layout::unplace(block_mut(&mut s.kdl, &s.ids, parent), index, style);
+    drop(s.ids.take_subtree(id));
+}
+
+fn too_deep() -> PyErr {
+    PyValueError::new_err(format!(
+        "the document would nest more than {MAX_DEPTH} levels of blocks deep, more than rkdl can parse back"
+    ))
+}
+
+/// Refuses to make the document nest deeper than `parse` reads: putting the nodes from `incoming` (each a detached
+/// node's home) into the parent's block, and giving the parent one if `opens`.
+fn check_depth(t: &DocState, parent: Option<NodeId>, opens: bool, incoming: &[&mut DocState]) -> Result<(), Fail> {
+    // The block's level: a top-level node's block is the first.
+    let level = parent.map_or(0, |p| t.ids.path(p).map_or(0, |path| path.len()));
+    if opens && level > MAX_DEPTH {
+        return Err(too_deep().into());
+    }
+    let room = MAX_DEPTH.saturating_sub(level);
+    for s in incoming {
+        if level > MAX_DEPTH || parser::levels(s.kdl.nodes(), room) > room {
+            return Err(too_deep().into());
+        }
+    }
     Ok(())
 }
 

@@ -1,5 +1,7 @@
 """The official KDL test suite (vendored in kdl-rs), run through rkdl's Python API."""
 
+import re
+
 import pytest
 import rkdl
 from conftest import (
@@ -21,7 +23,6 @@ ROUND_TRIP_FAILS = {
     "comment_in_node_type.kdl": TYPE_SPACE,
     "space_after_node_type.kdl": TYPE_SPACE,
     "space_in_node_type.kdl": TYPE_SPACE,
-    "space_after_node.kdl": "kdl-rs drops everything after a closing } up to the newline, newline included",
 }
 
 INVALID_ACCEPTED = {
@@ -55,7 +56,9 @@ def canonical(doc):
         # removed (del removes the last one, we need to keep it), so the caller skips those cases.
         if node.children is not None and len(node.children) == 0:
             node.children = None
-    return str(doc)
+    # The expected files use `\n`, and fmt() keeps the line ending style of the document, which all its line endings
+    # outside values now have.
+    return re.sub(r"\r\n|[\r\x0b\x0c\x85\u2028\u2029]", "\n", str(doc))
 
 
 @pytest.mark.parametrize("path", cases(VALID, ROUND_TRIP_FAILS))

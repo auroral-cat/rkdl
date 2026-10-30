@@ -366,3 +366,76 @@ def test_reversing_twice_gives_back_the_text(name, crlf, where):
     assert [n.name for n in view] == names[::-1]
     view.reverse()
     assert str(doc) == before
+
+
+# Reordering by assignment: nodes from the replaced range may go back in, moved, as with a list. Each place keeps its
+# whitespace, as with reverse().
+
+
+def test_sorting_a_one_line_block_keeps_it_on_one_line():
+    d = rkdl.parse("a { z; b; m }\n")
+    a = d["a"]
+    z = a["z"]
+    a.children = sorted(a.children, key=lambda n: n.name)
+    assert str(d) == "a { b; m; z }\n"
+    # The nodes moved: the handles still point at them.
+    assert a.children[2] is z
+    assert z.parent == a
+
+
+def test_sorting_keeps_each_place_s_whitespace_and_each_node_s_comments():
+    d = rkdl.parse("z 1\n// about b\nb 2 // end b\n\n    m 3\n")
+    d.children = sorted(d.children, key=lambda n: n.name)
+    assert str(d) == "// about b\nb 2 // end b\nm 3\n\n    z 1\n"
+    reads_back(str(d))
+
+
+def test_sorting_nested_blocks():
+    d = rkdl.parse("pkg {\n    z {\n        x\n    }\n    b {}\n}\n")
+    pkg = d["pkg"]
+    pkg.children = sorted(pkg.children, key=lambda n: n.name)
+    assert str(d) == "pkg {\n    b {}\n    z {\n        x\n    }\n}\n"
+
+
+@pytest.mark.parametrize(
+    "assign",
+    [
+        lambda c: c.__setitem__(slice(None), list(c)),
+        lambda c: c.__setitem__(0, c[0]),
+        lambda c: c.__setitem__(slice(1, None), list(c)[1:]),
+        lambda c: c.__setitem__(slice(None, None, -1), list(c)[::-1]),
+    ],
+)
+def test_assigning_nodes_back_to_their_own_places_changes_nothing(assign):
+    text = "a 1 // one\n/* two */ b {\n    c\n}\nd; e\n"
+    d = rkdl.parse(text)
+    assign(d.children)
+    assert str(d) == text
+
+
+def test_assignment_can_mix_moved_new_and_dropped_nodes():
+    d = rkdl.parse("a\nb\nc\n")
+    a, b, c = d.children
+    d.children[0:2] = [rkdl.Node("new"), b]
+    assert str(d) == "new\nb\nc\n"
+    assert a.parent is None and str(a) == "a"
+    d.children[::2] = [c, d["new"]]
+    assert str(d) == "c\nb\nnew\n"
+    d.children = [b]
+    assert str(d) == "b\n"
+    assert c.parent is None
+
+
+def test_nodes_from_outside_the_replaced_range_still_raise():
+    d = rkdl.parse("p {\n    q\n}\nr\ns\n")
+    other = rkdl.parse("x\n")
+    with pytest.raises(ValueError, match="already in a document"):
+        d.children[0] = d.children[1]
+    with pytest.raises(ValueError, match="already in a document"):
+        d["p"].children = [d["p"]["q"], d["r"]]
+    with pytest.raises(ValueError, match="already in a document"):
+        d.children[1:] = [d["s"], other["x"]]
+    with pytest.raises(ValueError, match="already in a document"):
+        d["p"].children[:] = [d["p"]]
+    # All or nothing.
+    assert str(d) == "p {\n    q\n}\nr\ns\n"
