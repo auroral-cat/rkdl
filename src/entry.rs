@@ -10,7 +10,7 @@ use pyo3::types::{PyList, PySlice, PyTuple};
 use crate::document::{DocState, Document};
 use crate::edit::{Item, chosen, read};
 use crate::handles::{self, Fail, Home, removed};
-use crate::index::{Index, not_in, pick_one, pick_slice};
+use crate::index::{Index, not_in, pick_one, pick_slice, search_range};
 use crate::node::Node;
 use crate::spelling;
 use crate::tree::{EntryId, node_at_mut};
@@ -124,7 +124,11 @@ fn siblings_mut(s: &mut DocState, id: EntryId) -> Result<(&mut Vec<KdlEntry>, us
 
 // The handle.
 
-/// One argument or property. The handle stays valid while its node moves, and dies when the entry is removed.
+/// One argument or property of a node, as a live handle.
+///
+/// `name, value = entry` unpacks it, and `str(entry)` is its KDL text. Get one from `node.entries`,
+/// `node.args.entry(i)` or `node.props.entry(key)`. The handle keeps working while its node moves, and stops
+/// working once the entry is removed.
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Entry {
     // Ids are global, so moving the node to another document only repoints `home`.
@@ -167,14 +171,16 @@ impl Entry {
 
 #[pymethods]
 impl Entry {
-    /// None for an argument.
+    /// The property's key, or None for an argument.
+    ///
+    /// A property can be renamed, but an argument can't be given a name, nor a property lose its own.
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.with_entry(py, |e| e.name().map(|n| n.value().to_owned()))
     }
 
-    /// Renames a property, keeping its place and its value's text. An argument can't gain a name, nor a property
-    /// lose one, and a property can't take the key of another one: that would hide one of them from `node.props`.
+    // Renames a property, keeping its place and its value's text. An argument can't gain a name, nor a property
+    // lose one, and a property can't take the key of another one: that would hide one of them from `node.props`.
     #[setter]
     fn set_name(&self, py: Python<'_>, name: Option<String>) -> PyResult<()> {
         let name = name.ok_or_else(|| {
@@ -207,6 +213,14 @@ impl Entry {
         Ok(())
     }
 
+    /// The value, converted by its type annotation.
+    ///
+    /// Writing a value keeps the annotation if the value fits it, and otherwise picks one from the value's class.
+    ///
+    /// Raises:
+    ///     ValueError: The annotation is a reserved type the value can't be read as, or the new value is out of
+    ///         range for it.
+    ///     TypeError: The new value can't be converted to KDL.
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let (item, doc) = self.item(py)?;
@@ -235,12 +249,15 @@ impl Entry {
         Ok(())
     }
 
+    /// The type annotation, or None. Setting None removes it.
+    ///
+    /// Setting it doesn't convert the value, so a type the value can't be read as raises `ValueError`.
     #[getter]
     fn r#type(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.with_entry(py, |e| e.ty().map(|t| t.value().to_owned()))
     }
 
-    /// Setting it doesn't convert the value, so it refuses a type the value doesn't read as.
+    // Setting it doesn't convert the value, so it refuses a type the value doesn't read as.
     #[setter]
     fn set_type(&self, py: Python<'_>, ty: Option<&str>) -> PyResult<()> {
         handles::on_home(py, &self.home, |doc| {
@@ -264,7 +281,7 @@ impl Entry {
         Ok(())
     }
 
-    /// `name, value = entry`.
+    // `name, value = entry`.
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let (item, doc) = self.item(py)?;
         let value = item.to_python(py, doc.get().types.get())?;
@@ -307,7 +324,9 @@ impl Entry {
 
 // node.entries
 
-/// A live, read-only list of a node's entries in file order.
+/// A node's arguments and properties as `Entry` objects, in the order of the text.
+///
+/// A live, read-only list.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Entries {
     node: Py<Node>,
@@ -363,20 +382,31 @@ impl Entries {
         Ok(items.iter().any(|i| i.id == entry.get().id))
     }
 
-    fn index(&self, entry: &Bound<'_, Entry>) -> PyResult<usize> {
+    /// Returns the position of an entry.
+    ///
+    /// Raises:
+    ///     ValueError: The entry isn't one of these.
+    #[pyo3(
+        signature = (entry, start=Index(0), stop=Index(isize::MAX)),
+        text_signature = "($self, entry, start=0, stop=sys.maxsize)"
+    )]
+    fn index(&self, entry: &Bound<'_, PyAny>, start: Index, stop: Index) -> PyResult<usize> {
         let items = read(entry.py(), self.node.get())?.items;
-        items
-            .iter()
-            .position(|i| i.id == entry.get().id)
-            .ok_or_else(|| not_in(entry.as_any(), "entries"))
+        let range = search_range(items.len(), start, stop);
+        let found = entry.cast::<Entry>().ok().and_then(|entry| {
+            let id = entry.get().id;
+            items.get(range.clone())?.iter().position(|i| i.id == id)
+        });
+        found.map(|i| range.start + i).ok_or_else(|| not_in(entry, "entries"))
     }
 
+    /// Returns 1 if the entry is one of these, else 0.
     fn count(&self, entry: &Bound<'_, PyAny>) -> PyResult<usize> {
         Ok(usize::from(self.__contains__(entry)?))
     }
 
-    /// Equal to an `Entries` or a list holding the same entries in the same order. Like a list, it isn't equal to
-    /// a tuple.
+    // Equal to an `Entries` or a list holding the same entries in the same order. Like a list, it isn't equal to
+    // a tuple.
     fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = other.py();
         let theirs: Vec<Option<EntryId>> = if let Ok(other) = other.cast::<Entries>() {

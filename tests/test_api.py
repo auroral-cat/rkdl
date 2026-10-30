@@ -788,6 +788,12 @@ def test_props_update_is_all_or_nothing():
     assert str(doc) == "n a=1 b=2 c=3\n"
 
 
+def test_props_update_takes_a_property_named_other():
+    doc, n = node("n a=1\n")
+    n.props.update(other=2)
+    assert str(doc) == "n a=1 other=2\n"
+
+
 def test_props_setdefault():
     doc, n = node("n a=1\n")
     assert n.props.setdefault("a", 5) == 1

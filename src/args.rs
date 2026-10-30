@@ -146,7 +146,9 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
     )
 }
 
-/// A live list of a node's arguments, as plain Python values.
+/// A node's arguments, as a live list of values.
+///
+/// It works like a list, and every edit changes the node. Arguments keep their place among the properties.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Args {
     node: Py<Node>,
@@ -208,22 +210,26 @@ impl Args {
         remove_args(py, self.node.get(), |ids| Ok(vec![*pick_one(ids, index, "args")?]))
     }
 
-    /// Puts the new argument where the current `index`-th one is, so properties between arguments stay put.
+    // Puts the new argument where the current `index`-th one is, so properties between arguments stay put.
+    /// Inserts an argument before the one at `index`.
     fn insert(&self, index: Index, value: &Bound<'_, PyAny>) -> PyResult<()> {
         insert_values(self.node.get(), index.0, std::slice::from_ref(value))
     }
 
+    /// Adds an argument after the last one.
     fn append(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         self.insert(Index(isize::MAX), value)
     }
 
+    /// Adds arguments after the last one. If any value can't be converted, none are added.
     fn extend(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
         // Collected first, so `args.extend(args)` ends.
         let new: Vec<_> = iterable.try_iter()?.collect::<PyResult<_>>()?;
         insert_values(self.node.get(), isize::MAX, &new)
     }
 
-    #[pyo3(signature = (index=Index(-1)))]
+    /// Removes an argument and returns its value.
+    #[pyo3(signature = (index=Index(-1)), text_signature = "($self, index=-1)")]
     fn pop(&self, py: Python<'_>, index: Index) -> PyResult<Py<PyAny>> {
         edit(
             py,
@@ -240,6 +246,10 @@ impl Args {
         )
     }
 
+    /// Removes the first argument equal to `value`.
+    ///
+    /// Raises:
+    ///     ValueError: No argument is equal to `value`.
     fn remove(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         edit(
             value.py(),
@@ -254,12 +264,14 @@ impl Args {
         )
     }
 
+    /// Removes every argument.
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         remove_args(py, self.node.get(), |ids| Ok(ids.to_vec()))
     }
 
-    /// Reverses the arguments' values in place. Each argument's slot keeps its whitespace and its place among the
-    /// properties; the values move with their annotations and spellings.
+    // Reverses the arguments' values in place. Each argument's slot keeps its whitespace and its place among the
+    // properties; the values move with their annotations and spellings.
+    /// Reverses the arguments in place. Each slot in the text keeps its whitespace; the values move.
     fn reverse(&self, py: Python<'_>) -> PyResult<()> {
         edit(
             py,
@@ -279,13 +291,21 @@ impl Args {
         self.extend(iterable)
     }
 
-    #[pyo3(signature = (value, start=Index(0), stop=Index(isize::MAX)))]
+    /// Returns the position of the first argument equal to `value`.
+    ///
+    /// Raises:
+    ///     ValueError: No argument is equal to `value`.
+    #[pyo3(
+        signature = (value, start=Index(0), stop=Index(isize::MAX)),
+        text_signature = "($self, value, start=0, stop=sys.maxsize)"
+    )]
     fn index(&self, value: &Bound<'_, PyAny>, start: Index, stop: Index) -> PyResult<usize> {
         let snapshot = read(value.py(), self.node.get())?;
         let (position, _) = find(&snapshot, value, start, stop)?.ok_or_else(|| not_in(value, "args"))?;
         Ok(position)
     }
 
+    /// Returns how many arguments are equal to `value`.
     fn count(&self, value: &Bound<'_, PyAny>) -> PyResult<usize> {
         let py = value.py();
         let snapshot = read(py, self.node.get())?;
@@ -312,7 +332,7 @@ impl Args {
         Ok(PyList::new(py, found)?.try_iter()?.into_any())
     }
 
-    /// Equal to an `Args` or a list with equal values in the same order. Like a list, it isn't equal to a tuple.
+    // Equal to an `Args` or a list with equal values in the same order. Like a list, it isn't equal to a tuple.
     fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = other.py();
         let theirs = if let Ok(other) = other.cast::<Args>() {
@@ -326,7 +346,10 @@ impl Args {
         Ok(ours.eq(theirs)?.into_pyobject(py)?.to_owned().into_any())
     }
 
-    /// The handle for the `index`-th argument.
+    /// Returns the `Entry` for an argument.
+    ///
+    /// Raises:
+    ///     IndexError: There's no argument at `index`.
     fn entry<'py>(&self, py: Python<'py>, index: Index) -> PyResult<Bound<'py, Entry>> {
         let mut found = chosen(py, self.node.get(), |items| Ok(vec![arg(items, index.0)?.id]))?;
         Ok(found.pop().expect("chose one entry"))

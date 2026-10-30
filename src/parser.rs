@@ -18,6 +18,12 @@ use crate::layout;
 use crate::node::{self, Node, Spec};
 use crate::values::{Type, TypeRegistry};
 
+/// Parses KDL text into documents, with custom types and formatting.
+///
+/// Args:
+///     types: Custom type annotations, used by every document this parser makes. A later Type replaces an earlier
+///         one with the same name.
+///     formatter: If given, each document is formatted with it right after parsing.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Parser {
     types: Py<TypeRegistry>,
@@ -37,12 +43,23 @@ impl Parser {
         Ok(Parser { types, formatter })
     }
 
+    /// Parses a KDL document.
+    ///
+    /// Args:
+    ///     text: The KDL text.
+    ///
+    /// Returns:
+    ///     The document, which reads and writes values through this parser's types.
+    ///
+    /// Raises:
+    ///     ParseError: The text isn't valid KDL.
     fn parse(&self, py: Python<'_>, text: &str) -> PyResult<Document> {
         self.parse_from(py, text, None)
     }
 
-    /// A new detached node that reads and writes through this parser's types, so its values can be of custom types.
-    /// Takes the same arguments as `Node(...)`.
+    /// Makes a detached node that reads and writes values through this parser's types.
+    ///
+    /// Takes the same arguments as `Node`.
     #[pyo3(signature = (name, *args, r#type=None, props=None, children=None, **kwargs))]
     fn node<'py>(
         &self,
@@ -165,6 +182,18 @@ fn on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> PyResult<T> {
     })
 }
 
+/// Parses a KDL document.
+///
+/// The same as `Parser().parse(text)`.
+///
+/// Args:
+///     text: The KDL text.
+///
+/// Returns:
+///     The document.
+///
+/// Raises:
+///     ParseError: The text isn't valid KDL.
 #[pyfunction]
 pub fn parse(py: Python<'_>, text: &str) -> PyResult<Document> {
     let parser = Parser {

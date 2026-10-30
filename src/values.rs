@@ -9,12 +9,23 @@ use pyo3::{PyTraverseError, PyTypeInfo};
 
 use crate::errors::parse_error;
 
-/// One type annotation that converts values. Exposed to Python as `rkdl.Type(name, cls, decode, encode)`.
+// Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
+// reference cycle.
+/// A custom type annotation: how to read and write the values annotated with it.
 ///
-/// Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
-/// reference cycle.
+/// Pass Types to a `Parser`. A Type with the same name as a reserved one, such as `date`, replaces it.
+///
+/// Args:
+///     name: The annotation, without parentheses: `"celsius"` for `(celsius)22.5`.
+///     cls: The Python class of the values. Writing an instance of it annotates the entry with `name`.
+///     decode: Turns the plain value from the document (a str, int, float, bool or None) into a Python value.
+///     encode: Turns an instance of `cls` into a plain value to write.
+///
+/// Raises:
+///     TypeError: `decode` or `encode` isn't callable.
 #[pyclass(module = "rkdl")]
 pub(crate) struct Type {
+    /// The annotation this Type handles.
     #[pyo3(get)]
     name: String,
     /// None once the cycle collector has cleared this Type.
@@ -52,16 +63,19 @@ impl Type {
         })
     }
 
+    /// The Python class of the values.
     #[getter]
     fn cls(slf: &Bound<'_, Self>) -> PyResult<Py<PyType>> {
         Ok(Type::hook(slf, |h| &h.cls)?.unbind())
     }
 
+    /// Turns a plain value from the document into a Python value.
     #[getter]
     fn decode(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(Type::hook(slf, |h| &h.decode)?.unbind())
     }
 
+    /// Turns a Python value into a plain value to write.
     #[getter]
     fn encode(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(Type::hook(slf, |h| &h.encode)?.unbind())

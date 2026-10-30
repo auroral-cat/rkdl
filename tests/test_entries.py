@@ -62,6 +62,17 @@ def test_entries_in_file_order():
     assert list(reversed(n.entries)) == entries[::-1]
 
 
+def test_entries_index_takes_a_range_like_a_list():
+    _, n = node("n 1 a=2 3\n")
+    last = n.args.entry(1)
+    assert n.entries.index(last, 1) == 2
+    assert n.entries.index(last, -1) == 2
+    with pytest.raises(ValueError):
+        n.entries.index(last, 0, 2)
+    with pytest.raises(ValueError):
+        n.entries.index("not an entry")
+
+
 # Writing
 
 

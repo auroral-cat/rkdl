@@ -18,6 +18,24 @@ use crate::spelling;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
 
+/// One KDL node: a name, an optional type annotation, arguments, properties and children.
+///
+/// A node read from a document is a live handle: edits through it change the document, and reading the same node
+/// twice gives the same object. `Node(...)` makes a detached node, which belongs to no document until you add it to
+/// one. A node can be in only one place at a time: take it out first (`pop`, `remove`, `del`, `detach()`), or add a
+/// `copy()`.
+///
+/// Args:
+///     name: The node's name.
+///     *args: The arguments.
+///     type: The type annotation, if any.
+///     props: Properties, for keys that can't be keyword arguments, such as `type` or `children`.
+///     children: Detached nodes to put in a children block. None means no block, and `[]` an empty one.
+///     **kwargs: More properties.
+///
+/// Raises:
+///     TypeError: A value can't be converted to KDL.
+///     ValueError: A property is given twice, or one of `children` is already in a document.
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Node {
     // Ids are global, so moving the node to another document only repoints `home`.
@@ -164,12 +182,13 @@ impl Node {
         Ok(build(name, args, &spec, types, "\n")?.unbind())
     }
 
+    /// The node's name.
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<String> {
         self.with_node(py, |n| n.name().value().to_owned())
     }
 
-    /// A quoted name stays quoted.
+    // A quoted name stays quoted.
     #[setter]
     fn set_name(&self, py: Python<'_>, name: String) -> PyResult<()> {
         self.with_node(py, |n| {
@@ -179,12 +198,13 @@ impl Node {
         })
     }
 
+    /// The node's type annotation, or None. Setting None removes it.
     #[getter]
     fn r#type(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.with_node(py, |n| n.ty().map(|t| t.value().to_owned()))
     }
 
-    /// A quoted annotation stays quoted.
+    // A quoted annotation stays quoted.
     #[setter]
     fn set_type(&self, py: Python<'_>, ty: Option<String>) -> PyResult<()> {
         self.with_node(py, |n| {
@@ -195,13 +215,16 @@ impl Node {
         })
     }
 
+    /// The arguments, as a live list of values.
+    ///
+    /// Assigning a list replaces them all.
     #[getter]
     fn args(slf: &Bound<'_, Self>) -> Args {
         Args::new(slf.clone().unbind())
     }
 
-    /// Replaces the arguments, as `args[:] = values` does. Assigning the node's own view does nothing, so
-    /// `node.args += values` works.
+    // Replaces the arguments, as `args[:] = values` does. Assigning the node's own view does nothing, so
+    // `node.args += values` works.
     #[setter]
     fn set_args(slf: &Bound<'_, Self>, values: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let values = values.ok_or_else(|| PyTypeError::new_err("can't delete node.args; use node.args.clear()"))?;
@@ -211,13 +234,16 @@ impl Node {
         args::assign(slf.get(), None, values)
     }
 
+    /// The properties, as a live dict of values.
+    ///
+    /// Assigning a mapping replaces them all. Keys the node already had keep their place in the text.
     #[getter]
     fn props(slf: &Bound<'_, Self>) -> Props {
         Props::new(slf.clone().unbind())
     }
 
-    /// Replaces the properties with a mapping's. Keys the node had keep their place and spelling. Assigning the
-    /// node's own view does nothing, so `node.props |= mapping` works.
+    // Replaces the properties with a mapping's. Keys the node had keep their place and spelling. Assigning the
+    // node's own view does nothing, so `node.props |= mapping` works.
     #[setter]
     fn set_props(slf: &Bound<'_, Self>, mapping: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let mapping = mapping.ok_or_else(|| PyTypeError::new_err("can't delete node.props; use node.props.clear()"))?;
@@ -227,20 +253,25 @@ impl Node {
         props::assign(slf.get(), mapping)
     }
 
+    /// The arguments and properties as `Entry` objects, as a live, read-only list in the order of the text.
     #[getter]
     fn entries(slf: &Bound<'_, Self>) -> Entries {
         Entries::new(slf.clone().unbind())
     }
 
+    /// The child nodes as a live list, or None if the node has no children block.
+    ///
+    /// Assigning a list of detached nodes replaces them all, and gives the node a block if it had none: `[]` makes
+    /// an empty `{}` block. Assigning None removes the block.
     #[getter]
     fn children(slf: &Bound<'_, Self>) -> PyResult<Option<Children>> {
         let has_block = slf.get().with_node(slf.py(), |n| n.children().is_some())?;
         Ok(has_block.then(|| Children::new(Owner::Node(slf.clone().unbind()))))
     }
 
-    /// Replaces the children with detached nodes, all or nothing, giving the node a block if it has none: `[]` is
-    /// an empty block. None removes the block. Assigning the node's own view does nothing, so
-    /// `node.children += nodes` works.
+    // Replaces the children with detached nodes, all or nothing, giving the node a block if it has none: `[]` is
+    // an empty block. None removes the block. Assigning the node's own view does nothing, so
+    // `node.children += nodes` works.
     #[setter]
     fn set_children(slf: &Bound<'_, Self>, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
         let py = slf.py();
@@ -255,30 +286,37 @@ impl Node {
         }
     }
 
-    /// The node this one is a child of. None at the top level of a document, and for a detached node.
+    /// The node this one is a child of. None for a top-level node, and for a detached node.
     #[getter]
     fn parent<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, Node>>> {
         children::parent(py, self)
     }
 
-    /// Takes the node out of wherever it is and returns it. A detached node stays as it is.
+    /// Takes the node out of its document and returns it.
+    ///
+    /// Afterwards the node is detached, ready to be added somewhere else. A detached node stays as it is.
     fn detach<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
         children::detach_node(slf.py(), slf.get())?;
         Ok(slf.clone())
     }
 
-    /// The children, or nothing for a node without a block.
+    // The children, or nothing for a node without a block.
     fn __iter__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         children::iter_children(slf.py(), &Owner::Node(slf.clone().unbind()))
     }
 
-    /// Whether a child matches a name or a `(type, name)` key, as `node[key]` would find it.
+    // Whether a child matches a name or a `(type, name)` key, as `node[key]` would find it.
     fn __contains__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         children::contains(&Owner::Node(slf.clone().unbind()), key)
     }
 
-    /// Every node below this one that `key` matches, or every node for None, depth first in file order. Unlike
-    /// `ElementTree`'s `iter`, the node itself isn't included, so a node and a document behave alike.
+    // Unlike `ElementTree`'s `iter`, the node itself isn't included, so a node and a document behave alike.
+    /// Iterates over every node below this one, at any depth, depth first in file order.
+    ///
+    /// The node itself isn't included. Editing while iterating is safe: the nodes are found up front.
+    ///
+    /// Args:
+    ///     key: Only nodes that match: a name, or a `(type, name)` tuple. None means every node.
     #[pyo3(signature = (key=None))]
     fn iter<'py>(slf: &Bound<'py, Self>, key: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
         let none = slf.py().None().into_bound(slf.py());
@@ -289,11 +327,12 @@ impl Node {
         self.copy(py)
     }
 
-    /// A copy shares nothing with the node, so `copy.deepcopy`'s memo has nothing to record.
+    // A copy shares nothing with the node, so `copy.deepcopy`'s memo has nothing to record.
     fn __deepcopy__<'py>(&self, py: Python<'py>, _memo: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {
         self.copy(py)
     }
 
+    /// Returns a detached copy of the node and everything in it.
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Node>> {
         let ((node, eol), types) = handles::on_home(py, &self.home, |doc| {
             let node = doc.get().with_state(py, |s| {
@@ -311,6 +350,11 @@ impl Node {
         children::lookup_one(&Owner::Node(slf.clone().unbind()), key)
     }
 
+    /// Returns the first child that matches a key, or `default`.
+    ///
+    /// Args:
+    ///     key: A name, or a `(type, name)` tuple. A type of None matches nodes without a type.
+    ///     default: What to return if no child matches.
     #[pyo3(signature = (key, default=None))]
     fn get<'py>(
         slf: &Bound<'py, Self>,
@@ -320,6 +364,10 @@ impl Node {
         children::lookup_get(&Owner::Node(slf.clone().unbind()), key, default)
     }
 
+    /// Returns every child that matches a key, in order.
+    ///
+    /// Args:
+    ///     key: A name, or a `(type, name)` tuple. A type of None matches nodes without a type.
     fn get_all<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, Node>>> {
         children::lookup(&Owner::Node(slf.clone().unbind()), key, false)
     }

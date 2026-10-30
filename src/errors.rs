@@ -7,20 +7,44 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-create_exception!(rkdl, ParseError, PyValueError);
+create_exception!(
+    rkdl,
+    ParseError,
+    PyValueError,
+    concat!(
+        "The text isn't valid KDL.\n",
+        "\n",
+        "`str(error)` is a report that points at each problem in the text. The attributes give the first problem's\n",
+        "position, counted in characters.\n",
+        "\n",
+        "Attributes:\n",
+        "    line: The first problem's line, starting at 1.\n",
+        "    column: The first problem's column, starting at 1.\n",
+        "    offset: The first problem's offset from the start of the text, starting at 0.\n",
+        "    diagnostics: Every problem found, in order.",
+    )
+);
 
-/// One problem found while parsing. Offsets count code points, not bytes.
+// It can be built and pickled, so a `ParseError` holding some can cross a process boundary.
+/// One problem found while parsing.
 ///
-/// It can be built and pickled, so a `ParseError` holding some can cross a process boundary.
+/// Positions count characters, not bytes. Diagnostics compare equal when all their fields do, and can be pickled.
 #[pyclass(module = "rkdl", frozen, get_all, eq, hash)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
+    /// What's wrong.
     message: String,
+    /// A short note on the problem's span of text, if there is one.
     label: Option<String>,
+    /// A hint on how to fix it, if there is one.
     help: Option<String>,
+    /// Where the problem starts, in characters from the start of the text.
     offset: usize,
+    /// How many characters the problem spans.
     length: usize,
+    /// The line the problem starts on, starting at 1.
     line: usize,
+    /// The column the problem starts at, starting at 1.
     column: usize,
 }
 
