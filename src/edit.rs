@@ -1,15 +1,17 @@
 //! Reading and editing a node's entries, shared by the `args`, `props` and `entries` views.
 
+use std::sync::Arc;
+
 use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
 use crate::document::{DocState, Document};
 use crate::entry::Entry;
-use crate::handles::{self, Fail, Garbage, stale};
+use crate::handles::{self, Fail, Garbage, removed, stale};
 use crate::node::Node;
 use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
-use crate::values::{self, Encoded, TypeRegistry};
+use crate::values::{self, Encoded, Place, Slot, TypeRegistry};
 
 /// One entry as read under the lock, to work on once it's released.
 #[derive(Clone)]
@@ -21,16 +23,22 @@ pub(crate) struct Item {
     /// The value's text in the file, kept only for annotated values, which are the ones whose text can matter to
     /// reading them (`decimal64`) or to the error saying they can't be read.
     text: Option<String>,
+    /// The node's name and, for an argument, its index in `node.args`: where the entry is, for the error when its
+    /// value can't be read.
+    node: Arc<str>,
+    arg: usize,
 }
 
 impl Item {
-    pub(crate) fn new(id: EntryId, entry: &KdlEntry) -> Self {
+    fn new(id: EntryId, entry: &KdlEntry, node: &Arc<str>, arg: usize) -> Self {
         Item {
             id,
             name: entry.name().cloned(),
             value: entry.value().clone(),
             ty: entry.ty().map(|t| t.value().to_owned()),
             text: entry.ty().and(entry.format()).map(|f| f.value_repr.clone()),
+            node: Arc::clone(node),
+            arg,
         }
     }
 
@@ -39,7 +47,18 @@ impl Item {
     }
 
     pub(crate) fn to_python(&self, py: Python<'_>, types: &TypeRegistry) -> PyResult<Py<PyAny>> {
-        values::to_python_spelled(py, &self.value, self.text.as_deref(), self.ty.as_deref(), types)
+        let place = Place {
+            node: &self.node,
+            slot: self.key().map_or(Slot::Arg(self.arg), Slot::Prop),
+        };
+        values::to_python_spelled(
+            py,
+            &self.value,
+            self.text.as_deref(),
+            self.ty.as_deref(),
+            types,
+            Some(&place),
+        )
     }
 
     /// What writing `value` over this entry stores. A value that's the one the entry already reads as is a no-op,
@@ -109,13 +128,32 @@ impl Item {
 
 fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
     let path = s.ids.path(node).ok_or_else(|| Fail::Missing(stale()))?;
-    let entries = node_at(&s.kdl, &path).entries();
+    let kdl = node_at(&s.kdl, &path);
+    let name: Arc<str> = kdl.name().value().into();
+    let mut args = 0;
     Ok(s.ids
         .entries(node)
         .iter()
-        .zip(entries)
-        .map(|(&id, e)| Item::new(id, e))
+        .zip(kdl.entries())
+        .map(|(&id, e)| {
+            let item = Item::new(id, e, &name, args);
+            if e.name().is_none() {
+                args += 1;
+            }
+            item
+        })
         .collect())
+}
+
+/// One entry, found by its id under its document's lock. If it isn't there and the handle didn't move meanwhile, it
+/// was removed.
+pub(crate) fn item(s: &DocState, id: EntryId) -> Result<Item, Fail> {
+    let (node, index) = s.ids.entry_position(id).ok_or_else(|| Fail::Missing(removed()))?;
+    let path = s.ids.path(node).expect("an entry's node is in the tree");
+    let kdl = node_at(&s.kdl, &path);
+    let entry = kdl.entries().get(index).ok_or_else(|| Fail::Missing(stale()))?;
+    let arg = kdl.entries().iter().take(index).filter(|e| e.name().is_none()).count();
+    Ok(Item::new(id, entry, &kdl.name().value().into(), arg))
 }
 
 /// A node's entries in file order, and the document they were read from.

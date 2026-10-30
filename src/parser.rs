@@ -58,6 +58,28 @@ impl Parser {
         self.parse_from(py, text, None)
     }
 
+    /// Parses a KDL document from a path, a binary file or a text file.
+    ///
+    /// Paths and binary files are read as UTF-8 bytes, so line endings survive exactly. A text file opened without
+    /// `newline=""` turns CRLF into LF as it reads.
+    ///
+    /// Args:
+    ///     source: A path, or a file opened for reading.
+    ///
+    /// Returns:
+    ///     The document, which reads and writes values through this parser's types.
+    ///
+    /// Raises:
+    ///     ParseError: The text isn't valid KDL. Its `path` names the file, when it has a name.
+    ///     UnicodeDecodeError: The bytes aren't UTF-8.
+    fn load(&self, source: &Bound<'_, PyAny>) -> PyResult<Document> {
+        let py = source.py();
+        // Reading files is plainer in Python, which knows paths, file objects and their names.
+        let (text, path): (String, Option<String>) =
+            py.import("rkdl")?.getattr("_read")?.call1((source,))?.extract()?;
+        self.parse_from(py, &text, path.as_deref())
+    }
+
     /// Makes a detached node that reads and writes values through this parser's types.
     ///
     /// Takes the same arguments as `Node`.
@@ -210,14 +232,4 @@ pub fn parse(py: Python<'_>, text: &str) -> PyResult<Document> {
         formatter: None,
     };
     parser.parse(py, text)
-}
-
-/// `parse` for `load`, whose `ParseError` names the file the text came from.
-#[pyfunction]
-pub fn _parse_file(py: Python<'_>, text: &str, path: &str) -> PyResult<Document> {
-    let parser = Parser {
-        types: TypeRegistry::shared_builtin(py)?,
-        formatter: None,
-    };
-    parser.parse_from(py, text, Some(path))
 }

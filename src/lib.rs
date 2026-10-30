@@ -33,7 +33,7 @@ mod _rkdl {
     #[pymodule_export]
     use crate::node::Node;
     #[pymodule_export]
-    use crate::parser::{_parse_file, Parser, parse};
+    use crate::parser::{Parser, parse};
     #[pymodule_export]
     use crate::props::Props;
     #[pymodule_export]

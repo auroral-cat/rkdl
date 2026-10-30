@@ -110,8 +110,10 @@ def test_regex_flags_cant_be_written(flags, named):
     with pytest.raises(ValueError, match=re.escape(named)):
         from_python(pattern, "regex")
     doc = rkdl.parse("n 1\n")
-    with pytest.raises(ValueError, match="put flags inline"):
+    with pytest.raises(ValueError, match="KDL keeps only the pattern") as info:
         doc["n"].args.append(pattern)
+    assert "inline" not in str(info.value)
+    assert info.value.__notes__ == ["Put the flags inline instead, like (?i)"]
     assert str(doc) == "n 1\n"
 
 
@@ -414,13 +416,16 @@ def test_user_encode_must_return_plain():
         from_python(Celsius(1), None, [bad])
 
 
-def test_user_decode_errors_propagate():
+def test_user_decode_errors_are_the_cause():
     def decode(value):
         raise RuntimeError("nope")
 
     broken = rkdl.Type("broken", Celsius, decode=decode, encode=lambda c: c.degrees)
-    with pytest.raises(RuntimeError, match="nope"):
+    with pytest.raises(
+        ValueError, match=r"^1 doesn't fit \(broken\): its decode raised RuntimeError\('nope'\)$"
+    ) as info:
         to_python("(broken)1", [broken])
+    assert isinstance(info.value.__cause__, RuntimeError)
 
 
 def test_type_requires_callables():
@@ -462,10 +467,13 @@ def test_a_value_python_cant_read_says_how_to_read_it(text, shown, cls):
     ty = text[1 : text.index(")")]
     with pytest.raises(ValueError) as info:
         list(doc["n"].args)
-    message = str(info.value)
-    assert message.startswith(f"{shown} can't be read as {ty}: ")
-    assert f'A Type named "{ty}" overrides the built-in one' in message
-    assert f'Parser(types=[Type("{ty}", {cls}, {cls}, {cls})]) reads it as a plain {cls}' in message
+    # The message is for whoever wrote the file, and the advice is a note for the developer.
+    value = shown[shown.index(")") + 1 :]
+    assert str(info.value).startswith(f"n arg 0: {value} doesn't fit ({ty}): ")
+    assert "Type" not in str(info.value)
+    hint = f'A Type named "{ty}" overrides the built-in one: '
+    hint += f'Parser(types=[Type("{ty}", {cls}, {cls}, {cls})]) reads it as a plain {cls}'
+    assert info.value.__notes__ == [hint]
 
 
 def test_the_suggested_type_reads_the_value():
@@ -698,3 +706,159 @@ def test_insert_past_isize_clamps():
     n.children.insert(-(2**70), rkdl.Node("b"))
     assert list(n.args) == [0, 1, 2, 3]
     assert [c.name for c in n.children] == ["b", "c", "d"]
+
+
+# Read errors: always ValueError, naming where the value is, in the words a write uses.
+
+
+def want_a_number(value):
+    if not isinstance(value, (int, float)):
+        raise TypeError("want a number")
+    return Celsius(value)
+
+
+STRICT_CELSIUS = rkdl.Type("celsius", Celsius, decode=want_a_number, encode=lambda c: c.degrees)
+
+ARG_READS = {
+    "args[i]": lambda n: n.args[1],
+    "args[-1]": lambda n: n.args[-1],
+    "args slice": lambda n: n.args[:],
+    "list(args)": lambda n: list(n.args),
+    "reversed(args)": lambda n: list(reversed(n.args)),
+    "args ==": lambda n: n.args == [1, 2],
+    "in args": lambda n: 5 in n.args,
+    "args.index": lambda n: n.args.index(5),
+    "args.count": lambda n: n.args.count(1),
+    "args.pop": lambda n: n.args.pop(),
+    "args.remove": lambda n: n.args.remove(5),
+    "entry.value": lambda n: n.args.entry(1).value,
+    "unpack entry": lambda n: tuple(n.args.entry(1)),
+    "entries": lambda n: [e.value for e in n.entries],
+}
+
+PROP_READS = {
+    "props[k]": lambda n: n.props["k"],
+    "props.get": lambda n: n.props.get("k"),
+    "props.items": lambda n: list(n.props.items()),
+    "props.values": lambda n: list(n.props.values()),
+    "dict(props)": lambda n: dict(n.props),
+    "props.copy": lambda n: n.props.copy(),
+    "props ==": lambda n: n.props == {"k": 1},
+    "props |": lambda n: n.props | {},
+    "props.pop": lambda n: n.props.pop("k"),
+    "props.popitem": lambda n: n.props.popitem(),
+    "props.setdefault": lambda n: n.props.setdefault("k", 1),
+    "entry.value": lambda n: n.props.entry("k").value,
+    "unpack entry": lambda n: tuple(n.props.entry("k")),
+}
+
+# The annotated value, the parser's types, and the message after "server arg 1: " or "server prop k: ".
+BAD_VALUES = {
+    "built-in": ("(u8)300", [], "300 doesn't fit (u8): out of range 0..=255"),
+    "custom": (
+        '(celsius)"hot"',
+        [STRICT_CELSIUS],
+        "\"hot\" doesn't fit (celsius): its decode raised TypeError('want a number')",
+    ),
+}
+
+
+def read_error(read, node):
+    with pytest.raises(ValueError) as info:
+        read(node)
+    return info.value
+
+
+@pytest.mark.parametrize("kind", BAD_VALUES)
+@pytest.mark.parametrize("route", ARG_READS)
+def test_reading_an_arg_that_doesnt_fit(route, kind):
+    bad, types, core = BAD_VALUES[kind]
+    doc = rkdl.Parser(types=types).parse(f"server 1 {bad}\n")
+    err = read_error(ARG_READS[route], doc["server"])
+    assert type(err) is ValueError
+    assert str(err) == f"server arg 1: {core}"
+    if kind == "custom":
+        assert isinstance(err.__cause__, TypeError)
+        assert not hasattr(err, "__notes__")
+    else:
+        assert err.__cause__ is None
+        assert len(err.__notes__) == 1
+    assert str(doc) == f"server 1 {bad}\n"
+
+
+@pytest.mark.parametrize("kind", BAD_VALUES)
+@pytest.mark.parametrize("route", PROP_READS)
+def test_reading_a_prop_that_doesnt_fit(route, kind):
+    bad, types, core = BAD_VALUES[kind]
+    doc = rkdl.Parser(types=types).parse(f"server k={bad}\n")
+    err = read_error(PROP_READS[route], doc["server"])
+    assert type(err) is ValueError
+    assert str(err) == f"server prop k: {core}"
+    assert isinstance(err.__cause__, TypeError) == (kind == "custom")
+    assert str(doc) == f"server k={bad}\n"
+
+
+def test_the_arg_index_counts_args_only():
+    n = rkdl.parse("server a=1 7 b=2 (u8)300\n")["server"]
+    assert str(read_error(lambda n: n.args[1], n)).startswith("server arg 1: ")
+    assert str(read_error(lambda n: n.entries[3].value, n)).startswith("server arg 1: ")
+
+
+def test_read_errors_spell_names_as_a_file_does():
+    n = rkdl.parse('"my server" (u8)-1 "a key"=(u8)300\n')["my server"]
+    assert str(read_error(lambda n: n.args[0], n)).startswith('"my server" arg 0: -1 doesn\'t fit')
+    assert str(read_error(lambda n: n.props["a key"], n)).startswith('"my server" prop "a key": 300 doesn\'t fit')
+
+
+def test_read_errors_show_the_value_as_the_file_spells_it():
+    n = rkdl.parse('n (u8)0x1_00 (date)"2020-1-1"\n')["n"]
+    assert str(read_error(lambda n: n.args[0], n)) == "n arg 0: 0x1_00 doesn't fit (u8): out of range 0..=255"
+    assert str(read_error(lambda n: n.args[1], n)).startswith('n arg 1: "2020-1-1" doesn\'t fit (date): ')
+
+
+def test_a_detached_node_still_names_itself():
+    n = rkdl.parse("n (u8)300\n").children.pop()
+    assert str(read_error(lambda n: n.args[0], n)).startswith("n arg 0: 300 doesn't fit")
+
+
+def test_a_decode_that_raises_value_error_is_wrapped_too():
+    def decode(value):
+        raise ValueError("too hot")
+
+    hot = rkdl.Type("celsius", Celsius, decode=decode, encode=lambda c: c.degrees)
+    n = rkdl.Parser(types=[hot]).parse("server (celsius)99\n")["server"]
+    err = read_error(lambda n: n.args[0], n)
+    assert str(err) == "server arg 0: 99 doesn't fit (celsius): its decode raised ValueError('too hot')"
+    assert str(err.__cause__) == "too hot"
+
+
+def test_a_decode_that_raises_a_base_exception_propagates():
+    class Stop(BaseException):
+        pass
+
+    def decode(value):
+        raise Stop
+
+    stop = rkdl.Type("celsius", Celsius, decode=decode, encode=lambda c: c.degrees)
+    doc = rkdl.Parser(types=[stop]).parse("t (celsius)1\n")
+    with pytest.raises(Stop):
+        doc["t"].args[0]
+
+
+def test_setting_a_type_the_value_doesnt_fit_says_so_without_a_place():
+    doc = rkdl.Parser(types=[STRICT_CELSIUS]).parse('n 300 "hot"\n')
+    with pytest.raises(ValueError) as info:
+        doc["n"].args.entry(0).type = "u8"
+    assert str(info.value) == "300 doesn't fit (u8): out of range 0..=255"
+    assert len(info.value.__notes__) == 1
+    with pytest.raises(ValueError, match=r'^"hot" doesn\'t fit \(celsius\): its decode raised') as info:
+        doc["n"].args.entry(1).type = "celsius"
+    assert isinstance(info.value.__cause__, TypeError)
+    assert str(doc) == 'n 300 "hot"\n'
+
+
+def test_a_read_error_uses_a_write_errors_words():
+    n = rkdl.parse("server (u8)300 (u8)7\n")["server"]
+    read = read_error(lambda n: n.args[0], n)
+    write = read_error(lambda n: n.args.__setitem__(1, 300), n)
+    assert str(read) == f"server arg 0: {write}"

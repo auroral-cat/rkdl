@@ -16,7 +16,6 @@ from ._rkdl import (
     Props,
     Type,
     __version__,
-    _parse_file,
     parse,
 )
 
@@ -52,6 +51,8 @@ def load(source):
     Paths and binary files are read as UTF-8 bytes, so line endings survive exactly. A text file opened without
     `newline=""` turns CRLF into LF as it reads.
 
+    The same as `Parser().load(source)`.
+
     Args:
         source: A path, or a file opened for reading.
 
@@ -62,18 +63,7 @@ def load(source):
         ParseError: The text isn't valid KDL. Its `path` names the file, when it has a name.
         UnicodeDecodeError: The bytes aren't UTF-8.
     """
-    if isinstance(source, (str, os.PathLike)):
-        path = os.fsdecode(source)
-        with open(source, "rb") as f:
-            data = f.read()
-    else:
-        path = _path_of(source)
-        data = source.read()
-    if isinstance(data, (bytes, bytearray, memoryview)):
-        data = bytes(data).decode("utf-8")
-    if path is None:
-        return parse(data)
-    return _parse_file(data, path)
+    return Parser().load(source)
 
 
 def dump(doc, target):
@@ -93,6 +83,20 @@ def dump(doc, target):
         target.write(str(doc).encode("utf-8"))
     else:
         target.write(str(doc))
+
+
+def _read(source):
+    # Parser.load's reading: the text, and the path to name in a ParseError, if there is one.
+    if isinstance(source, (str, os.PathLike)):
+        path = os.fsdecode(source)
+        with open(source, "rb") as f:
+            data = f.read()
+    else:
+        path = _path_of(source)
+        data = source.read()
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        data = bytes(data).decode("utf-8")
+    return data, path
 
 
 def _path_of(f):

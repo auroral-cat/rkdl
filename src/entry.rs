@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
 
 use crate::document::{DocState, Document};
-use crate::edit::{Item, chosen, read};
+use crate::edit::{self, Item, chosen, read};
 use crate::handles::{self, Fail, Home, removed};
 use crate::index::{Index, not_in, pick_one, pick_slice, search_range};
 use crate::node::Node;
@@ -174,9 +174,7 @@ impl Entry {
 
     fn item(&self, py: Python<'_>) -> PyResult<(Item, Py<Document>)> {
         handles::on_home(py, &self.home, |doc| {
-            let item = doc
-                .get()
-                .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e)))?;
+            let item = doc.get().with_state(py, |s| edit::item(s, self.id))?;
             Ok((item, doc.clone_ref(py)))
         })
     }
@@ -234,8 +232,9 @@ impl Entry {
     /// annotation rkdl doesn't know (not reserved, no custom Type) isn't checked.
     ///
     /// Raises:
-    ///     ValueError: The annotation is one the value can't be read as, or the new value doesn't fit it, like 300,
-    ///         3.5 or "weekly" written over `(u8)`. The document doesn't change.
+    ///     ValueError: The value doesn't fit its annotation, or the new value doesn't fit it, like 300, 3.5 or
+    ///         "weekly" written over `(u8)`. An exception from a custom Type's decode is the `__cause__`. A
+    ///         write that raises doesn't change the document.
     ///     TypeError: The new value can't be converted to KDL.
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -247,9 +246,7 @@ impl Entry {
     fn set_value(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = value.py();
         handles::on_home(py, &self.home, |doc| {
-            let before = doc
-                .get()
-                .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e)))?;
+            let before = doc.get().with_state(py, |s| edit::item(s, self.id))?;
             // Converting may call Python, so it happens between two locks.
             let encoded = before.encode_over(value, doc.get().types.get())?;
             doc.get().with_state(py, |s| {
@@ -294,12 +291,12 @@ impl Entry {
     #[setter]
     fn set_type(&self, py: Python<'_>, ty: Option<&str>) -> PyResult<()> {
         handles::on_home(py, &self.home, |doc| {
-            let value = doc
-                .get()
-                .with_state(py, |s| entry_mut(s, self.id).map(|e| e.value().clone()))?;
+            let (value, text) = doc.get().with_state(py, |s| {
+                entry_mut(s, self.id).map(|e| (e.value().clone(), e.format().map(|f| f.value_repr.clone())))
+            })?;
             // Checking may call a Type's decode, so it happens between two locks.
             if let Some(ty) = ty {
-                values::check_fits(py, &value, ty, doc.get().types.get())?;
+                values::check_fits(py, &value, text.as_deref(), ty, doc.get().types.get())?;
             }
             doc.get().with_state(py, |s| {
                 let entry = entry_mut(s, self.id)?;

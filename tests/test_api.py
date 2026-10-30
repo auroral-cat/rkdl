@@ -381,19 +381,26 @@ def test_node_children_must_be_nodes():
 
 CRLF = b"a 1\r\nb {\r\n    c\r\n}\r\n"
 
+# rkdl.load is Parser().load, and a Parser with custom types loads the same way.
+LOADERS = pytest.mark.parametrize(
+    "load", [rkdl.load, rkdl.Parser().load, rkdl.Parser(types=[CELSIUS]).load], ids=["rkdl", "Parser", "custom"]
+)
 
-def test_load_and_dump_through_a_path_keep_bytes(tmp_path):
+
+@LOADERS
+def test_load_and_dump_through_a_path_keep_bytes(tmp_path, load):
     source, target = tmp_path / "in.kdl", tmp_path / "out.kdl"
     source.write_bytes(CRLF)
-    doc = rkdl.load(source)
+    doc = load(source)
     doc["b"].children.append(rkdl.Node("d"))
     rkdl.dump(doc, str(target))
     assert target.read_bytes() == b"a 1\r\nb {\r\n    c\r\n    d\r\n}\r\n"
-    assert str(rkdl.load(str(source))) == CRLF.decode()
+    assert str(load(str(source))) == CRLF.decode()
 
 
-def test_load_and_dump_through_binary_files_keep_bytes(tmp_path):
-    doc = rkdl.load(io.BytesIO(CRLF))
+@LOADERS
+def test_load_and_dump_through_binary_files_keep_bytes(tmp_path, load):
+    doc = load(io.BytesIO(CRLF))
     out = io.BytesIO()
     rkdl.dump(doc, out)
     assert out.getvalue() == CRLF
@@ -401,23 +408,40 @@ def test_load_and_dump_through_binary_files_keep_bytes(tmp_path):
     with open(path, "wb") as f:
         rkdl.dump(doc, f)
     with open(path, "rb") as f:
-        assert str(rkdl.load(f)) == CRLF.decode()
+        assert str(load(f)) == CRLF.decode()
     assert path.read_bytes() == CRLF
 
 
-def test_load_and_dump_through_text_files(tmp_path):
+@LOADERS
+def test_load_and_dump_through_text_files(tmp_path, load):
     out = io.StringIO()
-    rkdl.dump(rkdl.load(io.StringIO("a 1\n")), out)
+    rkdl.dump(load(io.StringIO("a 1\n")), out)
     assert out.getvalue() == "a 1\n"
     path = tmp_path / "x.kdl"
     path.write_bytes(CRLF)
     with open(path, newline="") as f:
-        assert str(rkdl.load(f)) == CRLF.decode()
+        assert str(load(f)) == CRLF.decode()
+    # Without newline="", a text file turns CRLF into LF as it reads.
+    with open(path, encoding="utf-8") as f:
+        assert str(load(f)) == CRLF.decode().replace("\r\n", "\n")
 
 
-def test_load_rejects_bytes_that_are_not_utf8():
+@LOADERS
+def test_load_rejects_bytes_that_are_not_utf8(load):
     with pytest.raises(UnicodeDecodeError):
-        rkdl.load(io.BytesIO(b"a \xff"))
+        load(io.BytesIO(b"a \xff"))
+
+
+def test_parser_load_reads_through_its_types(tmp_path):
+    path = tmp_path / "x.kdl"
+    path.write_bytes(b"t (celsius)21.5\r\n")
+    parser = rkdl.Parser(types=[CELSIUS])
+    for source in (path, str(path), io.BytesIO(path.read_bytes())):
+        doc = parser.load(source)
+        assert doc["t"].args[0] == Celsius(21.5)
+        assert str(doc) == "t (celsius)21.5\r\n"
+    # Without the Type, the annotation is one rkdl doesn't know.
+    assert rkdl.load(path)["t"].args[0] == 21.5
 
 
 # A4: nodes with custom types

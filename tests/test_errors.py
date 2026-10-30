@@ -108,10 +108,15 @@ def test_parse_error_pickles_with_its_diagnostics():
 BAD = "a 1\nb {\n"
 
 
-def load_error(source):
+def load_error(source, load=rkdl.load):
     with pytest.raises(rkdl.ParseError) as info:
-        rkdl.load(source)
+        load(source)
     return info.value
+
+
+LOADERS = pytest.mark.parametrize(
+    "load", [rkdl.load, rkdl.Parser(types=[rkdl.Type("t", str, str, str)]).load], ids=["rkdl", "Parser"]
+)
 
 
 @pytest.mark.parametrize(
@@ -124,12 +129,13 @@ def load_error(source):
     ],
     ids=["Path", "str", "binary file", "text file"],
 )
-def test_a_parse_error_from_load_names_the_file(tmp_path, open_it):
+@LOADERS
+def test_a_parse_error_from_load_names_the_file(tmp_path, open_it, load):
     path = tmp_path / "config.kdl"
     path.write_text(BAD)
     source = open_it(path)
     try:
-        err = load_error(source)
+        err = load_error(source, load)
     finally:
         if hasattr(source, "close"):
             source.close()
@@ -143,14 +149,15 @@ def test_a_parse_error_from_load_names_the_file(tmp_path, open_it):
     assert str(again) == str(err)
 
 
-def test_a_parse_error_from_text_has_no_path():
+@LOADERS
+def test_a_parse_error_from_text_has_no_path(load):
     err = parse_error(BAD)
     assert err.path is None
     assert str(err).splitlines()[0] == "2:3: Failed to parse KDL document"
     assert "╭─[2:3]" in str(err)
     # A file object without a path, like one in memory.
-    assert load_error(io.StringIO(BAD)).path is None
-    assert load_error(io.BytesIO(BAD.encode())).path is None
+    assert load_error(io.StringIO(BAD), load).path is None
+    assert load_error(io.BytesIO(BAD.encode()), load).path is None
 
 
 def test_diagnostics_compare_by_value():

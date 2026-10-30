@@ -13,4 +13,4 @@ allow-unwrap-types = ["std::sync::LockResult"]
 
 # The `///` comments on Python-facing items are Python docstrings in Google style, whose `Args:` and `Raises:` sections
 # name parameters and exceptions bare.
-doc-valid-idents = ["..", "ValueError", "TypeError", "KeyError", "IndexError", "ParseError", "indent_level", "no_comments", "entry_autoformat_keep"]
+doc-valid-idents = ["..", "ValueError", "TypeError", "KeyError", "IndexError", "ParseError", "UnicodeDecodeError", "indent_level", "no_comments", "entry_autoformat_keep"]
