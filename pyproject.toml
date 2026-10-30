@@ -13,11 +13,15 @@ dynamic = ["version"]
 dev = [
     "hypothesis>=6.168.5",
     "pytest",
+    "ruff>=0.17.3",
 ]
 
 [tool.maturin]
 python-source = "python"
 module-name = "rkdl._rkdl"
+
+[tool.ruff]
+line-length = 120
 
 [tool.uv]
 # The development install is a debug build, so the Python tests run with the debug-only checks on (the id-tree shape
