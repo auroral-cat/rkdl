@@ -171,6 +171,8 @@ class Type:
         name: The annotation, without parentheses: `"celsius"` for `(celsius)22.5`.
         cls: The Python class of the values. Writing an instance of it annotates the entry with `name`.
         decode: Turns the plain value from the document (a str, int, float, bool or None) into a Python value.
+            An exception it raises means the value doesn't fit: reading it raises `ValueError`, with that
+            exception as the `__cause__`.
         encode: Turns an instance of `cls` into a plain value to write.
 
     Raises:
@@ -216,6 +218,22 @@ class Parser:
         Raises:
             ParseError: The text isn't valid KDL.
         """
+    def load(self, source: str | os.PathLike[str] | _Readable) -> Document:
+        """Parses a KDL document from a path, a binary file or a text file.
+
+        Paths and binary files are read as UTF-8 bytes, so line endings survive exactly. A text file opened without
+        `newline=""` turns CRLF into LF as it reads.
+
+        Args:
+            source: A path, or a file opened for reading.
+
+        Returns:
+            The document, which reads and writes values through this parser's types.
+
+        Raises:
+            ParseError: The text isn't valid KDL. Its `path` names the file, when it has a name.
+            UnicodeDecodeError: The bytes aren't UTF-8.
+        """
     def node(
         self,
         name: str,
@@ -250,6 +268,8 @@ def load(source: str | os.PathLike[str] | _Readable) -> Document:
 
     Paths and binary files are read as UTF-8 bytes, so line endings survive exactly. A text file opened without
     `newline=""` turns CRLF into LF as it reads.
+
+    The same as `Parser().load(source)`.
 
     Args:
         source: A path, or a file opened for reading.
@@ -490,8 +510,9 @@ class Entry:
         annotation rkdl doesn't know (not reserved, no custom Type) isn't checked.
 
         Raises:
-            ValueError: The annotation is one the value can't be read as, or the new value doesn't fit it, like 300,
-                3.5 or "weekly" written over `(u8)`. The document doesn't change.
+            ValueError: The value doesn't fit its annotation, or the new value doesn't fit it, like 300, 3.5 or
+                "weekly" written over `(u8)`. An exception from a custom Type's decode is the `__cause__`. A
+                write that raises doesn't change the document.
             TypeError: The new value can't be converted to KDL.
         """
     @value.setter

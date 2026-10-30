@@ -1,3 +1,5 @@
+use std::fmt;
+
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyException, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
@@ -19,6 +21,8 @@ use crate::errors::parse_error;
 ///     name: The annotation, without parentheses: `"celsius"` for `(celsius)22.5`.
 ///     cls: The Python class of the values. Writing an instance of it annotates the entry with `name`.
 ///     decode: Turns the plain value from the document (a str, int, float, bool or None) into a Python value.
+///         An exception it raises means the value doesn't fit: reading it raises `ValueError`, with that
+///         exception as the `__cause__`.
 ///     encode: Turns an instance of `cls` into a plain value to write.
 ///
 /// Raises:
@@ -260,24 +264,43 @@ impl TypeRegistry {
     }
 }
 
-/// KDL value plus its entry's type annotation -> Python object. Raises if a known type's contents don't fit.
-pub(crate) fn to_python(
-    py: Python<'_>,
-    value: &KdlValue,
-    ty: Option<&str>,
-    types: &TypeRegistry,
-) -> PyResult<Py<PyAny>> {
-    to_python_spelled(py, value, None, ty, types)
+/// Where an entry is in a document, for the error when its value can't be read: `server arg 0`, `server prop
+/// retries`.
+pub(crate) struct Place<'a> {
+    pub(crate) node: &'a str,
+    pub(crate) slot: Slot<'a>,
 }
 
-/// `to_python`, given the value's text in the file too, if there is one. `decimal64` and `decimal128` read their
-/// digits from it, since the parsed value is only an f64.
+pub(crate) enum Slot<'a> {
+    /// The index in `node.args`.
+    Arg(usize),
+    Prop(&'a str),
+}
+
+impl fmt::Display for Place<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", identifier(self.node))?;
+        match self.slot {
+            Slot::Arg(index) => write!(f, " arg {index}"),
+            Slot::Prop(key) => write!(f, " prop {}", identifier(key)),
+        }
+    }
+}
+
+/// KDL value plus its entry's type annotation -> Python object, given the value's text in the file too, if there is
+/// one, and where the entry is, for the error. `decimal64` and `decimal128` read their digits from the text, since the
+/// parsed value is only an f64.
+///
+/// A value that doesn't fit raises `ValueError`, whose message is meant for whoever wrote the file: `server prop
+/// retries: 300 doesn't fit (u8): out of range 0..=255`. An `Exception` from a custom decode is its `__cause__`.
+/// Anything else a decode raises, such as `KeyboardInterrupt`, propagates.
 pub(crate) fn to_python_spelled(
     py: Python<'_>,
     value: &KdlValue,
     text: Option<&str>,
     ty: Option<&str>,
     types: &TypeRegistry,
+    place: Option<&Place<'_>>,
 ) -> PyResult<Py<PyAny>> {
     let Some(ty) = ty else {
         return plain_to_python(py, value);
@@ -287,18 +310,38 @@ pub(crate) fn to_python_spelled(
         Some(Converter::User(user)) => {
             let plain = plain_to_python(py, value)?;
             let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
-            Ok(decode.call1((plain,))?.unbind())
+            match decode.call1((plain,)) {
+                Ok(decoded) => Ok(decoded.unbind()),
+                Err(err) if err.is_instance_of::<PyException>(py) => {
+                    let reason = format!("its decode raised {}", err.value(py).repr()?);
+                    let refused = unreadable(ty, value, text, &reason, place);
+                    refused.set_cause(py, Some(err));
+                    Err(refused)
+                }
+                Err(err) => Err(err),
+            }
         }
-        Some(Converter::Builtin(b)) => {
-            decode_builtin(py, b, value, text).map_err(|reason| unreadable(ty, value, text, &reason))
-        }
+        Some(Converter::Builtin(b)) => match decode_builtin(py, b, value, text) {
+            Ok(decoded) => Ok(decoded),
+            Err(reason) => {
+                let refused = unreadable(ty, value, text, &reason, place);
+                add_note(py, &refused, &override_hint(ty, value))?;
+                Err(refused)
+            }
+        },
     }
 }
 
-/// The error for a value a built-in type can't read. Valid KDL can hold values Python's own types refuse, such as
-/// `(regex)#"\p{L}+"#`, so it says how to read the value anyway.
-fn unreadable(ty: &str, value: &KdlValue, text: Option<&str>, reason: &str) -> PyErr {
+/// `server prop retries: 300 doesn't fit (u8): out of range 0..=255`, in the same words as a write that doesn't fit.
+fn unreadable(ty: &str, value: &KdlValue, text: Option<&str>, reason: &str, place: Option<&Place<'_>>) -> PyErr {
     let text = text.map_or_else(|| canonical_repr(value), str::to_owned);
+    let place = place.map_or_else(String::new, |place| format!("{place}: "));
+    PyValueError::new_err(format!("{place}{text} doesn't fit {}: {reason}", annotation(ty)))
+}
+
+/// Valid KDL can hold values Python's own types refuse, such as `(regex)#"\p{L}+"#`, so the developer is told how to
+/// read the value anyway. It's a note rather than part of the message, which may be shown to whoever wrote the file.
+fn override_hint(ty: &str, value: &KdlValue) -> String {
     let plain = match value {
         KdlValue::String(_) => Some("str"),
         KdlValue::Integer(_) => Some("int"),
@@ -309,10 +352,13 @@ fn unreadable(ty: &str, value: &KdlValue, text: Option<&str>, reason: &str) -> P
     let example = plain.map_or_else(String::new, |cls| {
         format!(": Parser(types=[Type({ty:?}, {cls}, {cls}, {cls})]) reads it as a plain {cls}")
     });
-    PyValueError::new_err(format!(
-        "({}){text} can't be read as {ty}: {reason}. A Type named {ty:?} overrides the built-in one{example}",
-        identifier(ty)
-    ))
+    format!("A Type named {ty:?} overrides the built-in one{example}")
+}
+
+/// Adds a note for the developer, which tracebacks show and `str(err)` doesn't.
+fn add_note(py: Python<'_>, err: &PyErr, note: &str) -> PyResult<()> {
+    err.value(py).call_method1("add_note", (note,))?;
+    Ok(())
 }
 
 /// What writing a Python value stores: the KDL value, its annotation, and the text to print it as when the value
@@ -568,22 +614,15 @@ fn encode_user(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<Option<Kdl
 }
 
 /// Checks that a value reads as type `ty`, so annotating it with `ty` doesn't leave an entry that raises when read.
-pub(crate) fn check_fits(py: Python<'_>, value: &KdlValue, ty: &str, types: &TypeRegistry) -> PyResult<()> {
-    match to_python(py, value, Some(ty), types) {
-        Ok(_) => Ok(()),
-        Err(err) if err.is_instance_of::<PyValueError>(py) => Err(err),
-        Err(err) if err.is_instance_of::<PyException>(py) => {
-            let refused = PyValueError::new_err(format!(
-                "{} doesn't fit {}: its decode raised {}",
-                canonical_repr(value),
-                annotation(ty),
-                err.value(py).repr()?
-            ));
-            refused.set_cause(py, Some(err));
-            Err(refused)
-        }
-        Err(err) => Err(err),
-    }
+/// `text` is the value's text in the file, if there is one, for the error.
+pub(crate) fn check_fits(
+    py: Python<'_>,
+    value: &KdlValue,
+    text: Option<&str>,
+    ty: &str,
+    types: &TypeRegistry,
+) -> PyResult<()> {
+    to_python_spelled(py, value, text, Some(ty), types, None).map(drop)
 }
 
 fn call<'py>(py: Python<'py>, module: &str, attr: &str, arg: impl IntoPyObject<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -735,9 +774,11 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
             let extra = flags & !own;
             if extra != 0 {
                 let names = call(value.py(), "re", "RegexFlag", extra)?.str()?;
-                return Err(PyValueError::new_err(format!(
-                    "can't write a regex compiled with {names}: KDL keeps only the pattern, so put flags inline, like (?i)"
-                )));
+                let refused = PyValueError::new_err(format!(
+                    "can't write a regex compiled with {names}: KDL keeps only the pattern"
+                ));
+                add_note(value.py(), &refused, "Put the flags inline instead, like (?i)")?;
+                return Err(refused);
             }
             string(pattern)
         }
@@ -961,7 +1002,14 @@ pub(crate) fn _debug_to_python(
     let entry = KdlEntry::parse(kdl_entry_text).map_err(|e| parse_error(py, &e))?;
     let types = registry(py, types);
     let text = entry.format().map(|f| f.value_repr.as_str());
-    to_python_spelled(py, entry.value(), text, entry.ty().map(KdlIdentifier::value), &types)
+    to_python_spelled(
+        py,
+        entry.value(),
+        text,
+        entry.ty().map(KdlIdentifier::value),
+        &types,
+        None,
+    )
 }
 
 /// Direct conversion hook for `test_values.py`: returns `(text, annotation)`, the text a new entry would print.
