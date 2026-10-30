@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use crate::children::{self, Children, Owner};
 use crate::format::Formatter;
 use crate::handles;
+use crate::layout;
 use crate::node::Node;
 use crate::tree::{IdTree, NodeId};
 use crate::values::TypeRegistry;
@@ -16,6 +17,9 @@ use crate::values::TypeRegistry;
 pub(crate) struct DocState {
     pub(crate) kdl: KdlDocument,
     pub(crate) ids: IdTree,
+    /// The line ending style for edits where the text around them has none: the first line ending in the text the
+    /// document was parsed from, or `\n`. A detached node's home takes it from the document the node left.
+    pub(crate) eol: &'static str,
 }
 
 impl DocState {
@@ -36,20 +40,22 @@ pub struct Document {
 
 impl Document {
     pub(crate) fn new(kdl: KdlDocument, types: Py<TypeRegistry>) -> Self {
-        Document::build(kdl, types, false)
+        let eol = layout::line_ending(&kdl);
+        Document::build(kdl, types, false, eol)
     }
 
     /// A private home for a detached node, empty until `fill` puts the node in. It starts empty so the caller can
     /// create its Python object before locking anything.
     pub(crate) fn empty_home(types: Py<TypeRegistry>) -> Self {
-        Document::build(KdlDocument::new(), types, true)
+        Document::build(KdlDocument::new(), types, true, "\n")
     }
 
-    fn build(kdl: KdlDocument, types: Py<TypeRegistry>, home: bool) -> Self {
+    fn build(kdl: KdlDocument, types: Py<TypeRegistry>, home: bool, eol: &'static str) -> Self {
         Document {
             state: Mutex::new(DocState {
                 ids: IdTree::from_document(&kdl),
                 kdl,
+                eol,
             }),
             types,
             home,
@@ -73,10 +79,11 @@ impl Document {
     }
 
     /// Fills a private home made by `empty_home`. Only for a home no other thread can reach yet, which is why
-    /// taking its lock while another document is locked can't deadlock.
-    pub(crate) fn fill(&self, kdl: KdlDocument, ids: IdTree) {
+    /// taking its lock while another document is locked can't deadlock. `eol` is the line ending style of the
+    /// document the node came from.
+    pub(crate) fn fill(&self, kdl: KdlDocument, ids: IdTree, eol: &'static str) {
         let mut state = self.lock();
-        *state = DocState { kdl, ids };
+        *state = DocState { kdl, ids, eol };
         state.check();
     }
 

@@ -317,7 +317,7 @@ def test_moved_line_continuation_takes_crlf():
 def test_crlf_survives_emptying_the_document():
     d = rkdl.parse("a {\r\n    b\r\n}\r\n")
     node = d.children.pop()
-    assert str(d) == "\r\n"
+    assert str(d) == ""
     d.children.append(node)
     assert str(d) == "a {\r\n    b\r\n}\r\n"
 
@@ -635,7 +635,7 @@ def test_reversed():
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("a\nb\nc", "c\nb\na\n"),
+        ("a\nb\nc", "c\nb\na"),
         ("n {\n    // about a\n    a\n    b\n    c\n}\n", "n {\n    c\n    b\n    // about a\n    a\n}\n"),
         ("n { a; b; c }\n", "n { c; b; a }\n"),
         ("n {\r\n  a\r\n  b\r\n}\r\n", "n {\r\n  b\r\n  a\r\n}\r\n"),

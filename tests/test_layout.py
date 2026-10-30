@@ -1,0 +1,368 @@
+"""Layout: where line breaks and indentation go when nodes move in and out of blocks.
+
+The rule is in src/layout.rs. Most cases here are the reproductions from the hardening sweep's rewrite diff.
+"""
+
+import pytest
+import rkdl
+from conftest import is_valid_case, read_case, spec_inputs, walk
+
+N = rkdl.Node
+
+
+def reads_back(text):
+    assert str(rkdl.parse(text)) == text
+
+
+# Every line break belongs to the thing before it
+
+
+def test_a_node_without_a_final_newline_gets_one_when_a_node_follows():
+    d = rkdl.parse("a\nb")
+    d.children.append(N("c"))
+    assert str(d) == "a\nb\nc\n"
+    # So taking b out leaves no blank line.
+    d.children.remove(d["b"])
+    assert str(d) == "a\nc\n"
+
+
+def test_replacing_a_node_after_an_unterminated_one():
+    d = rkdl.parse("a\nb")
+    d.children.append(N("c"))
+    d.children[1] = N("z")
+    assert str(d) == "a\nz\nc\n"
+
+
+def test_popping_the_first_after_appending_to_a_one_node_file():
+    d = rkdl.parse("a")
+    d.children.append(N("b"))
+    assert str(d) == "a\nb\n"
+    d.children.pop(0)
+    assert str(d) == "b\n"
+
+
+@pytest.mark.parametrize(
+    ("edit", "expected"),
+    [
+        (lambda d: d.children.__setitem__(0, N("c")), "c\nb\n"),
+        (lambda d: d.children.insert(0, d.children.pop(1)), "b\na\n"),
+        (lambda d: d.children.reverse(), "b\na\n"),
+    ],
+)
+def test_edits_after_appending_to_a_one_node_file(edit, expected):
+    d = rkdl.parse("a")
+    d.children.append(N("b"))
+    edit(d)
+    assert str(d) == expected
+
+
+def test_moving_out_the_node_that_had_no_newline():
+    d = rkdl.parse("a\nb")
+    d.children.append(N("c"))
+    other = rkdl.parse("q\n")
+    other.children.append(d.children.pop(1))
+    assert str(d) == "a\nc\n"
+    assert str(other) == "q\nb\n"
+
+
+def test_unterminated_last_child():
+    d = rkdl.parse("a {\n    b\n    c}\n")
+    d["a"].children.append(N("x"))
+    assert str(d) == "a {\n    b\n    c\n    x\n}\n"
+    d["a"].children.pop(1)
+    assert str(d) == "a {\n    b\n    x\n}\n"
+
+
+def test_closing_brace_on_the_last_childs_line():
+    d = rkdl.parse("a {\n    b }\n")
+    d["a"].children.append(N("x"))
+    # No space left at the end of b's line, and `}` lines up with its parent.
+    assert str(d) == "a {\n    b\n    x\n}\n"
+    d["a"].children.append(N("y"))
+    assert str(d) == "a {\n    b\n    x\n    y\n}\n"
+    d["a"].children.pop(0)
+    assert str(d) == "a {\n    x\n    y\n}\n"
+
+
+def test_closing_brace_lines_up_with_an_indented_parent():
+    d = rkdl.parse("  p {\n    a }\n")
+    d["p"].children.append(N("x"))
+    assert str(d) == "  p {\n    a\n    x\n  }\n"
+
+
+def test_a_block_on_a_node_that_used_to_be_last():
+    d = rkdl.parse("a {\n    b }\n")
+    d["a"].children.append(N("x"))
+    d["a"]["b"].children = []
+    # b isn't last any more, so no `;` after its block.
+    assert str(d) == "a {\n    b {}\n    x\n}\n"
+
+
+def test_taking_the_last_node_off_a_shared_line():
+    d = rkdl.parse("a {\n    b\n    c }\n")
+    d["a"].children.pop()
+    assert str(d) == "a {\n    b\n}\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a {\n    b; c\n}\n", "a {\n    c\n}\n"),
+        ("a; b\n", "b\n"),
+        ("a {b;c;}\n", "a {c;}\n"),
+    ],
+)
+def test_the_node_that_becomes_first_on_a_line_takes_its_start(text, expected):
+    d = rkdl.parse(text)
+    (d["a"] if text.startswith("a {") else d).children.pop(0)
+    assert str(d) == expected
+
+
+def test_popping_the_second_of_a_shared_line_keeps_the_rest_on_lines():
+    d = rkdl.parse("a; b\nc\n")
+    d.children.pop(1)
+    assert str(d) == "a;\nc\n"
+
+
+def test_a_continuation_closed_with_a_semicolon_moves_whole():
+    d = rkdl.parse("node \\")
+    d.children.append(N("x"))
+    assert str(d) == "node \\\n;\nx\n"
+    node = d.children.pop(0)
+    empty = rkdl.parse("")
+    empty.children.append(node)
+    assert str(empty) == "node \\\n;\n"
+    reads_back(str(empty))
+
+
+# Line ending style lives on the document
+
+
+@pytest.mark.parametrize("text", ["\n", "\n\n", "  \n", "﻿\n", "// c\n", "\r\n", "\r\n\r\n", "﻿\r\n"])
+def test_appending_keeps_the_users_text(text):
+    d = rkdl.parse(text)
+    d.children.append(N("x"))
+    eol = "\r\n" if "\r\n" in text else "\n"
+    assert str(d) == text + "x" + eol
+
+
+def test_insert_then_pop_gives_back_the_text():
+    d = rkdl.parse("\n")
+    d.children.insert(0, N("x"))
+    d.children.pop()
+    assert str(d) == "\n"
+
+
+def test_an_emptied_crlf_document():
+    d = rkdl.parse("a\r\n")
+    d.children.pop()
+    assert str(d) == ""
+    d.children.append(N("x"))
+    assert str(d) == "x\r\n"
+    d.children.pop()
+    d.children.append(N("y"))
+    assert str(d) == "y\r\n"
+
+
+@pytest.mark.parametrize("how", ["pop", "clear"])
+def test_an_emptied_crlf_document_extends_with_crlf(how):
+    d = rkdl.parse("a\r\nb\r\n")
+    if how == "pop":
+        d.children.pop()
+        d.children.pop()
+    else:
+        d.children.clear()
+    d.children.extend([N("x"), N("y")])
+    assert str(d) == "x\r\ny\r\n"
+
+
+def test_an_emptied_crlf_document_restyles_what_moves_in():
+    d = rkdl.parse("a\r\n")
+    d.children.pop()
+    d.children.append(rkdl.parse("// c\nx {\n    y\n}\n").children.pop())
+    assert str(d) == "// c\r\nx {\r\n    y\r\n}\r\n"
+
+
+def test_an_emptied_crlf_document_nests_with_crlf():
+    d = rkdl.parse("a\r\n")
+    d.children.pop()
+    d.children.append(N("x"))
+    d["x"].children = []
+    d["x"].children.append(N("y"))
+    assert str(d) == "x {\r\n    y\r\n}\r\n"
+
+
+def test_closing_the_only_crlf_block_keeps_crlf():
+    d = rkdl.parse("a {\r\n    b\r\n}")
+    d["a"].children = None
+    assert str(d) == "a"
+    d.children.append(N("x"))
+    assert str(d) == "a\r\nx\r\n"
+
+
+def test_popping_the_last_child_of_the_last_crlf_block_keeps_crlf():
+    d = rkdl.parse("a {\r\n    b\r\n}")
+    d["a"].children.pop()
+    assert str(d) == "a {}"
+    d["a"].children.append(N("x"))
+    assert str(d) == "a {\r\n    x\r\n}"
+
+
+def test_a_crlf_document_gets_its_node_back_in_crlf():
+    a = rkdl.parse("p\r\n")
+    b = rkdl.parse("q\n")
+    b.children.append(a.children.pop())
+    assert str(a) == ""
+    assert str(b) == "q\np\n"
+    a.children.append(b.children.pop(0))
+    assert str(a) == "q\r\n"
+
+
+def test_a_detached_node_keeps_the_style_of_its_document():
+    popped = rkdl.parse("a {\r\n}\r\n").children.pop()
+    popped.children.append(N("y"))
+    assert str(popped) == "a {\r\n    y\r\n}"
+    copied = rkdl.parse("a {}\r\n")["a"].copy()
+    copied.children.append(N("y"))
+    assert str(copied) == "a {\r\n    y\r\n}"
+
+
+@pytest.mark.parametrize("eol", ["\r", "\x85", "\x0b", "\x0c", " ", " "])
+def test_every_kdl_line_ending_is_a_style(eol):
+    d = rkdl.parse(f"a{eol}b")
+    d.children.append(N("x"))
+    d["b"].children = []
+    d["b"].children.append(N("y"))
+    assert str(d) == f"a{eol}b {{{eol}    y{eol}}}{eol}x{eol}"
+    d = rkdl.parse(f"a{eol}")
+    d.children.pop()
+    d.children.append(N("x"))
+    assert str(d) == f"x{eol}"
+
+
+@pytest.mark.parametrize("eol", ["\r", " ", "\x0c"])
+def test_nested_blocks_with_other_line_endings(eol):
+    d = rkdl.parse(f"a {{{eol}    b{eol}}}{eol}")
+    d["a"].children.append(rkdl.parse("x {\n    y\n}").children.pop())
+    assert str(d) == f"a {{{eol}    b{eol}    x {{{eol}        y{eol}    }}{eol}}}{eol}"
+
+
+# Moved subtrees take the destination's indentation
+
+
+def test_a_tab_indented_subtree_moves_into_spaces():
+    src = rkdl.parse('x {\n\t// about grand\n\tgrand {\n\t\tdeep """\n\t\t\tstr\n\t\t\t"""\n\t}\n}\n')
+    d = rkdl.parse("top {\n    a\n}\n")
+    d["top"].children.append(src.children.pop())
+    # A string's own lines stay as they were.
+    assert str(d) == (
+        'top {\n    a\n    x {\n        // about grand\n        grand {\n            deep """\n\t\t\tstr\n\t\t\t"""\n'
+        "        }\n    }\n}\n"
+    )
+    assert rkdl.parse(str(d))["top"]["x"]["grand"]["deep"].args[0] == "str"
+
+
+def test_a_two_space_subtree_moves_into_tabs():
+    src = rkdl.parse("x {\n  grand {\n    deep\n  }\n}\n")
+    d = rkdl.parse("a {\n\tb\n}\n")
+    d["a"].children.append(src.children.pop())
+    assert str(d) == "a {\n\tb\n\tx {\n\t\tgrand {\n\t\t\tdeep\n\t\t}\n\t}\n}\n"
+
+
+# Smaller layout items
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("\ta {\n\t\tb\n\t}\n", "\ta {\n\t\tx\n\t}\n"),
+        ("  a {\n    b\n  }\n", "  a {\n    x\n  }\n"),
+        ("a {\n  b {\n    c\n  }\n}\n", "a {\n  x\n}\n"),
+        ("a {\n\n    b\n\n}\n", "a {\n\n    x\n\n}\n"),
+        ("a {\n    b\n  }\n", "a {\n    x\n  }\n"),
+    ],
+)
+def test_replacing_the_only_child_keeps_its_place(text, expected):
+    d = rkdl.parse(text)
+    d["a"].children[0] = N("x")
+    assert str(d) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("\ta {\n\t\tb\n\t}\nc {}\n", "c {\n\tx\n}\n"),
+        ("  a {\n    b\n  }\nc {}\n", "c {\n  x\n}\n"),
+    ],
+)
+def test_indent_unit_is_relative_to_the_parent(text, expected):
+    d = rkdl.parse(text)
+    d["c"].children.append(N("x"))
+    assert str(d).endswith(expected)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a; b; c\n", "c; b; a\n"),
+        ("a {\n    b\n\n    c\n}\n", "a {\n    c\n\n    b\n}\n"),
+        ("a {\n    // c\n    b\n    d\n}\n", "a {\n    d\n    // c\n    b\n}\n"),
+        ("a // about a\nb\n", "b\na // about a\n"),
+    ],
+)
+def test_reverse_keeps_the_layout_by_position(text, expected):
+    d = rkdl.parse(text)
+    view = d["a"].children if text.startswith("a {") else d.children
+    view.reverse()
+    assert str(d) == expected
+    view.reverse()
+    assert str(d) == text
+
+
+def test_reverse_where_a_comment_would_lose_its_line_end():
+    text = "x; y\nz // c\n"
+    d = rkdl.parse(text)
+    d.children.reverse()
+    assert [n.name for n in d.children] == ["z", "y", "x"]
+    reads_back(str(d))
+
+
+def unedited_reads_back(doc):
+    try:
+        return str(rkdl.parse(str(doc))) == str(doc)
+    except rkdl.ParseError:
+        return False
+
+
+def corpus_blocks():
+    for path in spec_inputs():
+        text = read_case(path)
+        if text is None or not is_valid_case(path):
+            continue
+        for crlf in (False, True):
+            text = text.replace("\n", "\r\n") if crlf else text
+            doc = rkdl.parse(text)
+            # Files that don't read back as themselves unedited hit kdl-rs bugs (notes/upstream.md).
+            if not unedited_reads_back(doc):
+                continue
+            for where, node in [((), doc), *walk(doc)]:
+                if node.children is not None and len(node.children) > 1:
+                    yield path.name, crlf, where
+
+
+@pytest.mark.parametrize(("name", "crlf", "where"), list(corpus_blocks()))
+def test_reversing_twice_gives_back_the_text(name, crlf, where):
+    path = next(p for p in spec_inputs() if p.name == name)
+    text = read_case(path)
+    doc = rkdl.parse(text.replace("\n", "\r\n") if crlf else text)
+    before = str(doc)
+    view = doc.children
+    for i in where:
+        view = view[i].children
+    names = [n.name for n in view]
+    view.reverse()
+    once = str(doc)
+    reads_back(once)
+    assert [n.name for n in view] == names[::-1]
+    view.reverse()
+    assert str(doc) == before

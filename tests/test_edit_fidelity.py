@@ -499,6 +499,9 @@ def test_untouched(file, path, edit):
             # Emptying a block prints it as `{}` by design, dropping the whitespace before `}`
             # (test_removing_last_child_empties_block).
             hi = parent.block[1]
+        # A node that was next on the same line takes over the start of the line, so the spaces before it go.
+        while hi < len(old) and old[hi] in SPACES:
+            hi += 1
     elif edit in HEADER_EDITS:
         lo, hi = span.core, span.block[0] if span.block else span.end
     else:
