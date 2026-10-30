@@ -35,6 +35,15 @@ def test_several_diagnostics():
     assert (err.line, err.column, err.offset) == (1, 6, 5)
 
 
+def test_report_is_a_summary_then_each_diagnostic():
+    # No `Error: ` line before each diagnostic, as miette puts before related reports.
+    err = parse_error('name #"raw"#"quoted key"=1')
+    parts = str(err).split("\n\n")
+    assert parts[0] == "1:6: Failed to parse KDL document"
+    assert [part.splitlines()[0] for part in parts[1:]] == [f"  × {d.message}" for d in err.diagnostics]
+    assert not any(line.startswith("Error") for line in str(err).splitlines())
+
+
 def test_report_has_snippet_and_no_ansi():
     err = parse_error('\tnode "ünïcødé" {\n\t\tchild }}\n')
     report = str(err)
@@ -126,7 +135,7 @@ def test_a_parse_error_from_load_names_the_file(tmp_path, open_it):
             source.close()
     assert err.path == str(path)
     lines = str(err).splitlines()
-    assert lines[0] == f"  × {path}:2:3: Failed to parse KDL document"
+    assert lines[0] == f"{path}:2:3: Failed to parse KDL document"
     assert f"╭─[{path}:2:3]" in str(err)
     assert (err.line, err.column) == (2, 3)
     again = pickle.loads(pickle.dumps(err))
@@ -137,7 +146,7 @@ def test_a_parse_error_from_load_names_the_file(tmp_path, open_it):
 def test_a_parse_error_from_text_has_no_path():
     err = parse_error(BAD)
     assert err.path is None
-    assert str(err).splitlines()[0] == "  × Failed to parse KDL document"
+    assert str(err).splitlines()[0] == "2:3: Failed to parse KDL document"
     assert "╭─[2:3]" in str(err)
     # A file object without a path, like one in memory.
     assert load_error(io.StringIO(BAD)).path is None

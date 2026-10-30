@@ -116,13 +116,7 @@ pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>)
         .map(|d| Diagnostic::from_kdl(&err.input, d))
         .collect();
     let first = diagnostics.first().map(|d| (d.line, d.column, d.offset));
-    let report = match path {
-        Some(path) => {
-            let (line, column) = first.map_or((1, 1), |f| (f.0, f.1));
-            render(&InFile::new(err, path, line, column))
-        }
-        None => render(err),
-    };
+    let report = report(err, path, first.map(|f| (f.0, f.1)));
     let exc = ParseError::new_err(report);
     let value = exc.value(py);
     let set = value
@@ -137,90 +131,99 @@ pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>)
     }
 }
 
+/// The exception's text: a summary line naming the file and the first problem's position, then each problem as its own
+/// miette report.
+///
+/// Rendering kdl-rs's `KdlError` whole would show its diagnostics as miette's "related" reports, each behind a bare
+/// `Error: ` line. Rendering them one by one gives every problem the same shape, with only a blank line between them.
+/// The summary has no `×`, so a traceback's last line reads `rkdl.ParseError: config.kdl:4:9: ...`.
+fn report(err: &KdlError, path: Option<&str>, first: Option<(usize, usize)>) -> String {
+    let at = match (path, first) {
+        (Some(path), Some((line, column))) => format!("{path}:{line}:{column}: "),
+        (Some(path), None) => format!("{path}: "),
+        (None, Some((line, column))) => format!("{line}:{column}: "),
+        (None, None) => String::new(),
+    };
+    let source = Source::new(err, path);
+    let mut parts = vec![format!("{at}{err}")];
+    parts.extend(err.diagnostics.iter().map(|diagnostic| {
+        render(&Located {
+            diagnostic,
+            source: &source,
+        })
+    }));
+    parts.join("\n\n")
+}
+
 /// Exception text ends up in log files, so render without colour or terminal hyperlinks.
-fn render(err: &dyn miette::Diagnostic) -> String {
+fn render(diagnostic: &dyn miette::Diagnostic) -> String {
     let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor()).with_links(false);
     let mut out = String::new();
-    match handler.render_report(&mut out, err) {
+    match handler.render_report(&mut out, diagnostic) {
         Ok(()) => out.trim_end().to_owned(),
-        Err(_) => err.to_string(),
+        Err(_) => diagnostic.to_string(),
     }
 }
 
-/// A kdl-rs error with its source named after a file, so the report's first line reads `config.kdl:4:9: ...` and each
-/// snippet's header is `[config.kdl:4:9]`, as miette prints named sources.
-#[derive(Debug)]
-struct InFile {
-    title: String,
-    source: NamedSource<Arc<String>>,
-    diagnostics: Vec<Located>,
+/// The parsed text, named after its file if it came from one, so each snippet's header is `[config.kdl:4:9]` as miette
+/// prints named sources.
+enum Source {
+    Named(NamedSource<Arc<String>>),
+    Text(Arc<String>),
 }
 
-#[derive(Debug)]
-struct Located {
-    diagnostic: KdlDiagnostic,
-    source: NamedSource<Arc<String>>,
-}
+impl Source {
+    fn new(err: &KdlError, path: Option<&str>) -> Self {
+        match path {
+            Some(path) => Source::Named(NamedSource::new(path, Arc::clone(&err.input))),
+            None => Source::Text(Arc::clone(&err.input)),
+        }
+    }
 
-impl InFile {
-    fn new(err: &KdlError, path: &str, line: usize, column: usize) -> Self {
-        let source = NamedSource::new(path, Arc::clone(&err.input));
-        InFile {
-            title: format!("{path}:{line}:{column}: {err}"),
-            diagnostics: err
-                .diagnostics
-                .iter()
-                .map(|d| Located {
-                    diagnostic: d.clone(),
-                    source: source.clone(),
-                })
-                .collect(),
-            source,
+    fn code(&self) -> &dyn SourceCode {
+        match self {
+            Source::Named(named) => named,
+            Source::Text(text) => text.as_ref(),
         }
     }
 }
 
-impl fmt::Display for InFile {
+/// One kdl-rs diagnostic with the text it points into. kdl-rs's diagnostics don't carry the text: the `KdlError` holding
+/// them does.
+struct Located<'a> {
+    diagnostic: &'a KdlDiagnostic,
+    source: &'a Source,
+}
+
+impl fmt::Debug for Located<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.title)
+        fmt::Debug::fmt(self.diagnostic, f)
     }
 }
 
-impl std::error::Error for InFile {}
-
-impl miette::Diagnostic for InFile {
-    fn source_code(&self) -> Option<&dyn SourceCode> {
-        Some(&self.source)
-    }
-
-    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn miette::Diagnostic> + 'a>> {
-        Some(Box::new(self.diagnostics.iter().map(|d| d as &dyn miette::Diagnostic)))
-    }
-}
-
-impl fmt::Display for Located {
+impl fmt::Display for Located<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.diagnostic.fmt(f)
+        fmt::Display::fmt(self.diagnostic, f)
     }
 }
 
-impl std::error::Error for Located {}
+impl std::error::Error for Located<'_> {}
 
 // Everything but the source is kdl-rs's.
-impl miette::Diagnostic for Located {
+impl miette::Diagnostic for Located<'_> {
     fn source_code(&self) -> Option<&dyn SourceCode> {
-        Some(&self.source)
+        Some(self.source.code())
     }
 
     fn severity(&self) -> Option<Severity> {
-        miette::Diagnostic::severity(&self.diagnostic)
+        miette::Diagnostic::severity(self.diagnostic)
     }
 
     fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
-        miette::Diagnostic::help(&self.diagnostic)
+        miette::Diagnostic::help(self.diagnostic)
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
-        miette::Diagnostic::labels(&self.diagnostic)
+        miette::Diagnostic::labels(self.diagnostic)
     }
 }
