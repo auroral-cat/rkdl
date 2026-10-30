@@ -3,6 +3,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
+use crate::layout;
 use crate::parser::prescan::KDL_SPACES;
 use crate::values;
 
@@ -64,7 +65,8 @@ impl Formatter {
         Ok(py.get_type::<Formatter>().call0()?.cast_into()?)
     }
 
-    pub(crate) fn apply(&self, doc: &mut KdlDocument) {
+    /// Formats `doc`, keeping its line ending style `eol`: autoformat writes `\n`.
+    pub(crate) fn apply(&self, doc: &mut KdlDocument, eol: &str) {
         let mut config = FormatConfig::builder()
             .indent(&self.indent)
             .indent_level(self.indent_level)
@@ -75,6 +77,7 @@ impl Formatter {
         config.entry_autoformate_keep = self.entry_autoformat_keep;
         doc.autoformat_config(&config);
         requote(doc);
+        layout::restyle_document(doc, eol);
     }
 }
 

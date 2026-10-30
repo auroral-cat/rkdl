@@ -1,8 +1,9 @@
+mod blocks;
 pub(crate) mod prescan;
 
 use std::sync::Arc;
 
-use kdl::{KdlDiagnostic, KdlDocument, KdlError};
+use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode};
 use miette::Severity;
 use pyo3::PyTraverseError;
 use pyo3::exceptions::PyRuntimeError;
@@ -13,6 +14,7 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::document::Document;
 use crate::errors::parse_error;
 use crate::format::Formatter;
+use crate::layout;
 use crate::node::{self, Node, Spec};
 use crate::values::{Type, TypeRegistry};
 
@@ -70,13 +72,20 @@ impl Parser {
 }
 
 fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<KdlDocument, KdlError> {
-    if let Some(refusal) = prescan::scan(text).refusal {
+    let scan = prescan::scan(text);
+    if let Some(refusal) = scan.refusal {
         return Err(refused(text, refusal));
     }
     let mut kdl = text.parse::<KdlDocument>()?;
+    // The scan reads every document kdl-rs parses without a break, so this always runs. Without the scan's record of
+    // the blocks, the text after `}` would stay dropped.
+    if scan.broke_at.is_none() {
+        blocks::restore(text, &mut kdl, &scan.closes);
+    }
     // Formatting before the Document exists is the same as doc.fmt() but needs no lock.
     if let Some(formatter) = formatter {
-        formatter.apply(&mut kdl);
+        let eol = layout::line_ending(&kdl);
+        formatter.apply(&mut kdl, eol);
     }
     Ok(kdl)
 }
@@ -98,17 +107,53 @@ fn refused(text: &str, refusal: prescan::Refusal) -> KdlError {
 }
 
 /// Reserved address space, committed only as it's used. kdl-rs's parser needs about 32 KB per block level on a debug
-/// build and 6 KB on a release build; the prescan's limits keep it under 140 MB and 30 MB.
+/// build and 6 KB on a release build; the prescan's limits keep it under 140 MB and 30 MB. Printing, cloning and
+/// formatting need far less.
 const STACK_SIZE: usize = 256 << 20;
 
-/// Runs `f` on a new thread with a big stack, since kdl-rs's parser recurses per nesting level.
+/// Block levels up to which kdl-rs's printing, cloning and formatting, which recurse once per level, run on the
+/// caller's own stack. Cloning needs the most, about 3.3 KB a level on a debug build, so this takes up to about 110 KB
+/// of a thread that may have only 512 KB (macOS's default for threads other than the main one).
+const SHALLOW: usize = 32;
+
+/// Whether `nodes` nest too deep for kdl-rs's recursive printing, cloning and formatting to run on the caller's stack.
+pub(crate) fn too_deep_for_the_stack(nodes: &[KdlNode]) -> bool {
+    levels(nodes, SHALLOW) > SHALLOW
+}
+
+/// Runs kdl-rs's recursive printing, cloning or formatting, on a thread with a big stack if `deep` says the nodes it
+/// works on are `too_deep_for_the_stack`. The GIL is released already: the callers hold a document's lock.
+pub(crate) fn recursing<T: Send>(deep: bool, f: impl FnOnce() -> T + Send) -> PyResult<T> {
+    if deep { on_big_stack(f) } else { Ok(f()) }
+}
+
+/// How many levels of blocks `nodes` nest, counting a node's own block as one, or `past + 1` if it's more than `past`.
+/// Stops looking as soon as it knows.
+pub(crate) fn levels<'a>(nodes: &'a [KdlNode], past: usize) -> usize {
+    // A work list rather than recursion: this is how rkdl finds out whether recursion is safe.
+    let blocks =
+        |nodes: &'a [KdlNode], level: usize| nodes.iter().filter_map(KdlNode::children).map(move |b| (b, level));
+    let mut pending: Vec<(&KdlDocument, usize)> = blocks(nodes, 1).collect();
+    let mut deepest = 0;
+    while let Some((block, level)) = pending.pop() {
+        deepest = deepest.max(level);
+        if deepest > past {
+            return past + 1;
+        }
+        pending.extend(blocks(block.nodes(), level + 1));
+    }
+    deepest
+}
+
+/// Runs `f` on a new thread with a big stack, since kdl-rs's parser, printing, cloning and formatting recurse once per
+/// nesting level.
 fn on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> PyResult<T> {
     std::thread::scope(|scope| {
         let thread = std::thread::Builder::new()
-            .name("rkdl-parse".into())
+            .name("rkdl-deep".into())
             .stack_size(STACK_SIZE)
             .spawn_scoped(scope, f)
-            .map_err(|e| PyRuntimeError::new_err(format!("couldn't start the parser thread: {e}")))?;
+            .map_err(|e| PyRuntimeError::new_err(format!("couldn't start a thread with a big stack: {e}")))?;
         Ok(thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
     })
 }

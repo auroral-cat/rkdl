@@ -17,7 +17,8 @@
 //! nodes, as long as the new node fits on one line. One that doesn't spreads the block over lines first. An empty
 //! block prints as `{}`.
 //!
-//! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading (notes/upstream.md). After a `}` rkdl
+//! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading (notes/upstream.md). rkdl's own
+//! parse puts it back (`parser/blocks.rs`), but what rkdl writes stays readable by kdl-rs alone. After a `}` rkdl
 //! writes comes a line ending, a `;`, or the parent's `}`. So a new block goes after a node's trailing spaces, and a
 //! node with a block at the end of a one-line block ends with `;` before the space: `a { b {}; }`.
 
@@ -136,23 +137,40 @@ fn block_fmt_mut(block: &mut KdlDocument) -> &mut KdlDocumentFormat {
 /// The style of the first line ending in a block's text. Entries are skipped: their only line endings are in `\`
 /// continuations.
 fn first_eol(block: &KdlDocument) -> Option<&'static str> {
-    let f = block.format();
-    f.and_then(|f| eol_in(&f.leading))
-        .or_else(|| block.nodes().iter().find_map(node_eol))
-        .or_else(|| f.and_then(|f| eol_in(&f.trailing)))
-}
-
-fn node_eol(node: &KdlNode) -> Option<&'static str> {
-    let f = node.format();
-    f.and_then(|f| eol_in(&f.leading).or_else(|| eol_in(&f.before_children)))
-        .or_else(|| node.children().and_then(first_eol))
-        .or_else(|| {
-            f.and_then(|f| {
-                eol_in(&f.before_terminator)
-                    .or_else(|| eol_in(&f.terminator))
-                    .or_else(|| eol_in(&f.trailing))
-            })
-        })
+    enum Part<'a> {
+        Text(&'a str),
+        Block(&'a KdlDocument),
+        Node(&'a KdlNode),
+    }
+    // The parts still to read, next on top. A work list rather than recursion, here and in the other walks below:
+    // documents can nest deeper than the caller's stack goes.
+    let mut pending = vec![Part::Block(block)];
+    while let Some(part) = pending.pop() {
+        match part {
+            Part::Text(text) => {
+                if let Some(eol) = eol_in(text) {
+                    return Some(eol);
+                }
+            }
+            Part::Block(block) => {
+                let f = block.format();
+                pending.extend(f.map(|f| Part::Text(&f.trailing)));
+                pending.extend(block.nodes().iter().rev().map(Part::Node));
+                pending.extend(f.map(|f| Part::Text(&f.leading)));
+            }
+            Part::Node(node) => {
+                let f = node.format();
+                if let Some(f) = f {
+                    pending.extend([&f.trailing, &f.terminator, &f.before_terminator].map(|t| Part::Text(t)));
+                }
+                pending.extend(node.children().map(Part::Block));
+                if let Some(f) = f {
+                    pending.extend([&f.before_children, &f.leading].map(|t| Part::Text(t)));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The line ending style of a parsed document: its first line ending, or `\n` if it has none.
@@ -168,22 +186,43 @@ fn ends_own_line(node: &KdlNode) -> bool {
 
 /// One level of indentation in `block`, whose parent's line is indented `indent`: what the first node that starts a
 /// line further in adds to it. `top` is for the document itself, whose nodes may all be indented.
-fn unit_in(block: &KdlDocument, indent: &str, top: bool) -> Option<String> {
-    let mut line_start = top;
-    for node in block.nodes() {
+fn unit_in<'a>(block: &'a KdlDocument, indent: &'a str, top: bool) -> Option<String> {
+    /// A block being read: its nodes still to read, and its parent's line's indent.
+    struct Level<'a> {
+        nodes: std::slice::Iter<'a, KdlNode>,
+        indent: &'a str,
+        top: bool,
+        line_start: bool,
+    }
+    let mut levels = vec![Level {
+        nodes: block.nodes().iter(),
+        indent,
+        top,
+        line_start: top,
+    }];
+    while let Some(level) = levels.last_mut() {
+        let Some(node) = level.nodes.next() else {
+            levels.pop();
+            continue;
+        };
         let lead = leading(node);
-        let starts = line_start || lead.contains(NEWLINES);
-        let own = if starts { indent_of(lead) } else { indent };
+        let starts = level.line_start || lead.contains(NEWLINES);
+        let own = if starts { indent_of(lead) } else { level.indent };
         if starts
-            && !top
-            && let Some(unit) = own.strip_prefix(indent).filter(|unit| !unit.is_empty())
+            && !level.top
+            && let Some(unit) = own.strip_prefix(level.indent).filter(|unit| !unit.is_empty())
         {
             return Some(unit.to_owned());
         }
-        if let Some(unit) = node.children().and_then(|block| unit_in(block, own, false)) {
-            return Some(unit);
+        level.line_start = ends_own_line(node);
+        if let Some(block) = node.children() {
+            levels.push(Level {
+                nodes: block.nodes().iter(),
+                indent: own,
+                top: false,
+                line_start: false,
+            });
         }
-        line_start = ends_own_line(node);
     }
     None
 }
@@ -321,28 +360,50 @@ fn restyle_node(node: &mut KdlNode, eol: &str) {
     }
 }
 
+/// Puts every line ending in the document's whitespace and comments in the style `eol`. Line endings inside values
+/// stay as they are.
+pub fn restyle_document(doc: &mut KdlDocument, eol: &str) {
+    let mut pending = vec![doc];
+    while let Some(block) = pending.pop() {
+        if let Some(f) = block.format_mut() {
+            f.leading = restyle(&f.leading, eol);
+            f.trailing = restyle(&f.trailing, eol);
+        }
+        for node in block.nodes_mut() {
+            if let Some(f) = node.format_mut() {
+                f.leading = restyle(&f.leading, eol);
+            }
+            restyle_node(node, eol);
+        }
+        pending.extend(block.nodes_mut().iter_mut().filter_map(|n| n.children_mut().as_mut()));
+    }
+}
+
 /// Moves everything under `node` to its new indentation and line ending style.
 fn reindent_children(node: &mut KdlNode, shift: &Shift) {
-    let Some(block) = node.children_mut() else {
-        return;
-    };
-    let mut line_start = false;
-    if let Some(f) = block.format_mut() {
-        f.leading = shift.apply(&f.leading, false);
-        // Spaces after the last line ending were reindented already, as the start of that line. Only an empty
-        // block has more text on that line: its trailing.
-        line_start = f.leading.ends_with(NEWLINES);
-    }
-    for child in block.nodes_mut() {
-        if let Some(f) = child.format_mut() {
-            f.leading = shift.apply(&f.leading, line_start);
-            line_start = ends_line(&format!("{}{}", f.terminator, f.trailing));
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        let Some(block) = node.children_mut() else {
+            continue;
+        };
+        let mut line_start = false;
+        if let Some(f) = block.format_mut() {
+            f.leading = shift.apply(&f.leading, false);
+            // Spaces after the last line ending were reindented already, as the start of that line. Only an empty
+            // block has more text on that line: its trailing.
+            line_start = f.leading.ends_with(NEWLINES);
         }
-        restyle_node(child, shift.eol);
-        reindent_children(child, shift);
-    }
-    if let Some(f) = block.format_mut() {
-        f.trailing = shift.apply(&f.trailing, line_start);
+        for child in block.nodes_mut() {
+            if let Some(f) = child.format_mut() {
+                f.leading = shift.apply(&f.leading, line_start);
+                line_start = ends_line(&format!("{}{}", f.terminator, f.trailing));
+            }
+            restyle_node(child, shift.eol);
+        }
+        if let Some(f) = block.format_mut() {
+            f.trailing = shift.apply(&f.trailing, line_start);
+        }
+        pending.extend(block.nodes_mut());
     }
 }
 
@@ -384,7 +445,7 @@ fn after_mut<'a>(block: &'a mut KdlDocument, index: usize, eol: &str) -> &'a mut
 
 /// Whether a children block is written on one line, like `a { b; c }`.
 fn is_single_line(block: &KdlDocument) -> bool {
-    !block.nodes().is_empty() && !block.to_string().contains(NEWLINES)
+    !block.nodes().is_empty() && !block_breaks(block)
 }
 
 /// Whether `node` can go into a single-line block: its text, apart from the whitespace around it, has no line
@@ -393,16 +454,84 @@ fn fits_on_a_line(node: &KdlNode) -> bool {
     let Some(f) = node.format() else {
         return false;
     };
-    let text = node.to_string();
     let tail = format!("{}{}", f.terminator, f.trailing);
-    let core = text
-        .strip_prefix(f.leading.as_str())
-        .and_then(|t| t.strip_suffix(tail.as_str()))
-        .unwrap_or(&text);
     !f.leading.trim_start().contains(NEWLINES)
-        && !core.contains(NEWLINES)
-        && !ends_in_open_escline(core)
+        && !own_text_breaks(node)
+        && !node
+            .children()
+            .is_some_and(|block| block.format().is_none() || block_breaks(block))
+        && !ends_in_open_escline(&last_part(node))
         && matches!(tail.trim(), "" | ";")
+}
+
+// The checks below read the parts kdl-rs prints rather than printing them: its printing recurses once per level.
+
+/// Whether a block's text has a line ending, its nodes' included.
+fn block_breaks(block: &KdlDocument) -> bool {
+    let mut blocks = vec![block];
+    while let Some(block) = blocks.pop() {
+        if block
+            .format()
+            .is_some_and(|f| f.leading.contains(NEWLINES) || f.trailing.contains(NEWLINES))
+        {
+            return true;
+        }
+        for node in block.nodes() {
+            let ends = node.format().is_some_and(|f| {
+                [&f.leading, &f.terminator, &f.trailing]
+                    .iter()
+                    .any(|t| t.contains(NEWLINES))
+            });
+            if ends || own_text_breaks(node) {
+                return true;
+            }
+            if let Some(children) = node.children() {
+                // kdl-rs starts a new line after the `{` of a block without a format.
+                if children.format().is_none() {
+                    return true;
+                }
+                blocks.push(children);
+            }
+        }
+    }
+    false
+}
+
+/// Whether a node's own text has a line ending: everything but its leading text, its children, its terminator and its
+/// trailing text.
+fn own_text_breaks(node: &KdlNode) -> bool {
+    let f = node.format();
+    let format_breaks = f.is_some_and(|f| {
+        [
+            &f.before_ty_name,
+            &f.after_ty_name,
+            &f.after_ty,
+            &f.before_children,
+            &f.before_terminator,
+        ]
+        .iter()
+        .any(|t| t.contains(NEWLINES))
+    });
+    format_breaks
+        || node.name().to_string().contains(NEWLINES)
+        || node.ty().is_some_and(|ty| ty.to_string().contains(NEWLINES))
+        || node.entries().iter().any(|e| e.to_string().contains(NEWLINES))
+}
+
+/// The last part of a node's text that isn't all spaces, before its terminator.
+fn last_part(node: &KdlNode) -> String {
+    let bt = node.format().map_or("", |f| f.before_terminator.as_str());
+    if !bt.trim_end_matches(is_space).is_empty() {
+        return bt.to_owned();
+    }
+    if node.children().is_some() {
+        return "}".to_owned();
+    }
+    let entries = node.entries().iter().rev().map(ToString::to_string);
+    entries
+        .chain(std::iter::once(node.name().to_string()))
+        .find(|text| !text.trim_end_matches(is_space).is_empty())
+        .unwrap_or_default()
 }
 
 /// The whitespace a node's leading starts with.
@@ -731,8 +860,8 @@ struct Slot {
     lead: String,
     /// Spaces before the terminator.
     closing: String,
-    /// Whether the node there is followed by its terminator, or by the end of the block. A node in the middle of a
-    /// block can have neither only where kdl-rs dropped the whitespace after a `}` (notes/upstream.md).
+    /// Whether the node there is followed by its terminator, or by the end of the block. A parsed node in the middle
+    /// of a block always is: rkdl puts back the terminator kdl-rs drops after a `}` and spaces (notes/upstream.md).
     ends: bool,
     terminator: String,
     trailing: String,
@@ -800,22 +929,13 @@ fn put_in_slot(node: &mut KdlNode, slot: Slot, own: Own) {
     f.trailing = slot.trailing;
 }
 
-/// Reverses the nodes of `block`. The whitespace layout stays by position: each place keeps the whitespace before it
-/// and the end of its line, and the nodes move with their own comments. Reversing twice gives back the same text.
+/// Reverses the nodes of `block`. The whitespace layout stays by position, as with `permute`. Reversing twice gives
+/// back the same text.
 pub fn reverse(block: &mut KdlDocument, style: &Style) {
     let count = block.nodes().len();
-    let parts: Vec<(Slot, Own)> = (block.nodes().iter().enumerate())
-        .map(|(i, node)| slot_and_own(node, i + 1 == count))
-        .collect();
-    let fits = parts.iter().zip(parts.iter().rev()).zip(block.nodes()).enumerate().all(
-        |(i, (((_, own), (slot, _)), node))| 2 * i + 1 == count || fits_slot(own, slot, node.children().is_some()),
-    );
-    if fits {
-        let (slots, owns): (Vec<Slot>, Vec<Own>) = parts.into_iter().unzip();
-        block.nodes_mut().reverse();
-        for ((node, slot), own) in block.nodes_mut().iter_mut().zip(slots).zip(owns.into_iter().rev()) {
-            put_in_slot(node, slot, own);
-        }
+    let places: Vec<usize> = (0..count).collect();
+    let from: Vec<usize> = (0..count).rev().collect();
+    if permute(block, &places, &from) {
         return;
     }
     // A comment or `\` that needs a line ending would land where there's none. Moves the first node back to each
@@ -825,6 +945,44 @@ pub fn reverse(block: &mut KdlDocument, style: &Style) {
         let node = unplace(block, 0, style);
         place(block, to, node, style);
     }
+}
+
+/// Moves the node at `from[k]` to `places[k]`, for every `k`: `from` holds the same places in another order. The
+/// whitespace layout stays by position: each place keeps the whitespace before it and the end of its line, and the
+/// nodes move with their own comments. Changes nothing and returns false if a comment or `\` that needs a line ending
+/// would land where there's none, or a block where spaces follow.
+pub fn permute(block: &mut KdlDocument, places: &[usize], from: &[usize]) -> bool {
+    let count = block.nodes().len();
+    let nodes = block.nodes();
+    let parts = |i: usize| nodes.get(i).map(|node| (node, slot_and_own(node, i + 1 == count)));
+    let moves: Option<Vec<(Slot, Own)>> = places
+        .iter()
+        .zip(from)
+        .map(|(&to, &from)| {
+            let ((_, (slot, _)), (node, (_, own))) = (parts(to)?, parts(from)?);
+            (to == from || fits_slot(&own, &slot, node.children().is_some())).then_some((slot, own))
+        })
+        .collect();
+    let Some(moves) = moves else {
+        return false;
+    };
+    let mut taken: Vec<Option<KdlNode>> = std::mem::take(block.nodes_mut()).into_iter().map(Some).collect();
+    let mut landing: Vec<(usize, KdlNode)> = Vec::with_capacity(places.len());
+    for ((&to, &from), (slot, own)) in places.iter().zip(from).zip(moves) {
+        let mut node = taken
+            .get_mut(from)
+            .and_then(Option::take)
+            .expect("each place moves once");
+        put_in_slot(&mut node, slot, own);
+        landing.push((to, node));
+    }
+    for (to, node) in landing {
+        if let Some(place) = taken.get_mut(to) {
+            *place = Some(node);
+        }
+    }
+    *block.nodes_mut() = taken.into_iter().flatten().collect();
+    true
 }
 
 /// Gives the node at `path` an empty children block, `{}`. `eol` is the document's line ending style.

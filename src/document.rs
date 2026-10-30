@@ -13,6 +13,7 @@ use crate::format::Formatter;
 use crate::handles;
 use crate::layout;
 use crate::node::{self, Node, Spec};
+use crate::parser;
 use crate::tree::{IdTree, NodeId};
 use crate::values::TypeRegistry;
 
@@ -28,6 +29,22 @@ impl DocState {
     fn check(&self) {
         if cfg!(debug_assertions) {
             self.ids.check_shape(&self.kdl);
+        }
+    }
+}
+
+impl Drop for DocState {
+    /// Takes the tree apart one block at a time. Dropping it whole would recurse once per level, on whichever thread
+    /// happens to let go of the document.
+    fn drop(&mut self) {
+        let mut pending = vec![std::mem::take(&mut self.kdl)];
+        while let Some(mut block) = pending.pop() {
+            pending.extend(
+                block
+                    .nodes_mut()
+                    .iter_mut()
+                    .filter_map(|node| node.children_mut().take()),
+            );
         }
     }
 }
@@ -130,17 +147,20 @@ impl Document {
     }
 
     /// A copy with the same types, which shares nothing with this document.
-    fn copy(&self, py: Python<'_>) -> Document {
-        let (kdl, eol) = self.with_state(py, |s| (s.kdl.clone(), s.eol));
-        Document::build(kdl, self.types.clone_ref(py), false, eol)
+    fn copy(&self, py: Python<'_>) -> PyResult<Document> {
+        let (kdl, eol) = self.with_state(py, |s| {
+            let deep = parser::too_deep_for_the_stack(s.kdl.nodes());
+            parser::recursing(deep, || s.kdl.clone()).map(|kdl| (kdl, s.eol))
+        })?;
+        Ok(Document::build(kdl, self.types.clone_ref(py), false, eol))
     }
 
-    fn __copy__(&self, py: Python<'_>) -> Document {
+    fn __copy__(&self, py: Python<'_>) -> PyResult<Document> {
         self.copy(py)
     }
 
     /// A copy shares nothing with the document, so `copy.deepcopy`'s memo has nothing to record.
-    fn __deepcopy__(&self, py: Python<'_>, _memo: &Bound<'_, PyAny>) -> Document {
+    fn __deepcopy__(&self, py: Python<'_>, _memo: &Bound<'_, PyAny>) -> PyResult<Document> {
         self.copy(py)
     }
 
@@ -184,8 +204,11 @@ impl Document {
         children::descendants(&Owner::Doc(slf.clone().unbind()), key.unwrap_or(&none))
     }
 
-    fn __str__(&self, py: Python<'_>) -> String {
-        self.with_state(py, |s| s.kdl.to_string())
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.with_state(py, |s| {
+            let deep = parser::too_deep_for_the_stack(s.kdl.nodes());
+            parser::recursing(deep, || s.kdl.to_string())
+        })
     }
 
     fn __len__(&self, py: Python<'_>) -> usize {
@@ -204,8 +227,11 @@ impl Document {
             None => Formatter::default(py)?,
         };
         let formatter = formatter.get();
-        self.with_state(py, |s| formatter.apply(&mut s.kdl));
-        Ok(())
+        self.with_state(py, |s| {
+            let deep = parser::too_deep_for_the_stack(s.kdl.nodes());
+            let eol = s.eol;
+            parser::recursing(deep, || formatter.apply(&mut s.kdl, eol))
+        })
     }
 
     #[getter]

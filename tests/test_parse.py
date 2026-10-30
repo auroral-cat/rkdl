@@ -1,4 +1,5 @@
 import io
+import random
 import subprocess
 import sys
 
@@ -107,3 +108,166 @@ def test_braces_in_strings_and_comments_dont_count():
 def test_parse_on_threads():
     text = nested(MAX_DEPTH)
     assert run_threads(*[lambda: str(rkdl.parse(text))] * 4) == [text] * 4
+
+
+# kdl-rs drops the text between a block's `}` and the end of its line (notes/upstream.md); rkdl puts it back.
+
+AFTER_BLOCK = ["", " ", "\t", " \t ", " /* c */", "/* c */ ", " /* } */\t", " /-{ x }", " /-{} /-{ y {} } "]
+LINE_COMMENTS = [" // c", "\t// c }", "// c"]
+
+
+def generated_block(rng, depth):
+    """Nodes for one block, with spaces, tabs and comments after every `}` and every node."""
+    out = []
+    count = rng.randint(1, 3)
+    for i in range(count):
+        line = rng.choice(["a", "b 1", "(t)c k=v", '"q" #true'])
+        if depth < 4 and rng.random() < 0.7:
+            inner = generated_block(rng, depth + 1) if rng.random() < 0.8 else ""
+            line += rng.choice([" {", "{"]) + rng.choice(["", " ", "\n"]) + inner + rng.choice(["", " "]) + "}"
+        if rng.random() < 0.3:
+            line += rng.choice(LINE_COMMENTS) + rng.choice(["\n", "\r\n"])
+        else:
+            line += rng.choice(AFTER_BLOCK)
+            last = i == count - 1
+            line += rng.choice(["\n", "\r\n", ";", ""] if last else ["\n", "\r\n", ";"])
+        out.append(line)
+    return "".join(out)
+
+
+def test_text_after_a_closing_brace_reads_back_at_every_level():
+    rng = random.Random(31)
+    for _ in range(3000):
+        text = generated_block(rng, 0) + rng.choice(["", "\n", " ", "// end"])
+        assert str(rkdl.parse(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a {}  \nb", "a {} // c\nb", "pkg {\n    a {\n    } // end a\n} // end pkg\n", "a { b { c {} } }", "a {} ;b"],
+)
+def test_text_after_a_closing_brace_survives(text):
+    doc = rkdl.parse(text)
+    assert str(doc) == text
+    # Printing and parsing again changes nothing, however many times.
+    assert str(rkdl.parse(str(rkdl.parse(str(doc))))) == text
+
+
+def test_text_after_a_closing_brace_survives_edits():
+    doc = rkdl.parse("a {} // c\nb { x {}  \n}\n")
+    doc["b"].children.append(rkdl.Node("y"))
+    doc["b"]["x"].args.append(1)
+    assert str(doc) == "a {} // c\nb { x 1 {}  \n    y\n}\n"
+
+
+# kdl-rs reads what's inside a slashdashed block again for every level of them around it, doubling its time per
+# level (notes/upstream.md). rkdl refuses text it would spend too long on.
+
+DASHED_SHAPES = [
+    lambda n: "a /-{" * n + "}" * n,
+    lambda n: "a /-{" * n,
+    lambda n: "x;/-a{" * n + "}" * n,
+    lambda n: "a{x;/-b " * n + "}" * n,
+    lambda n: "/- a { /-{ b {" * n + "} } }" * n,
+]
+
+
+@pytest.mark.parametrize("shape", DASHED_SHAPES)
+def test_nested_slashdashed_blocks_past_the_limit_are_a_parse_error(shape):
+    message, _, _ = parse_isolated(shape(40))
+    assert message == "Slashdashed blocks nest too deeply"
+
+
+def test_slashdashed_block_refusal_points_at_the_slashdash():
+    text = "a /-{" * 40 + "}" * 40
+    message, line, column = parse_isolated(text)
+    assert (message, line) == ("Slashdashed blocks nest too deeply", 1)
+    assert text[column - 1 : column + 1] == "/-"
+
+
+def test_text_inside_nested_slashdashed_blocks_counts():
+    content = "b 1 2\n" * 5_000
+    # One level is fine at any size: it only doubles the time.
+    assert parse_isolated("a /-{\n" + content + "}\n") is None
+    message, _, _ = parse_isolated("a /-{ c /-{ d /-{\n" + content + "} } }\n")
+    assert message == "Slashdashed blocks nest too deeply"
+
+
+def test_slashdashes_after_an_error_count():
+    # After an error the scan can't follow kdl-rs's reading, so every `/-` counts as one more level.
+    text = ") " + "a /-{" * 40 + "}" * 40
+    message, line, column = parse_isolated(text)
+    assert (message, line, column) == ("Unexpected `)`: no type annotation is open", 1, 1)
+
+
+# kdl-rs's printing, cloning and formatting recurse once per level too, so for deep documents rkdl runs them on a
+# thread with a big stack. A thread's stack can be small: 512 KB is macOS's default for threads other than the main
+# one.
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        "copy.copy(doc)",
+        "copy.deepcopy(doc)",
+        "str(doc)",
+        "doc.fmt()",
+        "str(doc.children[0])",
+        "doc.children[0].copy()",
+        "del doc",
+        "rkdl.Node('x', children=[doc.children[0].detach()])",
+        "e = rkdl.parse('p { q }'); e['p'].children.append(doc.children[0].detach()); str(e)",
+    ],
+)
+def test_deep_documents_work_on_a_small_stack(op):
+    code = f"""
+import copy, threading, rkdl
+threading.stack_size(512 * 1024)
+def run():
+    global doc
+    doc = rkdl.parse("a {{\\n" * {MAX_DEPTH - 1} + "}}\\n" * {MAX_DEPTH - 1})
+    {op}
+    print("ok")
+thread = threading.Thread(target=run)
+thread.start()
+thread.join()
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=False)
+    assert (result.returncode, result.stdout) == (0, "ok\n"), result.stderr[-1000:]
+
+
+def deepest(doc):
+    return list(doc.iter())[-1]
+
+
+def test_building_deeper_than_parse_reads_raises():
+    doc = rkdl.parse(nested(MAX_DEPTH))
+    bottom = deepest(doc)
+    # A node without a block still fits at the bottom.
+    bottom.children.append(rkdl.Node("leaf"))
+    leaf = bottom["leaf"]
+    text = str(doc)
+    with pytest.raises(ValueError, match="more than 1000 levels"):
+        leaf.children = []
+    with pytest.raises(ValueError, match="more than 1000 levels"):
+        bottom.children.append(rkdl.Node("x", children=[]))
+    assert str(doc) == text
+    assert str(rkdl.parse(text)) == text
+
+
+def test_moving_a_parsed_chunk_deeper_than_parse_reads_raises():
+    doc = rkdl.parse(nested(600))
+    chunk = rkdl.parse(nested(400)).children[0].detach()
+    deepest(doc).children.append(chunk)
+    text = str(doc)
+    assert str(rkdl.parse(text)) == text
+    more = rkdl.parse(nested(1)).children[0].detach()
+    new = rkdl.Node("new")
+    # All or nothing: neither node goes in.
+    with pytest.raises(ValueError, match="more than 1000 levels"):
+        deepest(doc).children.extend([new, more])
+    assert new.parent is None and more.parent is None
+    assert str(doc) == text
+    # Where there's room, it goes in.
+    doc.children[0].children.append(more)
+    assert more.parent == doc.children[0]

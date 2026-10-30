@@ -12,6 +12,7 @@ use crate::children::{self, At, Children, Owner};
 use crate::document::Document;
 use crate::entry::{Entries, new_entry};
 use crate::handles::{self, Fail, Home, stale};
+use crate::parser;
 use crate::props::{self, Props};
 use crate::spelling;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
@@ -297,7 +298,9 @@ impl Node {
         let ((node, eol), types) = handles::on_home(py, &self.home, |doc| {
             let node = doc.get().with_state(py, |s| {
                 let path = s.ids.path(self.id).ok_or_else(|| Fail::Missing(stale()))?;
-                Ok::<_, Fail>((node_at(&s.kdl, &path).clone(), s.eol))
+                let node = node_at(&s.kdl, &path);
+                let deep = parser::too_deep_for_the_stack(std::slice::from_ref(node));
+                Ok::<_, Fail>((parser::recursing(deep, || node.clone())?, s.eol))
             })?;
             Ok((node, doc.get().types.clone_ref(py)))
         })?;
@@ -323,11 +326,12 @@ impl Node {
 
     fn __str__(&self, py: Python<'_>) -> PyResult<String> {
         self.with_node(py, |n| {
-            let text = n.to_string();
+            let deep = parser::too_deep_for_the_stack(std::slice::from_ref(n));
+            let text = parser::recursing(deep, || n.to_string())?;
             // The leading text is the indentation and comments above the node, which belong to its surroundings.
             let leading = n.format().map_or("", |f| f.leading.as_str());
-            text.strip_prefix(leading).unwrap_or(&text).trim().to_owned()
-        })
+            Ok(text.strip_prefix(leading).unwrap_or(&text).trim().to_owned())
+        })?
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {

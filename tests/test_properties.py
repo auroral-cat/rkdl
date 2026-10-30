@@ -11,7 +11,7 @@ import re
 
 import pytest
 import rkdl
-from conftest import MISSING_KDL_RS, has_duplicate_props, have_kdl_rs, read_case, spec_inputs, walk
+from conftest import MISSING_KDL_RS, has_duplicate_props, have_kdl_rs, read_case, spec_inputs
 from hypothesis import note, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
@@ -294,13 +294,7 @@ def render_nodes(draw, nodes, indent, level):
             line += " {\n" + render_nodes(draw, node.children, indent, level + 1) + pad + "}"
         elif node.children is not None:
             line += draw(st.sampled_from([" {}", "{}", " {\n" + pad + "}"]))
-        # Nothing but a terminator right after `}`: kdl-rs drops whitespace (notes/upstream.md) and comments
-        # (test_comment_after_a_block_survives) there. A node without a block may get one later, so the same goes for
-        # a line comment after it. Spaces and a block comment are fine: the new block goes after them.
-        if node.children is None:
-            end = draw(st.sampled_from(["\n", "\n", ";\n", " \n", " /* end */\n", "; // end\n"]))
-        else:
-            end = draw(st.sampled_from(["\n", "\n", ";\n", "; // end\n"]))
+        end = draw(st.sampled_from(["\n", "\n", ";\n", " \n", " /* end */\n", " // end\n", "; // end\n"]))
         node.one_line = node.children is not None and "\n" not in line
         node.flat = "\n" not in line and not above and end in ("\n", ";\n", " \n")
         out.append(line + end)
@@ -342,24 +336,7 @@ def corpus_is_usable(text):
         check_children(again.children, model, "corpus")
     except (rkdl.ParseError, ValueError, AssertionError):
         return False
-    if has_duplicate_props(doc):
-        return False
-    return every_new_block_prints_stably(text)
-
-
-def every_new_block_prints_stably(text):
-    """Leaves out files where giving a node `{}` puts a comment after `}` (test_comment_after_a_block_survives)."""
-    for i in range(len(list(walk(rkdl.parse(text))))):
-        doc = rkdl.parse(text)
-        _, node = list(walk(doc))[i]
-        if node.children is None:
-            node.children = []
-        try:
-            if str(rkdl.parse(str(doc))) != str(doc):
-                return False
-        except rkdl.ParseError:
-            return False
-    return True
+    return not has_duplicate_props(doc)
 
 
 def load_corpus():
@@ -1060,8 +1037,7 @@ class EditSequences(RuleBasedStateMachine):
     @rule(k=st.integers(0, 1))
     def fmt(self, k):
         self.docs[k].fmt()
-        # kdl-rs's autoformat writes `\n` line endings and spreads every block over lines.
-        self.crlf[k] = False
+        # kdl-rs's autoformat spreads every block over lines. The line ending style stays.
         for root in self.trees[k]:
             for m in root.walk():
                 m.flat = m.one_line = False
@@ -1074,8 +1050,6 @@ class EditSequences(RuleBasedStateMachine):
             text = str(doc)
             again = rkdl.parse(text)
             check_children(again.children, tree, "reparsed")
-            # Whitespace right after a `}` is the one shape kdl-rs reads back differently (notes/upstream.md), and rkdl
-            # never writes it.
             assert str(again) == text, text
             check_children(doc.children, tree, "live")
 

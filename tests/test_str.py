@@ -25,7 +25,6 @@ def test_str_node_keeps_inner_comments():
     assert str(doc["parent"]["child"]) == "child /* inline */ 2"
 
 
-@pytest.mark.xfail(strict=True, reason="kdl-rs: comments between `}` and the newline are dropped, newline and all")
 @pytest.mark.parametrize("comment", ["// end", "/* end */"])
 def test_comment_after_a_block_survives(comment):
     text = f"a {{}} {comment}\nb\n"
