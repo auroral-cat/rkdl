@@ -5,8 +5,14 @@
 //! slot, so a move can repoint handles while the documents are still locked, without calling Python. A reader that
 //! raced a move sees its home's generation change and retries.
 //!
+//! The cache drops a slot when its handle dies, from a callback on the slot's weakref. The cache keeps that weakref
+//! alive, so Python runs the callback even when the handle dies in a garbage cycle, and runs it before the cycle's
+//! finalizers. A finalizer that looks the node up again gets a fresh handle. The old one, which only finalizers can
+//! still see, is never repointed again and goes stale.
+//!
 //! Lock order: document locks, then the cache, then a `Home`. Nothing takes a document lock while holding the cache.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,13 +40,17 @@ enum Ptr {
     /// so it installs this and `Garbage::release` swaps in owned ones once it's done. Nobody reports it to the
     /// collector: reporting it from each holder would count more references than exist.
     Shared(Arc<Py<Document>>),
+    /// The handle's entry was removed. Holding the document would keep all of it alive for a handle that can only
+    /// raise.
+    Gone,
 }
 
 impl Ptr {
-    fn doc(&self) -> &Py<Document> {
+    fn doc(&self) -> Option<&Py<Document>> {
         match self {
-            Ptr::Own(doc) => doc,
-            Ptr::Shared(doc) => doc,
+            Ptr::Own(doc) => Some(doc),
+            Ptr::Shared(doc) => Some(doc),
+            Ptr::Gone => None,
         }
     }
 }
@@ -79,12 +89,13 @@ impl Home {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn doc(&self, py: Python<'_>) -> DocRef {
+    /// None once the handle's entry was removed.
+    pub(crate) fn doc(&self, py: Python<'_>) -> Option<DocRef> {
         let place = self.place();
-        DocRef {
-            doc: place.ptr.doc().clone_ref(py),
+        Some(DocRef {
+            doc: place.ptr.doc()?.clone_ref(py),
             generation: place.generation,
-        }
+        })
     }
 
     /// Whether a move has repointed this home since `doc` was read from it. A handle that moved away and back still
@@ -95,7 +106,9 @@ impl Home {
 
     /// Tells the cycle collector about the document, for the handle that owns this home.
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        // A move on another thread may be repointing this home right now, and traversal mustn't wait for it.
+        // A move on another thread may be repointing this home right now, and traversal mustn't wait for it. Not
+        // reporting the document then is safe: the mover holds the old document on its stack for the whole move, so
+        // the collector can't free it as garbage meanwhile.
         let place = match self.0.try_lock() {
             Ok(place) => place,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -103,7 +116,7 @@ impl Home {
         };
         match &place.ptr {
             Ptr::Own(doc) => visit.call(doc),
-            Ptr::Shared(_) => Ok(()),
+            Ptr::Shared(_) | Ptr::Gone => Ok(()),
         }
     }
 
@@ -129,38 +142,63 @@ pub(crate) struct Garbage {
 
 impl Garbage {
     /// Drops the garbage, after giving every home `repoint` moved a reference of its own. Call it once every lock is
-    /// released. Garbage that's only dropped leaves those homes sharing a reference, which works but hides it from
-    /// the cycle collector.
+    /// released.
     pub(crate) fn release(mut self, py: Python<'_>) {
+        self.settle(py);
+    }
+
+    fn settle(&mut self, py: Python<'_>) {
         for (home, generation, to) in std::mem::take(&mut self.moved) {
             self.old.extend(home.settle(py, generation, &to));
         }
     }
 }
 
+impl Drop for Garbage {
+    /// Only does anything when a panic skipped `release`. Homes left sharing a reference would hide their document
+    /// from the cycle collector for good, so this settles them anyway. The panic poisoned the documents it had
+    /// locked, but a node it moved to a new private home may still be usable.
+    fn drop(&mut self) {
+        if !self.moved.is_empty() {
+            Python::try_attach(|py| self.settle(py));
+        }
+    }
+}
+
 struct Slot {
     object: Py<PyWeakrefReference>,
-    // Dead once the handle is gone, which is how the sweep tells without calling Python.
+    // How `repoint` reaches the handle's home without calling Python. Dead once the handle is gone.
     home: Weak<Home>,
 }
 
-struct Cache {
-    slots: HashMap<u64, Slot>,
-    swept_at: usize,
-}
+static CACHE: LazyLock<Mutex<HashMap<u64, Slot>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
-    Mutex::new(Cache {
-        slots: HashMap::new(),
-        swept_at: 0,
-    })
-});
+/// The callback on a slot's weakref, which drops the slot once its handle is gone.
+#[pyclass(module = "rkdl", frozen)]
+struct Forget(u64);
+
+#[pymethods]
+impl Forget {
+    fn __call__(&self, weakref: &Bound<'_, PyAny>) {
+        let dead = {
+            let mut slots = CACHE
+                .lock_py_attached(weakref.py())
+                .unwrap_or_else(PoisonError::into_inner);
+            // A handle's home is freed before its weakref is cleared, so a new handle may have the slot already.
+            match slots.get(&self.0) {
+                Some(slot) if slot.object.as_ptr() == weakref.as_ptr() => slots.remove(&self.0),
+                _ => None,
+            }
+        };
+        drop(dead);
+    }
+}
 
 /// The live handle for `key`, if there is one.
 pub(crate) fn get<T: PyTypeCheck>(py: Python<'_>, key: u64) -> Option<Bound<'_, T>> {
     let found = {
-        let cache = CACHE.lock_py_attached(py).unwrap_or_else(PoisonError::into_inner);
-        cache.slots.get(&key).and_then(|slot| slot.object.bind(py).upgrade())
+        let slots = CACHE.lock_py_attached(py).unwrap_or_else(PoisonError::into_inner);
+        slots.get(&key).and_then(|slot| slot.object.bind(py).upgrade())
     };
     found?.cast_into::<T>().ok()
 }
@@ -182,7 +220,7 @@ pub(crate) fn publish<'py, T: PyClass, I: Into<PyClassInitializer<T>>>(
         // Python objects are made before locking; the lock only decides whether to publish this one.
         let home = Home::new(doc.clone().unbind());
         let object = Bound::new(py, make(Arc::clone(&home)))?;
-        let weak = PyWeakrefReference::new(object.as_any())?.unbind();
+        let weak = PyWeakrefReference::new_with(object.as_any(), Forget(key))?.unbind();
         let (found, published, garbage) = doc.get().with_state(py, |s| {
             let mut garbage = Garbage::default();
             if !present(s) {
@@ -196,7 +234,7 @@ pub(crate) fn publish<'py, T: PyClass, I: Into<PyClassInitializer<T>>>(
         match (found, published) {
             (false, _) => return Ok(None),
             (true, true) => return Ok(Some(object)),
-            // Another thread published a handle first, or one is being freed right now.
+            // Another thread published a handle first, or one is being freed right now and its slot is about to go.
             (true, false) => py.detach(std::thread::yield_now),
         }
     }
@@ -216,8 +254,8 @@ pub(crate) fn publish_all<'py, I: Copy, T>(
 /// garbage and this returns false. Called with the document that holds `key` locked, so no move can slip between
 /// checking where the node is and publishing a handle that says so.
 pub(crate) fn intern_locked(key: u64, object: Py<PyWeakrefReference>, home: &Arc<Home>, garbage: &mut Garbage) -> bool {
-    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    if cache.slots.get(&key).is_some_and(|slot| slot.home.strong_count() > 0) {
+    let mut slots = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    if slots.get(&key).is_some_and(|slot| slot.home.strong_count() > 0) {
         garbage.weakrefs.push(object);
         return false;
     }
@@ -225,14 +263,9 @@ pub(crate) fn intern_locked(key: u64, object: Py<PyWeakrefReference>, home: &Arc
         object,
         home: Arc::downgrade(home),
     };
-    if let Some(dead) = cache.slots.insert(key, slot) {
+    // A dead slot is still here between freeing a handle's home and running its weakref's callback.
+    if let Some(dead) = slots.insert(key, slot) {
         garbage.weakrefs.push(dead.object);
-    }
-    // Sweeping only when the map has doubled keeps the cost per insert constant.
-    if cache.slots.len() > (2 * cache.swept_at).max(64) {
-        let dead = cache.slots.extract_if(|_, slot| slot.home.strong_count() == 0);
-        garbage.weakrefs.extend(dead.map(|(_, slot)| slot.object));
-        cache.swept_at = cache.slots.len();
     }
     true
 }
@@ -241,9 +274,9 @@ pub(crate) fn intern_locked(key: u64, object: Py<PyWeakrefReference>, home: &Arc
 /// caller hands the garbage to `Garbage::release` once it's unlocked.
 pub(crate) fn repoint(keys: impl IntoIterator<Item = u64>, doc: &Arc<Py<Document>>, garbage: &mut Garbage) {
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
-    let cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    let slots = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     for key in keys {
-        let Some(home) = cache.slots.get(&key).and_then(|slot| slot.home.upgrade()) else {
+        let Some(home) = slots.get(&key).and_then(|slot| slot.home.upgrade()) else {
             continue;
         };
         let old = std::mem::replace(
@@ -257,6 +290,28 @@ pub(crate) fn repoint(keys: impl IntoIterator<Item = u64>, doc: &Arc<Py<Document
         // This may be the last reference if the handle is being freed right now.
         garbage.moved.push((home, generation, Arc::clone(doc)));
     }
+}
+
+/// Empties the home of the removed entry `key`'s handle, if it has one. Called with the entry's document locked,
+/// alongside the removal. The new generation stops a move that's about to settle the home from refilling it.
+pub(crate) fn remove(key: u64, garbage: &mut Garbage) {
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
+    let slots = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(home) = slots.get(&key).and_then(|slot| slot.home.upgrade()) else {
+        return;
+    };
+    let old = std::mem::replace(
+        &mut *home.place(),
+        Place {
+            ptr: Ptr::Gone,
+            generation,
+        },
+    );
+    garbage.old.push(old.ptr);
+}
+
+pub(crate) fn removed() -> PyErr {
+    PyRuntimeError::new_err("entry was removed")
 }
 
 pub(crate) fn stale() -> PyErr {
@@ -279,19 +334,55 @@ impl From<PyErr> for Fail {
     }
 }
 
-/// Runs `op` against the document `home` points at, again if the handle moved while `op` waited for the lock.
+thread_local! {
+    /// Edits made on this thread. Python callbacks run on the thread that called them, so an operation that sees this
+    /// change while it runs knows its own callbacks edited something.
+    static EDITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Records an edit on this thread. Every edit that can change what an operation planned from calls it.
+pub(crate) fn edited() {
+    EDITS.set(EDITS.get().wrapping_add(1));
+}
+
+/// How many times an operation starts over after its own Python callbacks (a type's decode or encode, `__eq__`,
+/// `__index__`) edited something. A callback that changes the document every time would otherwise loop forever. A
+/// change from another thread doesn't count: under contention an operation keeps retrying, as long as it takes.
+const RETRIES: usize = 64;
+
+/// Runs `attempt` until it returns something, giving up once its own callbacks have made it start over `RETRIES`
+/// times.
+pub(crate) fn retry<R>(mut attempt: impl FnMut() -> PyResult<Option<R>>) -> PyResult<R> {
+    let mut own = 0;
+    loop {
+        let before = EDITS.get();
+        if let Some(result) = attempt()? {
+            return Ok(result);
+        }
+        if EDITS.get() != before {
+            own += 1;
+            if own == RETRIES {
+                return Err(PyRuntimeError::new_err("the document kept changing during this edit"));
+            }
+        }
+    }
+}
+
+/// Runs `op` against the document `home` points at, again if the handle moved or the document changed while `op`
+/// ran.
 pub(crate) fn on_home<R>(
     py: Python<'_>,
     home: &Home,
     mut op: impl FnMut(&Py<Document>) -> Result<R, Fail>,
 ) -> PyResult<R> {
-    loop {
-        let doc = home.doc(py);
+    retry(|| {
+        // Only an entry's home empties, when the entry is removed.
+        let doc = home.doc(py).ok_or_else(removed)?;
         match op(&doc) {
-            Ok(result) => return Ok(result),
-            Err(Fail::Err(err)) => return Err(err),
-            Err(Fail::Missing(err)) if !home.moved_from(&doc) => return Err(err),
-            Err(Fail::Changed | Fail::Missing(_)) => {}
+            Ok(result) => Ok(Some(result)),
+            Err(Fail::Err(err)) => Err(err),
+            Err(Fail::Missing(err)) if !home.moved_from(&doc) => Err(err),
+            Err(Fail::Changed | Fail::Missing(_)) => Ok(None),
         }
-    }
+    })
 }

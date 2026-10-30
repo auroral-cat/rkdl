@@ -1,4 +1,6 @@
 import gc
+import subprocess
+import sys
 import weakref
 
 import pytest
@@ -193,3 +195,122 @@ def test_reference_counting_alone_frees_documents_and_handles():
         assert [r() for r in refs] == [None] * len(refs)
     finally:
         gc.enable()
+
+
+# A handle in a garbage cycle. The collector clears the cache's weakref to it before finalizers run, and the cache
+# used to treat the slot as taken until the handle was freed, so looking the node up from a finalizer spun forever.
+# Each case runs in a subprocess, so a hang fails the test instead of stopping the run. The old handle, which only a
+# finalizer can still reach, isn't the one lookups return any more.
+
+FINALIZER_CASES = {
+    "finalizer_looks_up_the_node": (
+        """
+class Wrapper:
+    def __init__(self, node):
+        self.node = node
+        self.me = self
+    def __del__(self):
+        print(doc["a"], doc["a"] is doc["a"])
+doc = rkdl.parse("a 1\\n")
+Wrapper(doc["a"])
+gc.collect()
+""",
+        "a 1 True",
+    ),
+    "finalizer_in_a_cycle_through_a_type": (
+        """
+class Spy:
+    def __del__(self):
+        print(self.doc["a"], self.doc["a"] is self.box[1])
+def make():
+    box = []
+    parser = rkdl.Parser(types=[rkdl.Type("t", int, decode=lambda v: (box, v)[1], encode=int)])
+    doc = parser.parse("a (t)1\\n")
+    spy = Spy()
+    spy.doc = doc
+    spy.box = box
+    box.extend([doc, doc["a"], spy])
+make()
+gc.collect()
+""",
+        "a (t)1 False",
+    ),
+    "resurrected_handle": (
+        """
+kept = []
+class Wrapper:
+    def __init__(self, node):
+        self.node = node
+        self.me = self
+    def __del__(self):
+        kept.append(self)
+doc = rkdl.parse("a 1\\nb 2\\n")
+Wrapper(doc["a"])
+gc.collect()
+print(kept[0].node, doc["a"], doc["a"] is kept[0].node, len(list(doc.children)))
+""",
+        "a 1 a 1 False 2",
+    ),
+    "resurrected_cycle_through_a_type": (
+        """
+saved = []
+class Spy:
+    def __del__(self):
+        saved.append(self.box)
+def make():
+    box = []
+    parser = rkdl.Parser(types=[rkdl.Type("t", int, decode=lambda v: (box, v)[1], encode=int)])
+    doc = parser.parse("a (t)1\\n")
+    spy = Spy()
+    spy.box = box
+    box.extend([doc, doc["a"], spy])
+make()
+gc.collect()
+doc, old, _ = saved[0]
+print(old.name, old.args[0], doc["a"] is old, doc["a"] == old)
+""",
+        "a 1 False True",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", FINALIZER_CASES)
+def test_finalizer_in_a_garbage_cycle_gets_a_fresh_handle(case):
+    code, output = FINALIZER_CASES[case]
+    command = [sys.executable, "-c", "import gc\nimport rkdl\n" + code]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == output
+
+
+def weakref_count():
+    return sum(isinstance(o, weakref.ReferenceType) for o in gc.get_objects())
+
+
+def test_cache_drops_the_slots_of_dead_handles():
+    # The cache used to sweep dead slots only when it doubled in size, keeping up to twice the peak.
+    doc = rkdl.parse("".join(f"n{i} {i}\n" for i in range(2000)))
+    gc.collect()
+    before = weakref_count()
+    nodes = list(doc.children)
+    entries = [n.args.entry(0) for n in nodes]
+    assert weakref_count() >= before + 4000
+    del nodes, entries
+    gc.collect()
+    assert weakref_count() <= before + 10
+
+
+def test_removed_entry_lets_go_of_its_document():
+    doc = rkdl.parse("a 1 k=2\n")
+    arg = doc["a"].args.entry(0)
+    prop = doc["a"].props.entry("k")
+    doc["a"].args.pop(0)
+    del doc["a"].props["k"]
+    doc_ref = weakref.ref(doc)
+    del doc
+    gc.collect()
+    assert doc_ref() is None
+    for entry in (arg, prop):
+        with pytest.raises(RuntimeError, match="entry was removed"):
+            entry.value  # noqa: B018
+        assert not [o for o in gc.get_referents(entry) if isinstance(o, rkdl.Document)]

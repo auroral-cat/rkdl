@@ -4,7 +4,7 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
-use crate::edit::{Item, Snapshot, chosen, edit, read};
+use crate::edit::{Item, Reads, Snapshot, chosen, edit, read};
 use crate::entry::{Entry, contents, new_entry, put_contents, store};
 use crate::index::{insert_at, not_in, pick_one, pick_slice};
 use crate::node::Node;
@@ -36,6 +36,7 @@ fn remove_args(py: Python<'_>, node: &Node, pick: impl Fn(&[EntryId]) -> PyResul
     edit(
         py,
         node,
+        Reads::Shape,
         |snapshot| pick(&arg_ids(&snapshot.items)),
         |mut target, ids| ids.into_iter().for_each(|id| target.remove(id)),
     )
@@ -64,6 +65,7 @@ fn insert_values(node: &Node, index: isize, new: &[Bound<'_, PyAny>]) -> PyResul
     edit(
         first.py(),
         node,
+        Reads::Shape,
         |snapshot| {
             let args = args(&snapshot.items);
             let at = match (args.get(insert_at(args.len(), index)), args.last()) {
@@ -122,6 +124,7 @@ impl Args {
         edit(
             value.py(),
             self.node.get(),
+            Reads::Shape,
             |snapshot| {
                 let item = arg(&snapshot.items, index)?;
                 let (value, ty) = values::from_python(value, item.ty.as_deref(), snapshot.types())?;
@@ -162,6 +165,7 @@ impl Args {
         edit(
             py,
             self.node.get(),
+            Reads::Values,
             |snapshot| {
                 let item = arg(&snapshot.items, index)?;
                 Ok((item.id, item.to_python(py, snapshot.types())?))
@@ -177,6 +181,7 @@ impl Args {
         edit(
             value.py(),
             self.node.get(),
+            Reads::Values,
             |snapshot| {
                 find(snapshot, value)?
                     .map(|item| item.id)
@@ -196,6 +201,7 @@ impl Args {
         edit(
             py,
             self.node.get(),
+            Reads::Shape,
             |snapshot| Ok(arg_ids(&snapshot.items)),
             |mut target, ids| {
                 let moved: Vec<_> = ids.iter().map(|&id| contents(target.entry_mut(id))).collect();

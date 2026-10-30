@@ -2,22 +2,17 @@ use std::sync::Arc;
 
 use kdl::{KdlEntry, KdlIdentifier, KdlValue};
 use pyo3::PyTraverseError;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
 
 use crate::document::{DocState, Document};
 use crate::edit::{Item, chosen, read};
-use crate::handles::{self, Fail, Home};
+use crate::handles::{self, Fail, Home, removed};
 use crate::index::{not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::tree::{EntryId, node_at_mut};
 use crate::values;
-
-fn removed() -> PyErr {
-    PyRuntimeError::new_err("entry was removed")
-}
 
 // Reading and writing a KdlEntry.
 
@@ -184,7 +179,9 @@ impl Entry {
                 store(entry, value, ty);
                 Ok(())
             })
-        })
+        })?;
+        handles::edited();
+        Ok(())
     }
 
     /// Setting it doesn't convert the value, so reading `value` afterwards raises if the contents don't fit.
@@ -195,7 +192,9 @@ impl Entry {
 
     #[setter]
     fn set_type(&self, py: Python<'_>, ty: Option<String>) -> PyResult<()> {
-        self.with_entry(py, |e| set_ty(e, ty))
+        self.with_entry(py, |e| set_ty(e, ty))?;
+        handles::edited();
+        Ok(())
     }
 
     /// `name, value = entry`.

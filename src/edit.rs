@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 use crate::document::{DocState, Document};
 use crate::entry::Entry;
-use crate::handles::{self, Fail, stale};
+use crate::handles::{self, Fail, Garbage, stale};
 use crate::node::Node;
 use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
@@ -37,10 +37,18 @@ impl Item {
         values::to_python(py, &self.value, self.ty.as_deref(), types)
     }
 
-    // Values may change between planning an edit and applying it. Which entries there are, their keys and their
-    // annotations may not, since the plan depends on them.
+    // Values may change between planning an edit and applying it, unless the plan read them. Which entries there are,
+    // their keys and their annotations may not, since every plan depends on them.
     fn same_shape(&self, other: &Item) -> bool {
         self.id == other.id && self.name == other.name && self.ty == other.ty
+    }
+
+    /// Compares floats by their bits, so a NaN is the same as itself and doesn't retry forever.
+    fn same_value(&self, other: &Item) -> bool {
+        match (&self.value, &other.value) {
+            (KdlValue::Float(a), KdlValue::Float(b)) => a.to_bits() == b.to_bits(),
+            (a, b) => a == b,
+        }
     }
 }
 
@@ -85,6 +93,7 @@ pub(crate) struct Target<'a> {
     kdl: &'a mut KdlNode,
     ids: &'a mut IdTree,
     node: NodeId,
+    garbage: &'a mut Garbage,
 }
 
 impl Target<'_> {
@@ -108,22 +117,34 @@ impl Target<'_> {
         self.ids.insert_entry(self.node, index);
     }
 
+    /// Removes the entry, and lets go of the document for its handle, which can only raise now.
     pub(crate) fn remove(&mut self, id: EntryId) {
         let index = self.index(id);
         self.kdl.entries_mut().remove(index);
         self.ids.remove_entry(id);
+        handles::remove(id.key(), self.garbage);
     }
 }
 
+/// What an edit's plan depends on, which must still hold when it's applied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reads {
+    /// Which entries there are, with their keys and annotations.
+    Shape,
+    /// Their values too, for a plan that returns or matches one.
+    Values,
+}
+
 /// Plans an edit from a snapshot of the node's entries, with Python available, then applies the plan under the
-/// lock. If the entries changed shape in between, it plans again.
+/// lock. If what the plan `reads` changed in between, it plans again.
 pub(crate) fn edit<P: Send, R: Send>(
     py: Python<'_>,
     node: &Node,
+    reads: Reads,
     mut plan: impl FnMut(&Snapshot) -> PyResult<P>,
     apply: impl Fn(Target<'_>, P) -> R + Sync,
 ) -> PyResult<R> {
-    handles::on_home(py, &node.home, |doc| {
+    let (result, garbage) = handles::on_home(py, &node.home, |doc| {
         let snapshot = snapshot(py, doc, node.id)?;
         let planned = plan(&snapshot)?;
         // A plan that can't be applied goes back out unapplied: it may hold Python objects, which are dropped only
@@ -133,21 +154,29 @@ pub(crate) fn edit<P: Send, R: Send>(
                 Ok(now) => now,
                 Err(fail) => return Err((fail, planned)),
             };
-            let same =
-                now.len() == snapshot.items.len() && now.iter().zip(&snapshot.items).all(|(a, b)| a.same_shape(b));
+            let same = now.len() == snapshot.items.len()
+                && now
+                    .iter()
+                    .zip(&snapshot.items)
+                    .all(|(a, b)| a.same_shape(b) && (reads == Reads::Shape || a.same_value(b)));
             if !same {
                 return Err((Fail::Changed, planned));
             }
             let path = s.ids.path(node.id).expect("found by items");
+            let mut garbage = Garbage::default();
             let target = Target {
                 kdl: node_at_mut(&mut s.kdl, &path),
                 ids: &mut s.ids,
                 node: node.id,
+                garbage: &mut garbage,
             };
-            Ok(apply(target, planned))
+            Ok((apply(target, planned), garbage))
         });
         applied.map_err(|(fail, _)| fail)
-    })
+    })?;
+    handles::edited();
+    garbage.release(py);
+    Ok(result)
 }
 
 /// Handles for the entries `choose` picks. If one of them leaves the document before its handle exists, the node
@@ -157,11 +186,9 @@ pub(crate) fn chosen<'py>(
     node: &Node,
     choose: impl Fn(&[Item]) -> PyResult<Vec<EntryId>>,
 ) -> PyResult<Vec<Bound<'py, Entry>>> {
-    loop {
+    handles::retry(|| {
         let snapshot = read(py, node)?;
         let ids = choose(&snapshot.items)?;
-        if let Some(found) = handles::publish_all(snapshot.doc.bind(py), &ids, Entry::handle)? {
-            return Ok(found);
-        }
-    }
+        handles::publish_all(snapshot.doc.bind(py), &ids, Entry::handle)
+    })
 }

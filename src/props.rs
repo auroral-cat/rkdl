@@ -4,7 +4,7 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::edit::{Item, Snapshot, chosen, edit, read};
+use crate::edit::{Item, Reads, Snapshot, chosen, edit, read};
 use crate::entry::{Entry, new_entry, store};
 use crate::node::Node;
 use crate::values;
@@ -57,6 +57,7 @@ impl Props {
         edit(
             value.py(),
             self.node.get(),
+            Reads::Shape,
             |snapshot| {
                 let found = last(&snapshot.items, key);
                 let (value, ty) = values::from_python(value, found.and_then(|i| i.ty.as_deref()), snapshot.types())?;
@@ -88,6 +89,7 @@ impl Props {
         edit(
             py,
             self.node.get(),
+            Reads::Values,
             |snapshot| {
                 last(&snapshot.items, key)
                     .map(|item| Ok((item.id, item.to_python(py, snapshot.types())?)))
@@ -132,6 +134,7 @@ impl Props {
         edit(
             py,
             self.node.get(),
+            Reads::Shape,
             |snapshot| last(&snapshot.items, &k).map(|i| i.id).ok_or_else(|| key_error(&k)),
             |mut target, id| target.remove(id),
         )
@@ -209,6 +212,7 @@ impl Props {
         edit(
             py,
             self.node.get(),
+            Reads::Shape,
             |snapshot| {
                 Ok(snapshot
                     .items
@@ -227,6 +231,7 @@ impl Props {
         edit(
             py,
             self.node.get(),
+            Reads::Values,
             |snapshot| {
                 let item = snapshot
                     .items

@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
 use crate::document::{DocState, Document, lock_both};
-use crate::handles::{self, Fail, Garbage, Home, stale};
+use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
 use crate::index::{insert_at, not_in, pick_one, pick_slice, position};
 use crate::layout::{self, Style};
 use crate::node::Node;
@@ -69,12 +69,10 @@ impl Owner {
         py: Python<'py>,
         choose: impl Fn(&[NodeId]) -> PyResult<Vec<NodeId>>,
     ) -> PyResult<Vec<Bound<'py, Node>>> {
-        loop {
+        handles::retry(|| {
             let (doc, ids) = self.ids(py)?;
-            if let Some(found) = handles::publish_all(doc.bind(py), &choose(&ids)?, Document::node_handle)? {
-                return Ok(found);
-            }
-        }
+            handles::publish_all(doc.bind(py), &choose(&ids)?, Document::node_handle)
+        })
     }
 }
 
@@ -119,17 +117,26 @@ fn style(s: &DocState, parent: Option<NodeId>) -> Style {
 
 // Structural edits.
 
-fn check_insertable(target: &Py<Document>, source: &Py<Document>) -> PyResult<()> {
-    if !source.get().home {
-        return Err(PyValueError::new_err(
-            "node is already in a document; detach it first (pop, remove, del) or insert node.copy()",
-        ));
+fn attached() -> PyErr {
+    PyValueError::new_err("node is already in a document; detach it first (pop, remove, del) or insert node.copy()")
+}
+
+/// Checks, under the lock of the node's private home `source`, that the node `id` is still the detached node there,
+/// its only top-level node. A node inside a detached node is in a document like any other.
+fn check_detached(id: NodeId, home: &Home, source_doc: &DocRef, source: &DocState) -> Result<(), Fail> {
+    if source.ids.top() == [id] {
+        return Ok(());
     }
-    // A detached node's home holds only that node's subtree, so the target block is inside the node.
-    if source.as_ptr() == target.as_ptr() {
-        return Err(PyValueError::new_err("can't insert a node inside itself"));
+    if source.ids.contains(id) {
+        return Err(attached().into());
     }
-    Ok(())
+    // Another thread inserted it first; the retry will find it attached. `on_doc` follows the target's home, not the
+    // node's, so this applies the `Fail::Missing` rule to the node's home itself.
+    Err(if home.moved_from(source_doc) {
+        Fail::Changed
+    } else {
+        Fail::Err(stale())
+    })
 }
 
 /// A private document for a node about to be taken out. It's made before locking, so the edit itself needs no
@@ -193,15 +200,23 @@ fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyRe
     let id = node.get().id;
     let home = &node.get().home;
     let garbage = owner.on_doc(py, |target, parent| {
-        let source = home.doc(py);
-        check_insertable(target, &source)?;
+        // Only a node's home, never an entry's, empties.
+        let source = home.doc(py).ok_or_else(stale)?;
+        if !source.get().home {
+            return Err(attached().into());
+        }
         let here = Arc::new(target.clone_ref(py));
         let replaced_home = match at {
             At::Replace(_) => Some(NewHome::new(py, target)?),
             At::Insert(_) => None,
         };
         lock_both(py, target.get(), source.get(), |t, s| -> Result<Garbage, Fail> {
-            let s = s.expect("checked that the documents differ");
+            let Some(s) = s else {
+                check_detached(id, home, &source, t)?;
+                // A detached node's home holds only that node's subtree, so the target block is inside the node.
+                return Err(PyValueError::new_err("can't insert a node inside itself").into());
+            };
+            check_detached(id, home, &source, s)?;
             let ids = block_ids(&t.ids, parent)?.ok_or_else(no_block)?;
             let (index, replaced) = match at {
                 At::Insert(index) => (insert_at(ids.len(), index), None),
@@ -210,15 +225,6 @@ fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyRe
                     (i, ids.get(i).copied())
                 }
             };
-            if s.ids.top() != [id] {
-                // Another thread inserted it first; the retry will find it attached. `on_doc` follows the target's
-                // home, not the node's, so this applies the `Fail::Missing` rule to the node's home itself.
-                return Err(if home.moved_from(&source) {
-                    Fail::Changed
-                } else {
-                    Fail::Err(stale())
-                });
-            }
             let style = style(t, parent);
             let mut garbage = Garbage::default();
             let kdl_node = s.kdl.nodes_mut().remove(0);
@@ -237,6 +243,7 @@ fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyRe
             Ok(garbage)
         })
     })?;
+    handles::edited();
     garbage.release(py);
     Ok(())
 }
@@ -282,6 +289,7 @@ fn take_out<'py>(
             }
             Ok(garbage)
         })?;
+        handles::edited();
         garbage.release(py);
         Ok(picked
             .into_iter()
@@ -315,6 +323,7 @@ pub(crate) fn open_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
             Ok(false)
         })
     })?;
+    handles::edited();
     if had_block {
         take_out(py, owner, take_all, false)?;
     }
@@ -343,7 +352,9 @@ fn reverse(py: Python<'_>, owner: &Owner) -> PyResult<()> {
             }
             Ok(())
         })
-    })
+    })?;
+    handles::edited();
+    Ok(())
 }
 
 // Lookups.
@@ -375,7 +386,7 @@ impl Key {
 pub(crate) fn lookup<'py>(owner: &Owner, key: &Bound<'py, PyAny>, first: bool) -> PyResult<Vec<Bound<'py, Node>>> {
     let py = key.py();
     let key = Key::extract(key)?;
-    loop {
+    handles::retry(|| {
         let (doc, found) = owner.read(py, |s, parent| {
             // No block means no children to match.
             let Some(ids) = block_ids(&s.ids, parent)? else {
@@ -390,10 +401,8 @@ pub(crate) fn lookup<'py>(owner: &Owner, key: &Bound<'py, PyAny>, first: bool) -
                 .map(|(&id, _)| id)
                 .collect())
         })?;
-        if let Some(found) = handles::publish_all(doc.bind(py), &found, Document::node_handle)? {
-            return Ok(found);
-        }
-    }
+        handles::publish_all(doc.bind(py), &found, Document::node_handle)
+    })
 }
 
 pub(crate) fn lookup_one<'py>(owner: &Owner, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {

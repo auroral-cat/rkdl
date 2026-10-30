@@ -141,6 +141,58 @@ def test_nodes_moving_both_ways_between_two_documents():
         assert str(rkdl.parse(str(doc))) == str(doc)
 
 
+def test_pop_and_a_concurrent_write_keep_both():
+    # Either order is fine: popping first returns 1 and the write lands on 2; writing first makes the pop return 99.
+    # Before pop checked the value it read, the write could land on the entry being popped and be lost.
+    for _ in range(ROUNDS):
+        node = rkdl.parse("n 1 2 k=1\n")["n"]
+
+        def write(node=node):
+            node.args[0] = 99
+            node.props["k"] = 99
+
+        def pop(node=node):
+            return node.args.pop(0), node.props.pop("k")
+
+        (arg, prop), _ = run(pop, write)
+        assert (arg, list(node.args)) in [(1, [99]), (99, [2])]
+        assert (prop, dict(node.props)) in [(1, {"k": 99}), (99, {})]
+
+
+def test_edits_keep_retrying_while_other_threads_move_the_node():
+    # An edit gives up only when its own callbacks keep changing the document. Other threads' changes, however many,
+    # just make it try again.
+    first = rkdl.parse("a 1 k=1\n")
+    second = rkdl.parse("")
+    node = first["a"]
+    done = threading.Event()
+    editors = ["first", "second"]  # each one still running
+
+    def bounce():
+        src, dst = (first, second) if len(first.children) else (second, first)
+        try:
+            dst.children.append(src.children.pop())
+        except IndexError:
+            pass  # the other bouncer took it first
+
+    def edit():
+        try:
+            for _ in range(ROUNDS):
+                node.args.append(2)
+                node.args.pop()
+                node.props["k"] = 2
+                node.props.pop("k", None)  # the other editor may have popped it
+            return ROUNDS
+        finally:
+            editors.pop()
+            if not editors:
+                done.set()
+
+    counts = run(until(done, bounce), until(done, bounce), edit, edit)
+    assert counts[2:] == [ROUNDS, ROUNDS]
+    assert str(node) == "a 1"
+
+
 def test_detached_nodes_inserted_into_each_other():
     # Each node's block lives in that node's own private document, so the two inserts lock the same two documents
     # in opposite roles. One wins, and the other finds it would put a node inside itself.
