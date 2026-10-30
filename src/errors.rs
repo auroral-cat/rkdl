@@ -11,6 +11,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::positions::locate_one;
+use crate::v1;
 
 create_exception!(
     rkdl,
@@ -48,7 +49,8 @@ create_exception!(
         "    path: The file the document was loaded from, or None if it didn't come from a named file.\n",
         "    line: The entry's line, as `entry.line` counts it, or None if it has no position.\n",
         "    column: The entry's column, as `entry.column` counts it, or None if it has no position.\n",
-        "    key: The entry's index in `node.args` (an int) or its property key (a str).",
+        "    key: The entry's index in `node.args` (an int) or its property key (a str).\n",
+        "    text: The entry as `str(entry)` gives it, key included for a property: `retries=(u8)300`.",
     )
 );
 
@@ -64,7 +66,8 @@ pub struct Diagnostic {
     message: String,
     /// A short note on the problem's span of text, if there is one.
     label: Option<String>,
-    /// A hint on how to fix it, if there is one.
+    /// A hint on how to fix it, if there is one. When the text there is a KDL v1 spelling, such as a bare `true`, it
+    /// starts by saying so and giving the v2 form: `this looks like KDL v1: in KDL v2 it's #true`.
     help: Option<String>,
     /// Where the problem starts, in characters from the start of the text.
     offset: usize,
@@ -112,7 +115,7 @@ impl Diagnostic {
 
 impl Diagnostic {
     /// Lines and columns count as `node.line` and `node.column` do.
-    fn from_kdl(input: &str, diag: &KdlDiagnostic) -> Self {
+    fn from_kdl(input: &str, diag: &KdlDiagnostic, help: Option<String>) -> Self {
         // kdl-rs spans are byte offsets into the UTF-8 input. Rounding them down to a character boundary means a span
         // that lands inside a character gives a slightly-off position instead of a panic.
         let start = input.floor_char_boundary(diag.span.offset());
@@ -121,7 +124,7 @@ impl Diagnostic {
         Diagnostic {
             message: diag.message.clone().unwrap_or_else(|| "unexpected error".into()),
             label: diag.label.clone(),
-            help: diag.help.clone(),
+            help,
             offset: input.get(..start).unwrap_or_default().chars().count(),
             length: input.get(start..end).unwrap_or_default().chars().count(),
             line: at.line as usize,
@@ -136,13 +139,15 @@ pub(crate) fn parse_error(py: Python<'_>, err: &KdlError) -> PyErr {
 
 /// `parse_error` for text read from `path`, which the report names.
 pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>) -> PyErr {
+    let helps: Vec<Option<String>> = err.diagnostics.iter().map(|d| help(&err.input, d)).collect();
     let diagnostics: Vec<Diagnostic> = err
         .diagnostics
         .iter()
-        .map(|d| Diagnostic::from_kdl(&err.input, d))
+        .zip(&helps)
+        .map(|(d, help)| Diagnostic::from_kdl(&err.input, d, help.clone()))
         .collect();
     let first = diagnostics.first().map(|d| (d.line, d.column, d.offset));
-    let report = report(err, path, first.map(|f| (f.0, f.1)));
+    let report = report(err, &helps, path, first.map(|f| (f.0, f.1)));
     let exc = ParseError::new_err(report);
     let value = exc.value(py);
     let set = value
@@ -157,13 +162,22 @@ pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>)
     }
 }
 
+/// kdl-rs's help, with a note first when the problem is a KDL v1 spelling, such as a bare `true`.
+fn help(input: &str, diag: &KdlDiagnostic) -> Option<String> {
+    let v1 = v1::hint(input, input.floor_char_boundary(diag.span.offset()));
+    match (v1, diag.help.clone()) {
+        (Some(v1), Some(theirs)) => Some(format!("{v1}\n{theirs}")),
+        (v1, theirs) => v1.or(theirs),
+    }
+}
+
 /// The exception's text: a summary line naming the file and the first problem's position, then each problem as its own
 /// miette report.
 ///
 /// Rendering kdl-rs's `KdlError` whole would show its diagnostics as miette's "related" reports, each behind a bare
 /// `Error: ` line. Rendering them one by one gives every problem the same shape, with only a blank line between them.
 /// The summary has no `×`, so a traceback's last line reads `rkdl.ParseError: config.kdl:4:9: ...`.
-fn report(err: &KdlError, path: Option<&str>, first: Option<(usize, usize)>) -> String {
+fn report(err: &KdlError, helps: &[Option<String>], path: Option<&str>, first: Option<(usize, usize)>) -> String {
     let at = match (path, first) {
         (Some(path), Some((line, column))) => format!("{path}:{line}:{column}: "),
         (Some(path), None) => format!("{path}: "),
@@ -172,9 +186,10 @@ fn report(err: &KdlError, path: Option<&str>, first: Option<(usize, usize)>) -> 
     };
     let source = Source::new(err, path);
     let mut parts = vec![format!("{at}{err}")];
-    parts.extend(err.diagnostics.iter().map(|diagnostic| {
+    parts.extend(err.diagnostics.iter().zip(helps).map(|(diagnostic, help)| {
         render(&Located {
             diagnostic,
+            help: help.as_deref(),
             source: &source,
         })
     }));
@@ -235,6 +250,8 @@ impl SourceCode for Source {
 /// them does.
 struct Located<'a> {
     diagnostic: &'a KdlDiagnostic,
+    /// kdl-rs's help, or rkdl's in its place.
+    help: Option<&'a str>,
     source: &'a Source,
 }
 
@@ -252,7 +269,7 @@ impl fmt::Display for Located<'_> {
 
 impl std::error::Error for Located<'_> {}
 
-// Everything but the source is kdl-rs's.
+// Everything but the source and the help is kdl-rs's.
 impl miette::Diagnostic for Located<'_> {
     fn source_code(&self) -> Option<&dyn SourceCode> {
         Some(self.source)
@@ -263,7 +280,7 @@ impl miette::Diagnostic for Located<'_> {
     }
 
     fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
-        miette::Diagnostic::help(self.diagnostic)
+        self.help.map(|help| Box::new(help) as Box<dyn fmt::Display>)
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {

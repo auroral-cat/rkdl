@@ -213,3 +213,74 @@ def test_parse_errors_count_lines_as_node_line_does(tmp_path, bad, good, at):
     assert str(loaded).splitlines()[0] == f"{path}:{line}:{column}: Failed to parse KDL document"
     # miette's snippet header agrees, though the snippet under it only breaks lines at LF and CRLF.
     assert f"╭─[{path}:{line}:{column}]" in str(loaded)
+
+
+# KDL v1 spellings: the diagnostic's help says the file looks like v1 and gives the v2 form.
+
+V1 = {
+    "bare true": ("node true", "#true"),
+    "bare false": ("node 1 false", "#false"),
+    "bare null as a property": ("node key=null", "#null"),
+    "bare null after an annotation": ("node (t)null", "#null"),
+    "raw string": ('node r"C:\\path"', '#"C:\\path"#'),
+    "raw string with hashes": ('node r#"say "hi""#', '#"say "hi""#'),
+    "escaped slash": ('node "a\\/b"', '"a/b"'),
+}
+
+
+@pytest.mark.parametrize("name", V1)
+def test_a_v1_spelling_gets_a_help_with_the_v2_form(name):
+    text, v2 = V1[name]
+    first = parse_error(text).diagnostics[0]
+    assert first.help.splitlines()[0] == f"this looks like KDL v1: in KDL v2 it's {v2}"
+    rkdl.parse(f"node {v2}")
+
+
+@pytest.mark.parametrize("name", V1)
+def test_the_v1_help_leaves_the_rest_of_the_diagnostic_alone(name):
+    text, _ = V1[name]
+    first = parse_error(text).diagnostics[0]
+    assert first.message in ("Expected identifier string", "Expected quoted string")
+    assert first.label in ("not identifier string", "not quoted string")
+
+
+def test_kdl_rs_help_stays_after_the_v1_help():
+    first = parse_error('node r"raw"').diagnostics[0]
+    assert first.help.splitlines()[1].startswith("A valid value was partially parsed")
+
+
+def test_the_v1_help_is_in_the_report():
+    err = parse_error("node {\n    enabled true\n}\n")
+    assert str(err).splitlines()[0] == "2:13: Failed to parse KDL document"
+    assert "  help: this looks like KDL v1: in KDL v2 it's #true" in str(err).splitlines()
+
+
+def test_a_long_or_multiline_raw_string_gets_the_rule_instead_of_the_v2_form():
+    long = parse_error('node r"' + "x" * 50 + '"').diagnostics[0]
+    assert (
+        long.help.splitlines()[0] == 'this looks like KDL v1: in KDL v2 raw strings are written #"..."#, without the r'
+    )
+    multiline = parse_error('node r"one\ntwo"').diagnostics[0]
+    assert multiline.help.splitlines()[0] == long.help.splitlines()[0]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "true 1",  # a node name: v1 didn't allow it either
+        "node true=1",  # a property key
+        "node (true)1",  # a type annotation
+        "node { null; }",
+        'node "a\\q"',  # a bad escape, not \/
+        "node 0b2",
+    ],
+)
+def test_other_errors_get_no_v1_help(text):
+    for diagnostic in parse_error(text).diagnostics:
+        assert "KDL v1" not in (diagnostic.help or "")
+
+
+def test_v2_files_with_the_same_words_parse():
+    doc = rkdl.parse('"true" #true r="a\\\\b" "true"=#null null-ish "a/b" #"r"x"#\n')
+    assert doc["true"].args == [True, "null-ish", "a/b", 'r"x']
+    assert doc["true"].props == {"r": "a\\b", "true": None}

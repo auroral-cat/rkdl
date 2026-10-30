@@ -100,12 +100,14 @@ class ReadError(ValueError):
         line: The entry's line, as `entry.line` counts it, or None if it has no position.
         column: The entry's column, as `entry.column` counts it, or None if it has no position.
         key: The entry's index in `node.args` (an int) or its property key (a str).
+        text: The entry as `str(entry)` gives it, key included for a property: `retries=(u8)300`.
     """
 
     path: str | None
     line: int | None
     column: int | None
     key: int | str
+    text: str
 
 @final
 class Diagnostic:
@@ -133,7 +135,9 @@ class Diagnostic:
         """A short note on the problem's span of text, if there is one."""
     @property
     def help(self) -> str | None:
-        """A hint on how to fix it, if there is one."""
+        """A hint on how to fix it, if there is one. When the text there is a KDL v1 spelling, such as a bare `true`, it
+        starts by saying so and giving the v2 form: `this looks like KDL v1: in KDL v2 it's #true`.
+        """
     @property
     def offset(self) -> int:
         """Where the problem starts, in characters from the start of the text."""

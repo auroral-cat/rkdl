@@ -276,11 +276,13 @@ impl Props {
                 // A Value isn't what reading the property gives, so it returns the value as it now reads.
                 let found = if default.bind(py).is_instance_of::<Value>() {
                     let Encoded { value, ty, repr } = &encoded;
+                    let written = new_entry(Some(key.clone()), encoded.clone()).to_string();
                     let place = Place {
                         node: &snapshot.node,
                         slot: Slot::Prop(&key),
                         pos: None,
                         path: None,
+                        text: written.trim(),
                     };
                     values::to_python_spelled(
                         py,

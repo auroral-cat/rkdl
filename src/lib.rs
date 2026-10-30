@@ -15,6 +15,7 @@ mod positions;
 mod props;
 mod spelling;
 mod tree;
+mod v1;
 mod values;
 
 #[pyo3::pymodule]

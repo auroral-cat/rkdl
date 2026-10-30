@@ -24,6 +24,9 @@ pub(crate) struct Item {
     /// The value's text in the file, kept only for annotated values, which are the ones whose text can matter to
     /// reading them (`decimal64`) or to the error saying they can't be read.
     text: Option<String>,
+    /// The entry as `str(entry)` gives it, for the error when its value can't be read: kept, like `text`, only for
+    /// annotated values, the only ones that can fail to read.
+    written: Option<String>,
     /// The node's name and, for an argument, its index in `node.args`: where the entry is, for the error when its
     /// value can't be read. With the entry's position in the file it was parsed from, if it has one, and that file's
     /// path, if it has one.
@@ -41,6 +44,7 @@ impl Item {
             value: entry.value().clone(),
             ty: entry.ty().map(|t| t.value().to_owned()),
             text: entry.ty().and(entry.format()).map(|f| f.value_repr.clone()),
+            written: entry.ty().map(|_| entry.to_string().trim().to_owned()),
             node: Arc::clone(node),
             arg,
             pos: s.ids.pos(id.key()),
@@ -58,6 +62,7 @@ impl Item {
             slot: self.key().map_or(Slot::Arg(self.arg), Slot::Prop),
             pos: self.pos,
             path: self.path.as_deref(),
+            text: self.written.as_deref().unwrap_or_default(),
         };
         values::to_python_spelled(
             py,

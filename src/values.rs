@@ -276,6 +276,8 @@ pub(crate) struct Place<'a> {
     /// The entry's position in the file, which goes in front as `ParseError`'s does, with `path` if there is one.
     pub(crate) pos: Option<Pos>,
     pub(crate) path: Option<&'a str>,
+    /// The entry as `str(entry)` gives it: `retries=(u8)300`.
+    pub(crate) text: &'a str,
 }
 
 pub(crate) enum Slot<'a> {
@@ -350,7 +352,7 @@ pub(crate) fn to_python_spelled(
 /// `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`, in the same words as a write
 /// that doesn't fit. Without a position, the place starts at the node's name.
 ///
-/// With a place it's a `ReadError` carrying the place's `path`, `line`, `column` and `key`; without one, a plain
+/// With a place it's a `ReadError` carrying the place's `path`, `line`, `column`, `key` and `text`; without one, a plain
 /// `ValueError`.
 fn unreadable(
     py: Python<'_>,
@@ -370,6 +372,7 @@ fn unreadable(
     exc.setattr("path", place.path)?;
     exc.setattr("line", place.pos.map(|p| p.line))?;
     exc.setattr("column", place.pos.map(|p| p.column))?;
+    exc.setattr("text", place.text)?;
     match place.slot {
         Slot::Arg(index) => exc.setattr("key", index)?,
         Slot::Prop(key) => exc.setattr("key", key)?,
@@ -401,6 +404,7 @@ fn add_note(py: Python<'_>, err: &PyErr, note: &str) -> PyResult<()> {
 
 /// What writing a Python value stores: the KDL value, its annotation, and the text to print it as when the value
 /// alone doesn't say (a `decimal64`'s digits, which an f64 can't hold).
+#[derive(Clone)]
 pub(crate) struct Encoded {
     pub(crate) value: KdlValue,
     pub(crate) ty: Option<String>,

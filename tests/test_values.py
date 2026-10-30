@@ -970,6 +970,31 @@ def test_a_read_error_pickles_with_its_place_and_notes(tmp_path, kind):
     assert getattr(again, "__notes__", None) == getattr(err, "__notes__", None)
 
 
+def test_a_read_error_has_the_entry_as_written(tmp_path):
+    path = tmp_path / "config.kdl"
+    path.write_text("server 1 ( u8 )300 retries = (u8)0x1FF\n")
+    server = rkdl.load(path)["server"]
+    arg = read_error(lambda n: n.args[1], server)
+    assert arg.text == "( u8 )300" == str(server.args.entry(1))
+    prop = read_error(lambda n: n.props["retries"], server)
+    assert prop.text == "retries = (u8)0x1FF" == str(server.props.entry("retries"))
+
+
+def test_a_read_error_on_a_built_node_has_the_text_it_would_print():
+    doc = rkdl.Parser(types=[STRICT_CELSIUS]).parse("")
+    built = rkdl.Node("n", rkdl.Value("hot", type="celsius"), k=rkdl.Value("cold", type="celsius"))
+    doc.children.append(built)
+    assert read_error(lambda n: n.args[0], built).text == "(celsius)hot" == str(built.args.entry(0))
+    assert read_error(lambda n: n.props["k"], built).text == "k=(celsius)cold" == str(built.props.entry("k"))
+
+
+@pytest.mark.parametrize("kind", BAD_VALUES)
+def test_a_read_errors_text_survives_pickling(kind):
+    bad, types, _ = BAD_VALUES[kind]
+    err = read_error(lambda n: n.props["k"], rkdl.Parser(types=types).parse(f"server k={bad}\n")["server"])
+    assert pickle.loads(pickle.dumps(err)).text == err.text == f"k={bad}"
+
+
 def test_writes_and_entry_type_raise_plain_value_errors():
     # Both are about what the program asked for, not the file.
     n = rkdl.parse("n (u8)7 300\n")["n"]
