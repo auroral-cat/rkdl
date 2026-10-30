@@ -59,29 +59,44 @@ pub struct Document {
     pub(crate) types: Py<TypeRegistry>,
     /// A detached node's private one-node document. Never handed to Python as a Document.
     pub(crate) home: bool,
+    /// The file `load` read the text from.
+    path: Option<String>,
 }
 
 impl Document {
+    /// A document that wasn't parsed from text, so nothing in it has a position.
     pub(crate) fn new(kdl: KdlDocument, types: Py<TypeRegistry>) -> Self {
+        let ids = IdTree::from_document(&kdl);
+        Document::parsed(kdl, ids, types, None)
+    }
+
+    /// A document parsed from text: `ids` holds the positions, and `path` names the file the text came from.
+    pub(crate) fn parsed(kdl: KdlDocument, ids: IdTree, types: Py<TypeRegistry>, path: Option<String>) -> Self {
         let eol = layout::line_ending(&kdl);
-        Document::build(kdl, types, false, eol)
+        Document::build(kdl, ids, types, false, eol, path)
     }
 
     /// A private home for a detached node, empty until `fill` puts the node in. It starts empty so the caller can
     /// create its Python object before locking anything.
     pub(crate) fn empty_home(types: Py<TypeRegistry>) -> Self {
-        Document::build(KdlDocument::new(), types, true, "\n")
+        let kdl = KdlDocument::new();
+        let ids = IdTree::from_document(&kdl);
+        Document::build(kdl, ids, types, true, "\n", None)
     }
 
-    fn build(kdl: KdlDocument, types: Py<TypeRegistry>, home: bool, eol: &'static str) -> Self {
+    fn build(
+        kdl: KdlDocument,
+        ids: IdTree,
+        types: Py<TypeRegistry>,
+        home: bool,
+        eol: &'static str,
+        path: Option<String>,
+    ) -> Self {
         Document {
-            state: Mutex::new(DocState {
-                ids: IdTree::from_document(&kdl),
-                kdl,
-                eol,
-            }),
+            state: Mutex::new(DocState { kdl, ids, eol }),
             types,
             home,
+            path,
         }
     }
 
@@ -151,12 +166,23 @@ impl Document {
 
     // The copy has the same types.
     /// Returns a copy that shares nothing with this document.
+    ///
+    /// The copy wasn't parsed or loaded, so its nodes and entries have no positions and its `path` is None.
     fn copy(&self, py: Python<'_>) -> PyResult<Document> {
         let (kdl, eol) = self.with_state(py, |s| {
             let deep = parser::too_deep_for_the_stack(s.kdl.nodes());
             parser::recursing(deep, || s.kdl.clone()).map(|kdl| (kdl, s.eol))
         })?;
-        Ok(Document::build(kdl, self.types.clone_ref(py), false, eol))
+        let ids = IdTree::from_document(&kdl);
+        Ok(Document::build(kdl, ids, self.types.clone_ref(py), false, eol, None))
+    }
+
+    /// The file `load` read the document from, or None if it didn't come from a named file.
+    ///
+    /// With a node's or entry's `line` and `column`, it makes a message like `config.kdl:12:5: unknown key`.
+    #[getter]
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
     }
 
     fn __copy__(&self, py: Python<'_>) -> PyResult<Document> {

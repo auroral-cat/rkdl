@@ -16,6 +16,7 @@ use crate::errors::parse_error_in;
 use crate::format::Formatter;
 use crate::layout;
 use crate::node::{self, Node, Spec};
+use crate::tree::IdTree;
 use crate::values::{Type, TypeRegistry};
 
 /// Parses KDL text into documents, with custom types and formatting.
@@ -88,14 +89,20 @@ impl Parser {
     /// `path` is the file the text came from, for the `ParseError`.
     fn parse_from(&self, py: Python<'_>, text: &str, path: Option<&str>) -> PyResult<Document> {
         let formatter = self.formatter.as_ref().map(Py::get);
-        let kdl = py
+        let (kdl, ids) = py
             .detach(|| on_big_stack(|| parse_text(text, formatter)))?
             .map_err(|e| parse_error_in(py, &e, path))?;
-        Ok(Document::new(kdl, self.types.clone_ref(py)))
+        Ok(Document::parsed(
+            kdl,
+            ids,
+            self.types.clone_ref(py),
+            path.map(str::to_owned),
+        ))
     }
 }
 
-fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<KdlDocument, KdlError> {
+/// The document, and its ids with every node's and entry's position in `text`.
+fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<(KdlDocument, IdTree), KdlError> {
     let scan = prescan::scan(text);
     if let Some(refusal) = scan.refusal {
         return Err(refused(text, refusal));
@@ -106,12 +113,14 @@ fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<KdlDocument, 
     if scan.broke_at.is_none() {
         blocks::restore(text, &mut kdl, &scan.closes);
     }
+    // Positions come from the spans, which say where things were in `text`, so they're read before formatting.
+    let ids = IdTree::from_parse(&kdl, text);
     // Formatting before the Document exists is the same as doc.fmt() but needs no lock.
     if let Some(formatter) = formatter {
         let eol = layout::line_ending(&kdl);
         formatter.apply(&mut kdl, eol);
     }
-    Ok(kdl)
+    Ok((kdl, ids))
 }
 
 /// The prescan's refusal as a kdl-rs error, so it reaches Python as a `ParseError` like any other.

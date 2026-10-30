@@ -13,6 +13,7 @@ use crate::document::Document;
 use crate::entry::{Entries, new_entry};
 use crate::handles::{self, Fail, Home, stale};
 use crate::parser;
+use crate::positions::Pos;
 use crate::props::{self, Props};
 use crate::spelling;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
@@ -57,6 +58,19 @@ impl Node {
                 let path = s.ids.path(id).ok_or_else(|| Fail::Missing(stale()))?;
                 let f = f.take().expect("runs once it finds the node");
                 Ok(f(node_at_mut(&mut s.kdl, &path)))
+            })
+        })
+    }
+
+    /// Where the node was in the text its document was parsed from, if the parse made it.
+    fn pos(&self, py: Python<'_>) -> PyResult<Option<Pos>> {
+        let id = self.id;
+        handles::on_home(py, &self.home, |doc| {
+            doc.get().with_state(py, |s| {
+                if !s.ids.contains(id) {
+                    return Err(Fail::Missing(stale()));
+                }
+                Ok(s.ids.pos(id.key()))
             })
         })
     }
@@ -213,6 +227,23 @@ impl Node {
                 *n.ty_mut() = new;
             }
         })
+    }
+
+    /// The line the node was on in the file, starting at 1, or None if the node didn't come from parsing.
+    ///
+    /// It's where the node was when its document was parsed: edits don't change it, as they don't change the file
+    /// until it's written. The position is the start of the node's type annotation if it has one, otherwise of its
+    /// name. Moving the node within its document, or detaching it, keeps the position. A node built with `Node(...)`,
+    /// a `copy()`, and a node moved into another document, whose file this isn't, have None.
+    #[getter]
+    fn line(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        Ok(self.pos(py)?.map(|p| p.line))
+    }
+
+    /// The column the node started at, counted in characters from 1, or None. See `line`.
+    #[getter]
+    fn column(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        Ok(self.pos(py)?.map(|p| p.column))
     }
 
     /// The arguments, as a live list of values.

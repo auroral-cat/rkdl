@@ -298,8 +298,17 @@ class Document:
 
         Takes the same arguments as `Node`. The node isn't added to the document.
         """
+    @property
+    def path(self) -> str | None:
+        """The file `load` read the document from, or None if it didn't come from a named file.
+
+        With a node's or entry's `line` and `column`, it makes a message like `config.kdl:12:5: unknown key`.
+        """
     def copy(self) -> Document:
-        """Returns a copy that shares nothing with this document."""
+        """Returns a copy that shares nothing with this document.
+
+        The copy wasn't parsed or loaded, so its nodes and entries have no positions and its `path` is None.
+        """
     def iter(self, key: _Key | None = None) -> Iterator[Node]:
         """Iterates over every node in the document, at any depth, depth first in file order.
 
@@ -383,6 +392,18 @@ class Node:
         """The node's type annotation, or None. Setting None removes it."""
     @type.setter
     def type(self, value: str | None) -> None: ...
+    @property
+    def line(self) -> int | None:
+        """The line the node was on in the file, starting at 1, or None if the node didn't come from parsing.
+
+        It's where the node was when its document was parsed: edits don't change it, as they don't change the file
+        until it's written. The position is the start of the node's type annotation if it has one, otherwise of its
+        name. Moving the node within its document, or detaching it, keeps the position. A node built with `Node(...)`,
+        a `copy()`, and a node moved into another document, whose file this isn't, have None.
+        """
+    @property
+    def column(self) -> int | None:
+        """The column the node started at, counted in characters from 1, or None. See `line`."""
     @property
     def args(self) -> Args:
         """The arguments, as a live list of values.
@@ -491,6 +512,18 @@ class Entry:
         """
     @value.setter
     def value(self, value: object) -> None: ...
+    @property
+    def line(self) -> int | None:
+        """The line the entry was on in the file, starting at 1, or None if it didn't come from parsing.
+
+        It's where the entry was when its document was parsed: edits don't change it, writing a new value included,
+        as they don't change the file until it's written. The position is the entry's first character: a property's
+        key, or an argument's type annotation or value. An entry added after parsing has None, and so does every entry
+        of a node that has None.
+        """
+    @property
+    def column(self) -> int | None:
+        """The column the entry started at, counted in characters from 1, or None. See `line`."""
     @property
     def type(self) -> str | None:
         """The type annotation, or None. Setting None removes it.

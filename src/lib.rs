@@ -10,6 +10,7 @@ mod index;
 mod layout;
 mod node;
 mod parser;
+mod positions;
 mod props;
 mod spelling;
 mod tree;
