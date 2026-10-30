@@ -159,6 +159,8 @@ pub(crate) fn item(s: &DocState, id: EntryId) -> Result<Item, Fail> {
 /// A node's entries in file order, and the document they were read from.
 pub(crate) struct Snapshot {
     pub(crate) doc: Py<Document>,
+    /// The node's name, for the error when a value can't be read.
+    pub(crate) node: Arc<str>,
     pub(crate) items: Vec<Item>,
 }
 
@@ -170,9 +172,14 @@ impl Snapshot {
 
 /// Reads the node's entries from `doc`, once. The caller runs it under `on_home`, which retries.
 fn snapshot(py: Python<'_>, doc: &Py<Document>, node: NodeId) -> Result<Snapshot, Fail> {
-    let items = doc.get().with_state(py, |s| items(s, node))?;
+    let (name, items) = doc.get().with_state(py, |s| {
+        let items = items(s, node)?;
+        let path = s.ids.path(node).expect("found by items");
+        Ok::<_, Fail>((Arc::from(node_at(&s.kdl, &path).name().value()), items))
+    })?;
     Ok(Snapshot {
         doc: doc.clone_ref(py),
+        node: name,
         items,
     })
 }

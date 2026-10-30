@@ -330,3 +330,11 @@ def test_an_unknown_annotation_stays_over_a_non_plain_value(value, expected):
     doc = rkdl.Parser(types=[CELSIUS]).parse("n (mine)1\n")
     doc["n"].args[0] = value
     assert str(doc) == expected
+
+
+def test_setdefault_names_the_property_when_its_value_cant_be_read_back():
+    # Celsius(3) encodes to the int 3, which strict_celsius refuses to decode.
+    doc = rkdl.Parser(types=[CELSIUS]).parse("server\n")
+    with pytest.raises(ValueError, match="^" + re.escape("server prop k: 3 doesn't fit (celsius): its decode raised")):
+        doc["server"].props.setdefault("k", Value(Celsius(3), type="celsius"))
+    assert str(doc) == "server\n"

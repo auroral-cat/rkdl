@@ -9,7 +9,7 @@ use crate::edit::{Item, Reads, Snapshot, chosen, edit, read};
 use crate::entry::{Entry, new_entry, store};
 use crate::node::Node;
 use crate::tree::EntryId;
-use crate::values::{self, Encoded};
+use crate::values::{self, Encoded, Place, Slot};
 
 /// The entry `props[key]` reads, writes and deletes: the last one with that key, which is `KdlNode::entry`'s rule.
 /// Deleting doesn't use `KdlNode::remove`, which takes the first match and compares key spellings, so it never finds a
@@ -276,7 +276,18 @@ impl Props {
                 // A Value isn't what reading the property gives, so it returns the value as it now reads.
                 let found = if default.bind(py).is_instance_of::<Value>() {
                     let Encoded { value, ty, repr } = &encoded;
-                    values::to_python_spelled(py, value, repr.as_deref(), ty.as_deref(), snapshot.types())?
+                    let place = Place {
+                        node: &snapshot.node,
+                        slot: Slot::Prop(&key),
+                    };
+                    values::to_python_spelled(
+                        py,
+                        value,
+                        repr.as_deref(),
+                        ty.as_deref(),
+                        snapshot.types(),
+                        Some(&place),
+                    )?
                 } else {
                     default.clone_ref(py)
                 };
