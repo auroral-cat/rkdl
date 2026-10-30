@@ -32,6 +32,26 @@ create_exception!(
     )
 );
 
+create_exception!(
+    rkdl,
+    ReadError,
+    PyValueError,
+    concat!(
+        "A value in the document doesn't fit its type annotation, such as `(u8)300`.\n",
+        "\n",
+        "`str(error)` is one line for whoever wrote the file, starting as `ParseError`'s first line does when the entry\n",
+        "has a position: `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`. A custom\n",
+        "Type's decode exception is the `__cause__`. Writing a value that doesn't fit raises a plain `ValueError`\n",
+        "instead: that's about the program's value, not the file.\n",
+        "\n",
+        "Attributes:\n",
+        "    path: The file the document was loaded from, or None if it didn't come from a named file.\n",
+        "    line: The entry's line, as `entry.line` counts it, or None if it has no position.\n",
+        "    column: The entry's column, as `entry.column` counts it, or None if it has no position.\n",
+        "    key: The entry's index in `node.args` (an int) or its property key (a str).",
+    )
+);
+
 // It can be built and pickled, so a `ParseError` holding some can cross a process boundary.
 /// One problem found while parsing.
 ///

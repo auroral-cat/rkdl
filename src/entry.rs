@@ -235,10 +235,12 @@ impl Entry {
     /// custom Type) isn't checked: it stays, over the value's KDL text.
     ///
     /// Raises:
-    ///     ValueError: The value doesn't fit its annotation, or the new value doesn't fit it, like 300, 3.5 or
-    ///         "weekly" written over `(u8)`. Reading says where the entry was, as `ParseError` does:
-    ///         `config.kdl:2:9: inner prop retries: 300 doesn't fit (u8): out of range 0..=255`. An exception
-    ///         from a custom Type's decode is the `__cause__`. A write that raises doesn't change the document.
+    ///     ReadError: The value doesn't fit its annotation, like `(u8)300`. It says where the entry was, as
+    ///         `ParseError` does: `config.kdl:2:9: inner prop retries: 300 doesn't fit (u8): out of range 0..=255`,
+    ///         and has `path`, `line`, `column` and `key` attributes. An exception from a custom Type's decode is
+    ///         the `__cause__`.
+    ///     ValueError: The new value doesn't fit the annotation, like 300, 3.5 or "weekly" written over `(u8)`. A
+    ///         write that raises doesn't change the document.
     ///     TypeError: The new value can't be converted to KDL, whatever the annotation: its class isn't one rkdl
     ///         or a custom Type writes.
     #[getter]

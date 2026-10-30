@@ -10,7 +10,7 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString, PyType};
 use pyo3::{PyTraverseError, PyTypeInfo};
 
 use crate::annotated::Value;
-use crate::errors::parse_error;
+use crate::errors::{ReadError, parse_error};
 use crate::positions::Pos;
 
 // Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
@@ -23,9 +23,10 @@ use crate::positions::Pos;
 ///     name: The annotation, without parentheses: `"celsius"` for `(celsius)22.5`.
 ///     cls: The Python class of the values. Writing an instance of it annotates the entry with `name`.
 ///     decode: Turns the plain value from the document (a str, int, float, bool or None) into a Python value.
-///         An exception it raises means the value doesn't fit: reading it raises `ValueError`, with that
+///         An exception it raises means the value doesn't fit: reading it raises `ReadError`, with that
 ///         exception as the `__cause__`.
-///     encode: Turns an instance of `cls` into a plain value to write.
+///     encode: Turns an instance of `cls` into a plain value to write. A plain value written over the annotation is
+///         stored as `encode(decode(value))`, so the file holds the Type's own form.
 ///
 /// Raises:
 ///     TypeError: `decode` or `encode` isn't callable.
@@ -303,9 +304,10 @@ impl fmt::Display for Place<'_> {
 /// one, and where the entry is, for the error. `decimal64` and `decimal128` read their digits from the text, since the
 /// parsed value is only an f64.
 ///
-/// A value that doesn't fit raises `ValueError`, whose message is meant for whoever wrote the file: `config.kdl:2:9:
-/// server prop retries: 300 doesn't fit (u8): out of range 0..=255`, starting the way `ParseError`'s first line does.
-/// An `Exception` from a custom decode is its `__cause__`.
+/// A value that doesn't fit raises `rkdl.ReadError`, whose message is meant for whoever wrote the file:
+/// `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`, starting the way `ParseError`'s
+/// first line does, and whose attributes say where `place` is. With no place, as when `entry.type` is set, it's a
+/// plain `ValueError`: the program asked for the annotation. An `Exception` from a custom decode is its `__cause__`.
 /// Anything else a decode raises, such as `KeyboardInterrupt`, propagates.
 pub(crate) fn to_python_spelled(
     py: Python<'_>,
@@ -327,7 +329,7 @@ pub(crate) fn to_python_spelled(
                 Ok(decoded) => Ok(decoded.unbind()),
                 Err(err) if err.is_instance_of::<PyException>(py) => {
                     let reason = decode_raised(py, &err)?;
-                    let refused = unreadable(ty, value, text, &reason, place);
+                    let refused = unreadable(py, ty, value, text, &reason, place)?;
                     refused.set_cause(py, Some(err));
                     Err(refused)
                 }
@@ -337,7 +339,7 @@ pub(crate) fn to_python_spelled(
         Some(Converter::Builtin(b)) => match decode_builtin(py, b, value, text) {
             Ok(decoded) => Ok(decoded),
             Err(reason) => {
-                let refused = unreadable(ty, value, text, &reason, place);
+                let refused = unreadable(py, ty, value, text, &reason, place)?;
                 add_note(py, &refused, &override_hint(ty, value))?;
                 Err(refused)
             }
@@ -347,10 +349,32 @@ pub(crate) fn to_python_spelled(
 
 /// `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`, in the same words as a write
 /// that doesn't fit. Without a position, the place starts at the node's name.
-fn unreadable(ty: &str, value: &KdlValue, text: Option<&str>, reason: &str, place: Option<&Place<'_>>) -> PyErr {
+///
+/// With a place it's a `ReadError` carrying the place's `path`, `line`, `column` and `key`; without one, a plain
+/// `ValueError`.
+fn unreadable(
+    py: Python<'_>,
+    ty: &str,
+    value: &KdlValue,
+    text: Option<&str>,
+    reason: &str,
+    place: Option<&Place<'_>>,
+) -> PyResult<PyErr> {
     let text = text.map_or_else(|| canonical_repr(value), str::to_owned);
-    let place = place.map_or_else(String::new, |place| format!("{place}: "));
-    PyValueError::new_err(format!("{place}{text} doesn't fit {}: {reason}", annotation(ty)))
+    let core = format!("{text} doesn't fit {}: {reason}", annotation(ty));
+    let Some(place) = place else {
+        return Ok(PyValueError::new_err(core));
+    };
+    let refused = ReadError::new_err(format!("{place}: {core}"));
+    let exc = refused.value(py);
+    exc.setattr("path", place.path)?;
+    exc.setattr("line", place.pos.map(|p| p.line))?;
+    exc.setattr("column", place.pos.map(|p| p.column))?;
+    match place.slot {
+        Slot::Arg(index) => exc.setattr("key", index)?,
+        Slot::Prop(key) => exc.setattr("key", key)?,
+    }
+    Ok(refused)
 }
 
 /// Valid KDL can hold values Python's own types refuse, such as `(regex)#"\p{L}+"#`, so the developer is told how to
@@ -676,9 +700,15 @@ fn encode_user(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<Option<Kdl
     if !value.is_instance(Type::hook(ty, |h| &h.cls)?.as_any())? {
         return Ok(None);
     }
-    let plain = Type::hook(ty, |h| &h.encode)?.call1((value,))?;
+    encode_with(user, value).map(Some)
+}
+
+/// The Type's encode, called on `value` whatever its class, checked to return a plain value. An exception from encode
+/// propagates unchanged.
+fn encode_with(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<KdlValue> {
+    let plain = Type::hook(user.ty.bind(value.py()), |h| &h.encode)?.call1((value,))?;
     match plain_to_kdl(&plain)? {
-        Some(kdl) => Ok(Some(kdl)),
+        Some(kdl) => Ok(kdl),
         None => Err(PyTypeError::new_err(format!(
             "encode for type {:?} returned {}, not str, int, float, bool or None",
             user.name,
@@ -905,8 +935,9 @@ fn encode_kept_builtin(
 }
 
 /// What writing `value` over a custom annotation stores, or the `ValueError` saying why it doesn't fit: an instance of
-/// the Type's class, or a plain value its decode accepts, as `(celsius)22.0` would be read. A value nothing can write
-/// raises `TypeError` instead.
+/// the Type's class, or a plain value its decode accepts, as `(celsius)22.0` would be read. A plain value is stored in
+/// the Type's own form, `encode(decode(value))`, so `"21.5"` over `(celsius)` is written as `21.5` when that's what
+/// encode gives. A value nothing can write raises `TypeError` instead.
 fn encode_kept_user(
     user: &UserType,
     value: &Bound<'_, PyAny>,
@@ -926,7 +957,7 @@ fn encode_kept_user(
     }
     // Only an `Exception` from decode means "doesn't fit"; anything else, such as `KeyboardInterrupt`, propagates.
     match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
-        Ok(_) => Ok((plain_to_kdl(value)?.expect("exact plain types always convert"), None)),
+        Ok(decoded) => Ok((encode_with(user, &decoded)?, None)),
         Err(err) if err.is_instance_of::<PyException>(py) => {
             let refused = misfit(value, ty, &decode_raised(py, &err)?)?;
             refused.set_cause(py, Some(err));

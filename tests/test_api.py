@@ -494,6 +494,67 @@ def test_a_plain_value_the_type_reads_keeps_the_annotation():
     assert str(doc) == "n (celsius)22.0 (celsius)1.0\n"
 
 
+# A plain value a custom decode accepts is written in the Type's own form, encode(decode(value)).
+
+LOOSE_CELSIUS = rkdl.Type("celsius", Celsius, decode=lambda v: Celsius(float(v)), encode=lambda c: c.degrees)
+VERSION = rkdl.Type(
+    "version",
+    tuple,
+    decode=lambda s: tuple(int(part) for part in s.split(".")),
+    encode=lambda v: ".".join(str(part) for part in v),
+)
+
+
+@pytest.mark.parametrize(
+    ("types", "text", "value", "written"),
+    [
+        ([LOOSE_CELSIUS], "n (celsius)180.0", "21.5", "n (celsius)21.5"),
+        ([LOOSE_CELSIUS], "n (celsius)180.0", 14, "n (celsius)14.0"),
+        ([LOOSE_CELSIUS], "n (celsius)180.0", rkdl.Value("3", type="celsius"), "n (celsius)3.0"),
+        ([VERSION], 'n (version)"1.0"', "1.02.3", 'n (version)"1.2.3"'),
+        ([rkdl.Type("u8", int, int, int)], "n (u8)1", 300, "n (u8)300"),
+    ],
+)
+def test_a_plain_value_a_custom_decode_accepts_is_written_in_the_types_form(types, text, value, written):
+    doc = rkdl.Parser(types=types).parse(text + "\n")
+    doc["n"].args[0] = value
+    assert str(doc) == written + "\n"
+
+
+def test_an_equal_plain_write_over_a_custom_type_keeps_the_spelling():
+    doc = rkdl.Parser(types=[LOOSE_CELSIUS, VERSION]).parse('n (celsius)21.50 (version)#"1.2"#\n')
+    n = doc["n"]
+    n.args[0] = "21.5"
+    n.args[1] = "1.02"
+    assert str(doc) == 'n (celsius)21.50 (version)#"1.2"#\n'
+
+
+def test_a_plain_write_whose_encode_fails_changes_nothing():
+    class Refused(Exception):
+        pass
+
+    def encode(c):
+        raise Refused
+
+    refusing = rkdl.Type("celsius", Celsius, decode=lambda v: Celsius(float(v)), encode=encode)
+    returns_a_list = rkdl.Type("celsius", Celsius, decode=lambda v: Celsius(float(v)), encode=lambda c: [c.degrees])
+    for ty, raised in [(refusing, Refused), (returns_a_list, TypeError)]:
+        doc = rkdl.Parser(types=[ty]).parse("n (celsius)1 k=(celsius)1\n")
+        n = doc["n"]
+        with pytest.raises(raised):
+            n.args[0] = "2.5"
+        with pytest.raises(raised):
+            n.props.update(k=2.5)
+        assert str(doc) == "n (celsius)1 k=(celsius)1\n"
+
+
+def test_a_plain_write_whose_decode_fails_changes_nothing():
+    doc = rkdl.Parser(types=[LOOSE_CELSIUS]).parse("n (celsius)1\n")
+    with pytest.raises(ValueError, match=re.escape("'hot' doesn't fit (celsius): its decode raised ValueError(")):
+        doc["n"].args[0] = "hot"
+    assert str(doc) == "n (celsius)1\n"
+
+
 def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
     doc, n = node("n (u8)1 (u8)2\n")
     n.args[0] = 3

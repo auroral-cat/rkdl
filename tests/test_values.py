@@ -3,6 +3,7 @@ import decimal
 import enum
 import ipaddress
 import math
+import pickle
 import re
 import uuid
 
@@ -783,7 +784,8 @@ def test_reading_an_arg_that_doesnt_fit(route, kind):
     bad, types, core = BAD_VALUES[kind]
     doc = rkdl.Parser(types=types).parse(f"server 1 {bad}\n")
     err = read_error(ARG_READS[route], doc["server"])
-    assert type(err) is ValueError
+    assert type(err) is rkdl.ReadError
+    assert (err.path, err.line, err.column, err.key) == (None, 1, 10, 1)
     assert str(err) == f"1:10: server arg 1: {core}"
     if kind == "custom":
         assert isinstance(err.__cause__, TypeError)
@@ -800,7 +802,8 @@ def test_reading_a_prop_that_doesnt_fit(route, kind):
     bad, types, core = BAD_VALUES[kind]
     doc = rkdl.Parser(types=types).parse(f"server k={bad}\n")
     err = read_error(PROP_READS[route], doc["server"])
-    assert type(err) is ValueError
+    assert type(err) is rkdl.ReadError
+    assert (err.path, err.line, err.column, err.key) == (None, 1, 8, "k")
     assert str(err) == f"1:8: server prop k: {core}"
     assert isinstance(err.__cause__, TypeError) == (kind == "custom")
     assert str(doc) == f"server k={bad}\n"
@@ -923,6 +926,62 @@ def test_a_write_error_names_no_place_even_over_an_entry_with_a_position(tmp_pat
     with pytest.raises(ValueError) as info:
         n.args[0] = 300
     assert str(info.value) == "300 doesn't fit (u8): out of range 0..=255"
+
+
+# ReadError: a read misfit's place as attributes, for programs that build their own messages.
+
+
+def test_a_read_error_is_a_value_error_with_the_place_as_attributes(tmp_path):
+    path = tmp_path / "config.kdl"
+    path.write_text("limits {\n    inner 1 (u8)300 retries=(u8)300\n}\n")
+    inner = rkdl.load(path)["limits"]["inner"]
+    arg = read_error(lambda n: n.args[1], inner)
+    assert isinstance(arg, rkdl.ReadError)
+    assert isinstance(arg, ValueError)
+    assert (arg.path, arg.line, arg.column, arg.key) == (str(path), 2, 13, 1)
+    prop = read_error(lambda n: n.props["retries"], inner)
+    assert (prop.path, prop.line, prop.column, prop.key) == (str(path), 2, 21, "retries")
+    assert str(prop) == f"{path}:2:21: inner prop retries: 300 doesn't fit (u8): out of range 0..=255"
+
+
+def test_a_read_error_without_a_position_has_none_for_line_and_column():
+    copied = rkdl.parse("n (u8)300\n")["n"].copy()
+    arg = read_error(lambda n: n.args[0], copied)
+    assert type(arg) is rkdl.ReadError
+    assert (arg.path, arg.line, arg.column, arg.key) == (None, None, None, 0)
+    doc = rkdl.Parser(types=[STRICT_CELSIUS]).parse('n k=(celsius)"hot"\n')
+    copied = doc["n"].copy()
+    prop = read_error(lambda n: n.props["k"], copied)
+    assert (prop.path, prop.line, prop.column, prop.key) == (None, None, None, "k")
+    assert str(prop).startswith('n prop k: "hot" doesn\'t fit (celsius)')
+    assert isinstance(prop.__cause__, TypeError)
+
+
+@pytest.mark.parametrize("kind", BAD_VALUES)
+def test_a_read_error_pickles_with_its_place_and_notes(tmp_path, kind):
+    bad, types, core = BAD_VALUES[kind]
+    path = tmp_path / "config.kdl"
+    path.write_text(f"server k={bad}\n")
+    err = read_error(lambda n: n.props["k"], rkdl.Parser(types=types).load(path)["server"])
+    again = pickle.loads(pickle.dumps(err))
+    assert type(again) is rkdl.ReadError
+    assert str(again) == str(err) == f"{path}:1:8: server prop k: {core}"
+    assert (again.path, again.line, again.column, again.key) == (str(path), 1, 8, "k")
+    assert getattr(again, "__notes__", None) == getattr(err, "__notes__", None)
+
+
+def test_writes_and_entry_type_raise_plain_value_errors():
+    # Both are about what the program asked for, not the file.
+    n = rkdl.parse("n (u8)7 300\n")["n"]
+    with pytest.raises(ValueError) as info:
+        n.args[0] = 300
+    assert type(info.value) is ValueError
+    with pytest.raises(ValueError) as info:
+        n.args.entry(1).type = "u8"
+    assert type(info.value) is ValueError
+    with pytest.raises(ValueError) as info:
+        n.args.append(rkdl.Value(300, type="u8"))
+    assert type(info.value) is ValueError
 
 
 # One reason per misfit, whether the value is read from a file, checked by `entry.type`, or written by the program.

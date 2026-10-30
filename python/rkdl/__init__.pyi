@@ -30,6 +30,7 @@ __all__ = [
     "ParseError",
     "Parser",
     "Props",
+    "ReadError",
     "Type",
     "Value",
     "__version__",
@@ -85,6 +86,26 @@ class ParseError(ValueError):
     offset: int | None
     diagnostics: list[Diagnostic]
     path: str | None
+
+class ReadError(ValueError):
+    """A value in the document doesn't fit its type annotation, such as `(u8)300`.
+
+    `str(error)` is one line for whoever wrote the file, starting as `ParseError`'s first line does when the entry
+    has a position: `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`. A custom
+    Type's decode exception is the `__cause__`. Writing a value that doesn't fit raises a plain `ValueError`
+    instead: that's about the program's value, not the file.
+
+    Attributes:
+        path: The file the document was loaded from, or None if it didn't come from a named file.
+        line: The entry's line, as `entry.line` counts it, or None if it has no position.
+        column: The entry's column, as `entry.column` counts it, or None if it has no position.
+        key: The entry's index in `node.args` (an int) or its property key (a str).
+    """
+
+    path: str | None
+    line: int | None
+    column: int | None
+    key: int | str
 
 @final
 class Diagnostic:
@@ -169,9 +190,10 @@ class Type:
         name: The annotation, without parentheses: `"celsius"` for `(celsius)22.5`.
         cls: The Python class of the values. Writing an instance of it annotates the entry with `name`.
         decode: Turns the plain value from the document (a str, int, float, bool or None) into a Python value.
-            An exception it raises means the value doesn't fit: reading it raises `ValueError`, with that
+            An exception it raises means the value doesn't fit: reading it raises `ReadError`, with that
             exception as the `__cause__`.
-        encode: Turns an instance of `cls` into a plain value to write.
+        encode: Turns an instance of `cls` into a plain value to write. A plain value written over the annotation is
+            stored as `encode(decode(value))`, so the file holds the Type's own form.
 
     Raises:
         TypeError: `decode` or `encode` isn't callable.
@@ -568,10 +590,12 @@ class Entry:
         custom Type) isn't checked: it stays, over the value's KDL text.
 
         Raises:
-            ValueError: The value doesn't fit its annotation, or the new value doesn't fit it, like 300, 3.5 or
-                "weekly" written over `(u8)`. Reading says where the entry was, as `ParseError` does:
-                `config.kdl:2:9: inner prop retries: 300 doesn't fit (u8): out of range 0..=255`. An exception
-                from a custom Type's decode is the `__cause__`. A write that raises doesn't change the document.
+            ReadError: The value doesn't fit its annotation, like `(u8)300`. It says where the entry was, as
+                `ParseError` does: `config.kdl:2:9: inner prop retries: 300 doesn't fit (u8): out of range 0..=255`,
+                and has `path`, `line`, `column` and `key` attributes. An exception from a custom Type's decode is
+                the `__cause__`.
+            ValueError: The new value doesn't fit the annotation, like 300, 3.5 or "weekly" written over `(u8)`. A
+                write that raises doesn't change the document.
             TypeError: The new value can't be converted to KDL, whatever the annotation: its class isn't one rkdl
                 or a custom Type writes.
         """

@@ -30,7 +30,7 @@ mod _rkdl {
     #[pymodule_export]
     use crate::entry::{Entries, Entry};
     #[pymodule_export]
-    use crate::errors::{Diagnostic, ParseError};
+    use crate::errors::{Diagnostic, ParseError, ReadError};
     #[pymodule_export]
     use crate::format::Formatter;
     #[pymodule_export]
