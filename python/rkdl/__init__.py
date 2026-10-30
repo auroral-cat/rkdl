@@ -15,6 +15,7 @@ from ._rkdl import (
     Parser,
     Props,
     Type,
+    Value,
     __version__,
     parse,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "Parser",
     "Props",
     "Type",
+    "Value",
     "__version__",
     "dump",
     "load",

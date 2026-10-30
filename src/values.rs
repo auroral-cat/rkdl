@@ -9,6 +9,7 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString, PyType};
 use pyo3::{PyTraverseError, PyTypeInfo};
 
+use crate::annotated::Value;
 use crate::errors::parse_error;
 
 // Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
@@ -375,37 +376,45 @@ impl Encoded {
     }
 }
 
-/// `encode` without the text. Only a kept `decimal64` or `decimal128` annotation brings text of its own, so nothing
-/// is lost without a current annotation.
-pub(crate) fn from_python(
-    value: &Bound<'_, PyAny>,
-    current_ty: Option<&str>,
-    types: &TypeRegistry,
-) -> PyResult<(KdlValue, Option<String>)> {
-    let encoded = encode(value, current_ty, types)?;
-    Ok((encoded.value, encoded.ty))
+/// Python object -> what to write over an entry annotated `current_ty`, or into a new entry with None (see plan.md's
+/// "Value rules"). An `rkdl.Value` brings its own annotation, which replaces the current one; with `type=None` it's
+/// written with no annotation at all. Otherwise an annotation rkdl knows is kept, and the value has to fit it, or the
+/// write raises `ValueError`. An annotation rkdl doesn't know is kept too, over the value's KDL form. A value with no
+/// annotation gets one inferred from its Python class.
+pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: &TypeRegistry) -> PyResult<Encoded> {
+    match Value::unwrap(value) {
+        Some((inner, Some(ty))) => encode_under(&inner, Some(&ty), types),
+        Some((inner, None)) => Ok(Encoded {
+            ty: None,
+            ..infer(&inner, types)?
+        }),
+        None => encode_under(value, current_ty, types),
+    }
 }
 
-/// Python object -> what to write. An entry with an annotation rkdl knows keeps it, and the value has to fit it (see
-/// plan.md's "Value rules"): otherwise the write raises `ValueError`. A value with no current annotation, or one rkdl
-/// doesn't know, gets one inferred from its Python class.
-pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: &TypeRegistry) -> PyResult<Encoded> {
-    if let Some(ty) = current_ty {
-        let kept = match types.get(ty) {
-            // An unknown annotation is the user's own label, so any plain value keeps it.
-            None => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
-            Some(Converter::Builtin(b)) => Some(encode_kept_builtin(b, value, ty)?),
-            Some(Converter::User(user)) => Some(encode_kept_user(user, value, ty)?),
-        };
-        if let Some((kdl, repr)) = kept {
-            return Ok(Encoded {
-                value: kdl,
-                ty: Some(ty.to_owned()),
-                repr,
-            });
+/// `encode` for a value that isn't an `rkdl.Value`, under annotation `ty`.
+fn encode_under(value: &Bound<'_, PyAny>, ty: Option<&str>, types: &TypeRegistry) -> PyResult<Encoded> {
+    let Some(ty) = ty else {
+        return infer(value, types);
+    };
+    let (kdl, repr) = match types.get(ty) {
+        // An unknown annotation is the user's own label: it stays, over whatever the value is in KDL.
+        None => {
+            let inferred = infer(value, types)?;
+            (inferred.value, inferred.repr)
         }
-    }
+        Some(Converter::Builtin(b)) => encode_kept_builtin(b, value, ty)?,
+        Some(Converter::User(user)) => encode_kept_user(user, value, ty)?,
+    };
+    Ok(Encoded {
+        value: kdl,
+        ty: Some(ty.to_owned()),
+        repr,
+    })
+}
 
+/// The value in KDL, and the annotation its Python class gets.
+fn infer(value: &Bound<'_, PyAny>, types: &TypeRegistry) -> PyResult<Encoded> {
     if is_exact_plain(value) {
         let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
         return Ok(Encoded::new(kdl, None));

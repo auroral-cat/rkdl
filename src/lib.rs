@@ -1,3 +1,4 @@
+mod annotated;
 mod args;
 mod children;
 mod document;
@@ -18,6 +19,8 @@ mod values;
 
 #[pyo3::pymodule]
 mod _rkdl {
+    #[pymodule_export]
+    use crate::annotated::Value;
     #[pymodule_export]
     use crate::args::Args;
     #[pymodule_export]

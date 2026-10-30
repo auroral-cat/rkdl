@@ -4,11 +4,12 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
+use crate::annotated::Value;
 use crate::edit::{Item, Reads, Snapshot, chosen, edit, read};
 use crate::entry::{Entry, new_entry, store};
 use crate::node::Node;
 use crate::tree::EntryId;
-use crate::values;
+use crate::values::{self, Encoded};
 
 /// The entry `props[key]` reads, writes and deletes: the last one with that key, which is `KdlNode::entry`'s rule.
 /// Deleting doesn't use `KdlNode::remove`, which takes the first match and compares key spellings, so it never finds a
@@ -114,7 +115,7 @@ fn write(node: &Node, py: Python<'_>, pairs: &[(String, Bound<'_, PyAny>)], repl
                     store(target.entry_mut(id), encoded);
                 } else {
                     let end = target.len();
-                    target.insert(end, new_entry(Some(key), encoded.value, encoded.ty));
+                    target.insert(end, new_entry(Some(key), encoded));
                 }
             }
             for id in removed {
@@ -134,7 +135,7 @@ pub(crate) fn assign(node: &Node, value: &Bound<'_, PyAny>) -> PyResult<()> {
 ///
 /// It works like a dict, and every edit changes the node. A new key goes after the last property. If a key appears
 /// more than once in the text, the last one counts, as in KDL. A value written over a property keeps its annotation
-/// and has to fit it, as with `Entry.value`.
+/// and has to fit it, as with `Entry.value`. A `Value` sets the annotation too.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Props {
     node: Py<Node>,
@@ -257,7 +258,8 @@ impl Props {
             .ok_or_else(|| PyKeyError::new_err(key.clone().unbind()))
     }
 
-    /// Returns the value of property `key`, first adding it with `default` if there's no such property.
+    /// Returns the value of property `key`, first adding it with `default` if there's no such property. A `Value`
+    /// default returns the value as the property reads, without the wrapper.
     #[pyo3(signature = (key, default=None))]
     fn setdefault(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let key = str_key(key).ok_or_else(|| PyTypeError::new_err("property keys must be str"))?;
@@ -270,13 +272,20 @@ impl Props {
                 if let Some(item) = last(&snapshot.items, &key) {
                     return Ok((item.to_python(py, snapshot.types())?, None));
                 }
-                let (value, ty) = values::from_python(default.bind(py), None, snapshot.types())?;
-                Ok((default.clone_ref(py), Some((value, ty))))
+                let encoded = values::encode(default.bind(py), None, snapshot.types())?;
+                // A Value isn't what reading the property gives, so it returns the value as it now reads.
+                let found = if default.bind(py).is_instance_of::<Value>() {
+                    let Encoded { value, ty, repr } = &encoded;
+                    values::to_python_spelled(py, value, repr.as_deref(), ty.as_deref(), snapshot.types())?
+                } else {
+                    default.clone_ref(py)
+                };
+                Ok((found, Some(encoded)))
             },
             |mut target, (found, new)| {
-                if let Some((value, ty)) = new {
+                if let Some(encoded) = new {
                     let end = target.len();
-                    target.insert(end, new_entry(Some(key.clone()), value, ty));
+                    target.insert(end, new_entry(Some(key.clone()), encoded));
                 }
                 found
             },
