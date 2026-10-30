@@ -1,8 +1,13 @@
 use kdl::{FormatConfig, KdlDocument, KdlEntry};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
+use crate::parser::prescan::KDL_SPACES;
 use crate::values;
+
+/// Far deeper than any real file. A huge level makes kdl-rs loop until allocation fails, which aborts the process.
+const MAX_INDENT_LEVEL: usize = 1000;
 
 /// Autoformat settings, mirroring kdl-rs's `FormatConfig`.
 #[pyclass(module = "rkdl", frozen)]
@@ -21,13 +26,24 @@ pub struct Formatter {
 impl Formatter {
     #[new]
     #[pyo3(signature = (indent="    ".to_string(), indent_level=0, no_comments=false, entry_autoformat_keep=false))]
-    fn new(indent: String, indent_level: usize, no_comments: bool, entry_autoformat_keep: bool) -> Self {
-        Formatter {
+    fn new(indent: String, indent_level: usize, no_comments: bool, entry_autoformat_keep: bool) -> PyResult<Self> {
+        // autoformat writes the indent as is, so anything but spaces would change what the document says.
+        if let Some(c) = indent.chars().find(|c| !KDL_SPACES.contains(c)) {
+            return Err(PyValueError::new_err(format!(
+                "indent must be KDL whitespace, such as spaces or tabs, not {c:?}"
+            )));
+        }
+        if indent_level > MAX_INDENT_LEVEL {
+            return Err(PyValueError::new_err(format!(
+                "indent_level must be at most {MAX_INDENT_LEVEL}, not {indent_level}"
+            )));
+        }
+        Ok(Formatter {
             indent,
             indent_level,
             no_comments,
             entry_autoformat_keep,
-        }
+        })
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -65,16 +81,20 @@ impl Formatter {
 /// autoformat clears the text rkdl wrote for names, keys, types and string values, and kdl-rs's own spelling of
 /// some strings doesn't parse back (see `values::fixed_repr`). Puts the fixed spelling back where it's needed.
 fn requote(doc: &mut KdlDocument) {
-    for node in doc.nodes_mut() {
-        values::fix_identifier(node.name_mut());
-        if let Some(ty) = node.ty_mut() {
-            values::fix_identifier(ty);
-        }
-        for entry in node.entries_mut() {
-            requote_entry(entry);
-        }
-        if let Some(children) = node.children_mut() {
-            requote(children);
+    // A work list rather than recursion, so nesting depth isn't limited by the stack.
+    let mut pending = vec![doc];
+    while let Some(block) = pending.pop() {
+        for node in block.nodes_mut() {
+            values::fix_identifier(node.name_mut());
+            if let Some(ty) = node.ty_mut() {
+                values::fix_identifier(ty);
+            }
+            for entry in node.entries_mut() {
+                requote_entry(entry);
+            }
+            if let Some(children) = node.children_mut() {
+                pending.push(children);
+            }
         }
     }
 }

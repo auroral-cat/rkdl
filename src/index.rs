@@ -1,9 +1,29 @@
 //! Python's index rules, shared by every list-like view. `view` names the view in errors: `children`, `args` or
 //! `entries`.
 
-use pyo3::exceptions::{PyIndexError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySlice;
+
+/// An index from Python. Any int is accepted: one outside `isize` saturates to `isize::MIN` or `isize::MAX`, which is
+/// past either end of any sequence, so it reads as out of range and `insert` clamps it, like a list.
+#[derive(Clone, Copy)]
+pub(crate) struct Index(pub(crate) isize);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Index {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        match obj.extract::<isize>() {
+            Ok(i) => Ok(Index(i)),
+            Err(err) if err.is_instance_of::<PyOverflowError>(obj.py()) => {
+                let int = obj.py().import("operator")?.getattr("index")?.call1((obj,))?;
+                Ok(Index(if int.lt(0)? { isize::MIN } else { isize::MAX }))
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
 
 fn out_of_range(view: &str) -> PyErr {
     PyIndexError::new_err(format!("{view} index out of range"))

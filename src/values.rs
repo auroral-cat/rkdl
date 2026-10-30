@@ -597,6 +597,19 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlVa
             if !pattern.is_instance_of::<PyString>() {
                 return Ok(None);
             }
+            // Only the pattern is written, so flags passed to compile() would be lost. Inline ones like `(?i)` are
+            // part of the pattern, and compiling the pattern alone gives them back.
+            let flags: u32 = value.getattr("flags")?.extract()?;
+            let own: u32 = call(value.py(), "re", "compile", &pattern)?
+                .getattr("flags")?
+                .extract()?;
+            let extra = flags & !own;
+            if extra != 0 {
+                let names = call(value.py(), "re", "RegexFlag", extra)?.str()?;
+                return Err(PyValueError::new_err(format!(
+                    "can't write a regex compiled with {names}: KDL keeps only the pattern, so put flags inline, like (?i)"
+                )));
+            }
             string(pattern)
         }
         Builtin::Base64 if value.is_instance_of::<PyBytes>() => {

@@ -9,7 +9,7 @@ use pyo3::types::{PyList, PySlice};
 
 use crate::document::{DocState, Document, lock_both};
 use crate::handles::{self, Fail, Garbage, Home, stale};
-use crate::index::{insert_at, not_in, pick_one, pick_slice, position};
+use crate::index::{Index, insert_at, not_in, pick_one, pick_slice, position};
 use crate::layout::{self, Style};
 use crate::node::Node;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
@@ -467,13 +467,13 @@ impl Children {
             let found = self.owner.chosen(py, |ids| slice_ids(ids, slice))?;
             return Ok(PyList::new(py, found)?.into_any());
         }
-        let index: isize = index.extract()?;
+        let Index(index) = index.extract()?;
         let mut found = self.owner.chosen(py, |ids| pick_id(ids, index))?;
         Ok(found.pop().expect("chose one node").into_any())
     }
 
-    fn __setitem__(&self, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, At::Replace(index), node)
+    fn __setitem__(&self, index: Index, node: &Bound<'_, Node>) -> PyResult<()> {
+        insert(node.py(), &self.owner, At::Replace(index.0), node)
     }
 
     fn __delitem__(&self, index: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -481,7 +481,7 @@ impl Children {
         match index.cast::<PySlice>() {
             Ok(slice) => take_out(py, &self.owner, |ids| slice_ids(ids, slice), false)?,
             Err(_) => {
-                let index: isize = index.extract()?;
+                let Index(index) = index.extract()?;
                 take_out(py, &self.owner, |ids| pick_id(ids, index), false)?
             }
         };
@@ -524,8 +524,8 @@ impl Children {
         Ok(usize::from(self.__contains__(node)?))
     }
 
-    fn insert(&self, index: isize, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, At::Insert(index), node)
+    fn insert(&self, index: Index, node: &Bound<'_, Node>) -> PyResult<()> {
+        insert(node.py(), &self.owner, At::Insert(index.0), node)
     }
 
     fn append(&self, node: &Bound<'_, Node>) -> PyResult<()> {
@@ -538,9 +538,9 @@ impl Children {
         nodes.iter().try_for_each(|node| self.append(node.cast::<Node>()?))
     }
 
-    #[pyo3(signature = (index=-1))]
-    fn pop<'py>(&self, py: Python<'py>, index: isize) -> PyResult<Bound<'py, Node>> {
-        let mut taken = take_out(py, &self.owner, |ids| pick_id(ids, index), false)?;
+    #[pyo3(signature = (index=Index(-1)))]
+    fn pop<'py>(&self, py: Python<'py>, index: Index) -> PyResult<Bound<'py, Node>> {
+        let mut taken = take_out(py, &self.owner, |ids| pick_id(ids, index.0), false)?;
         Ok(taken.pop().expect("took one node"))
     }
 

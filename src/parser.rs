@@ -1,5 +1,11 @@
-use kdl::KdlDocument;
+pub(crate) mod prescan;
+
+use std::sync::Arc;
+
+use kdl::{KdlDiagnostic, KdlDocument, KdlError};
+use miette::Severity;
 use pyo3::PyTraverseError;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
@@ -28,17 +34,60 @@ impl Parser {
     }
 
     fn parse(&self, py: Python<'_>, text: &str) -> PyResult<Document> {
-        let mut kdl = text.parse::<KdlDocument>().map_err(|e| parse_error(py, &e))?;
-        // Formatting before the Document exists is the same as doc.fmt() but needs no lock.
-        if let Some(formatter) = &self.formatter {
-            formatter.get().apply(&mut kdl);
-        }
+        let formatter = self.formatter.as_ref().map(Py::get);
+        let kdl = py
+            .detach(|| on_big_stack(|| parse_text(text, formatter)))?
+            .map_err(|e| parse_error(py, &e))?;
         Ok(Document::new(kdl, self.types.clone_ref(py)))
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.types)
     }
+}
+
+fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<KdlDocument, KdlError> {
+    if let Some(refusal) = prescan::scan(text).refusal {
+        return Err(refused(text, refusal));
+    }
+    let mut kdl = text.parse::<KdlDocument>()?;
+    // Formatting before the Document exists is the same as doc.fmt() but needs no lock.
+    if let Some(formatter) = formatter {
+        formatter.apply(&mut kdl);
+    }
+    Ok(kdl)
+}
+
+/// The prescan's refusal as a kdl-rs error, so it reaches Python as a `ParseError` like any other.
+fn refused(text: &str, refusal: prescan::Refusal) -> KdlError {
+    let input = Arc::new(text.to_owned());
+    KdlError {
+        input: Arc::clone(&input),
+        diagnostics: vec![KdlDiagnostic {
+            input,
+            span: (refusal.offset, refusal.len).into(),
+            message: Some(refusal.message),
+            label: Some(refusal.label),
+            help: Some(refusal.help),
+            severity: Severity::Error,
+        }],
+    }
+}
+
+/// Reserved address space, committed only as it's used. kdl-rs's parser needs about 32 KB per block level on a debug
+/// build and 6 KB on a release build; the prescan's limits keep it under 140 MB and 30 MB.
+const STACK_SIZE: usize = 256 << 20;
+
+/// Runs `f` on a new thread with a big stack, since kdl-rs's parser recurses per nesting level.
+fn on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> PyResult<T> {
+    std::thread::scope(|scope| {
+        let thread = std::thread::Builder::new()
+            .name("rkdl-parse".into())
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, f)
+            .map_err(|e| PyRuntimeError::new_err(format!("couldn't start the parser thread: {e}")))?;
+        Ok(thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+    })
 }
 
 #[pyfunction]

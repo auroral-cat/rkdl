@@ -6,7 +6,7 @@ use pyo3::types::{PyList, PySlice};
 
 use crate::edit::{Item, Snapshot, chosen, edit, read};
 use crate::entry::{Entry, contents, new_entry, put_contents, store};
-use crate::index::{insert_at, not_in, pick_one, pick_slice};
+use crate::index::{Index, insert_at, not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::tree::EntryId;
 use crate::values;
@@ -110,7 +110,7 @@ impl Args {
             let found = arg_values(py, &snapshot)?;
             return Ok(PyList::new(py, pick_slice(&found, slice)?)?.into_any());
         }
-        let item = arg(&snapshot.items, index.extract()?)?;
+        let item = arg(&snapshot.items, index.extract::<Index>()?.0)?;
         Ok(item.to_python(py, snapshot.types())?.into_bound(py))
     }
 
@@ -118,7 +118,7 @@ impl Args {
         if index.is_instance_of::<PySlice>() {
             return Err(PyTypeError::new_err("node.args doesn't support slice assignment"));
         }
-        let index: isize = index.extract()?;
+        let Index(index) = index.extract()?;
         edit(
             value.py(),
             self.node.get(),
@@ -138,17 +138,17 @@ impl Args {
                 Ok(pick_slice(ids, slice)?.into_iter().copied().collect())
             });
         }
-        let index: isize = index.extract()?;
+        let Index(index) = index.extract()?;
         remove_args(py, self.node.get(), |ids| Ok(vec![*pick_one(ids, index, "args")?]))
     }
 
     /// Puts the new argument where the current `index`-th one is, so properties between arguments stay put.
-    fn insert(&self, index: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        insert_values(self.node.get(), index, std::slice::from_ref(value))
+    fn insert(&self, index: Index, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        insert_values(self.node.get(), index.0, std::slice::from_ref(value))
     }
 
     fn append(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.insert(isize::MAX, value)
+        self.insert(Index(isize::MAX), value)
     }
 
     fn extend(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -157,13 +157,13 @@ impl Args {
         insert_values(self.node.get(), isize::MAX, &new)
     }
 
-    #[pyo3(signature = (index=-1))]
-    fn pop(&self, py: Python<'_>, index: isize) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (index=Index(-1)))]
+    fn pop(&self, py: Python<'_>, index: Index) -> PyResult<Py<PyAny>> {
         edit(
             py,
             self.node.get(),
             |snapshot| {
-                let item = arg(&snapshot.items, index)?;
+                let item = arg(&snapshot.items, index.0)?;
                 Ok((item.id, item.to_python(py, snapshot.types())?))
             },
             |mut target, (id, value)| {
@@ -246,8 +246,8 @@ impl Args {
     }
 
     /// The handle for the `index`-th argument.
-    fn entry<'py>(&self, py: Python<'py>, index: isize) -> PyResult<Bound<'py, Entry>> {
-        let mut found = chosen(py, self.node.get(), |items| Ok(vec![arg(items, index)?.id]))?;
+    fn entry<'py>(&self, py: Python<'py>, index: Index) -> PyResult<Bound<'py, Entry>> {
+        let mut found = chosen(py, self.node.get(), |items| Ok(vec![arg(items, index.0)?.id]))?;
         Ok(found.pop().expect("chose one entry"))
     }
 

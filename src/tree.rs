@@ -85,8 +85,13 @@ impl IdTree {
 
     pub(crate) fn from_document(doc: &KdlDocument) -> Self {
         let mut tree = IdTree::empty();
-        let top = doc.nodes().iter().map(|n| tree.add_node(None, n)).collect();
-        tree.top = top;
+        // A work list rather than recursion: documents built through the API can nest deeper than the stack goes.
+        let mut pending = Vec::new();
+        tree.top = tree.add_level(None, doc, &mut pending);
+        while let Some((id, block)) = pending.pop() {
+            let children = tree.add_level(Some(id), block, &mut pending);
+            tree.slot_mut(id).children = Some(children);
+        }
         tree
     }
 
@@ -97,24 +102,34 @@ impl IdTree {
         tree
     }
 
-    fn add_node(&mut self, parent: Option<NodeId>, node: &KdlNode) -> NodeId {
-        let id = NodeId::fresh();
-        let entries: Vec<EntryId> = node.entries().iter().map(|_| EntryId::fresh()).collect();
-        for &e in &entries {
-            self.entries.insert(e, id);
+    /// Ids for the nodes of one block. Their children blocks start empty and go on `pending` to be filled.
+    fn add_level<'a>(
+        &mut self,
+        parent: Option<NodeId>,
+        block: &'a KdlDocument,
+        pending: &mut Vec<(NodeId, &'a KdlDocument)>,
+    ) -> Vec<NodeId> {
+        let mut ids = Vec::with_capacity(block.nodes().len());
+        for node in block.nodes() {
+            let id = NodeId::fresh();
+            let entries: Vec<EntryId> = node.entries().iter().map(|_| EntryId::fresh()).collect();
+            for &e in &entries {
+                self.entries.insert(e, id);
+            }
+            if let Some(children) = node.children() {
+                pending.push((id, children));
+            }
+            self.nodes.insert(
+                id,
+                NodeSlot {
+                    parent,
+                    children: node.children().map(|_| Vec::new()),
+                    entries,
+                },
+            );
+            ids.push(id);
         }
-        let children = node
-            .children()
-            .map(|c| c.nodes().iter().map(|n| self.add_node(Some(id), n)).collect());
-        self.nodes.insert(
-            id,
-            NodeSlot {
-                parent,
-                children,
-                entries,
-            },
-        );
-        id
+        ids
     }
 
     fn slot(&self, node: NodeId) -> &NodeSlot {
@@ -263,40 +278,42 @@ impl IdTree {
 
     /// Panics with a description of the first difference. Called after every edit in debug builds.
     pub(crate) fn check_shape(&self, doc: &KdlDocument) {
-        self.check_level(&self.top, doc, &mut Vec::new());
-    }
-
-    fn check_level(&self, ids: &[NodeId], doc: &KdlDocument, path: &mut Vec<usize>) {
-        let nodes = doc.nodes();
-        assert!(
-            ids.len() == nodes.len(),
-            "shape mismatch at {path:?}: tree has {} nodes, document has {}",
-            ids.len(),
-            nodes.len()
-        );
-        for (i, (&id, node)) in ids.iter().zip(nodes).enumerate() {
-            path.push(i);
-            let slot = self.slot(id);
+        // A work list rather than recursion, like `from_document`. Paths are only worked out for the message.
+        let path = |node: Option<NodeId>| node.and_then(|n| self.path(n)).unwrap_or_default();
+        let mut pending: Vec<(Option<NodeId>, &[NodeId], &KdlDocument)> = vec![(None, &self.top, doc)];
+        while let Some((parent, ids, block)) = pending.pop() {
+            let nodes = block.nodes();
             assert!(
-                slot.entries.len() == node.entries().len(),
-                "shape mismatch at {path:?}: tree has {} entries, document has {}",
-                slot.entries.len(),
-                node.entries().len()
+                ids.len() == nodes.len(),
+                "shape mismatch at {:?}: tree has {} nodes, document has {}",
+                path(parent),
+                ids.len(),
+                nodes.len()
             );
-            #[expect(
-                clippy::panic,
-                reason = "a shape mismatch is an rkdl bug, and this only runs in debug builds"
-            )]
-            match (&slot.children, node.children()) {
-                (None, None) => {}
-                (Some(ids), Some(doc)) => self.check_level(ids, doc, path),
-                (tree, doc) => panic!(
-                    "shape mismatch at {path:?}: tree has children block {}, document has {}",
-                    tree.is_some(),
-                    doc.is_some()
-                ),
+            for (&id, node) in ids.iter().zip(nodes) {
+                let slot = self.slot(id);
+                assert!(
+                    slot.entries.len() == node.entries().len(),
+                    "shape mismatch at {:?}: tree has {} entries, document has {}",
+                    path(Some(id)),
+                    slot.entries.len(),
+                    node.entries().len()
+                );
+                #[expect(
+                    clippy::panic,
+                    reason = "a shape mismatch is an rkdl bug, and this only runs in debug builds"
+                )]
+                match (&slot.children, node.children()) {
+                    (None, None) => {}
+                    (Some(ids), Some(block)) => pending.push((Some(id), ids, block)),
+                    (tree, doc) => panic!(
+                        "shape mismatch at {:?}: tree has children block {}, document has {}",
+                        path(Some(id)),
+                        tree.is_some(),
+                        doc.is_some()
+                    ),
+                }
             }
-            path.pop();
         }
     }
 }
@@ -567,5 +584,35 @@ mod tests {
         let doc = parse("a\n");
         let tree = IdTree::from_document(&doc);
         tree.check_shape(&parse("a\nb\n"));
+    }
+
+    /// Building, checking and walking a tree doesn't recurse: a million levels on a 1 MB stack.
+    #[test]
+    fn deep_trees_need_no_stack() {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let depth = 1_000_000;
+                let mut doc = KdlDocument::new();
+                doc.nodes_mut().push(KdlNode::new("leaf"));
+                for _ in 0..depth {
+                    let mut node = KdlNode::new("a");
+                    node.set_children(doc);
+                    doc = KdlDocument::new();
+                    doc.nodes_mut().push(node);
+                }
+                let tree = IdTree::from_document(&doc);
+                tree.check_shape(&doc);
+                let mut leaf = tree.top()[0];
+                while let Some(&[child]) = tree.children(leaf) {
+                    leaf = child;
+                }
+                assert_eq!(tree.path(leaf).map(|p| p.len()), Some(depth + 1));
+                // kdl-rs's own Drop recurses per level.
+                std::mem::forget(doc);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
