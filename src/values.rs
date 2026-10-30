@@ -1,6 +1,6 @@
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyException, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -281,7 +281,12 @@ pub(crate) fn from_python(
             // An unknown annotation is the user's own label, so any plain value keeps it.
             None => plain_to_kdl(value)?,
             Some(Converter::Builtin(b)) => encode_builtin(b, value)?,
-            Some(Converter::User(user)) => encode_user(user, value)?,
+            Some(Converter::User(user)) => match encode_user(user, value)? {
+                Some(kdl) => Some(kdl),
+                // A plain value keeps a custom annotation if the type reads it, as `(celsius)22.0` would be read.
+                None if is_exact_plain(value) && decodes(user, value)? => plain_to_kdl(value)?,
+                None => None,
+            },
         };
         if let Some(kdl) = kept {
             return Ok((kdl, Some(ty.to_owned())));
@@ -368,7 +373,7 @@ pub(crate) fn fixed_repr(text: &str, value: &KdlValue) -> Option<String> {
 
 /// Whether `text` parses as the string `s` and holds no code point KDL bans literally. kdl-rs's parser accepts some
 /// of those (U+007F), so the parse alone isn't enough.
-fn reads_back_as(text: &str, s: &str) -> bool {
+pub(crate) fn reads_back_as(text: &str, s: &str) -> bool {
     !text.chars().any(is_disallowed)
         && KdlEntry::parse(text).is_ok_and(|e| e.name().is_none() && e.value().as_string() == Some(s))
 }
@@ -388,28 +393,42 @@ fn is_disallowed(c: char) -> bool {
 
 /// The quoted form: kdl-rs's escapes, plus `\u{…}` for the newlines and banned code points a single-line string
 /// can't hold literally.
-fn quoted(s: &str) -> String {
+pub(crate) fn quoted(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
         match c {
-            '\\' | '"' => {
-                out.push('\\');
-                out.push(c);
-            }
+            '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if matches!(c, '\u{0B}' | '\u{85}' | '\u{2028}' | '\u{2029}') || is_disallowed(c) => {
-                out.extend(c.escape_unicode());
-            }
-            _ => out.push(c),
+            c => escape_into(c, &mut out),
         }
     }
     out.push('"');
     out
+}
+
+/// `c` as it goes inside a quoted string, single- or multi-line. `"` and `\n` are the caller's: the two kinds of
+/// string treat them differently.
+pub(crate) fn escape_into(c: char, out: &mut String) {
+    match c {
+        '\\' => out.push_str("\\\\"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\u{08}' => out.push_str("\\b"),
+        '\u{0C}' => out.push_str("\\f"),
+        c if matches!(c, '\u{0B}' | '\u{85}' | '\u{2028}' | '\u{2029}') || is_disallowed(c) => {
+            out.extend(c.escape_unicode());
+        }
+        c => out.push(c),
+    }
+}
+
+/// The same KDL value. Floats compare by their bits, so a NaN is the same as itself and `-0.0` isn't `0.0`.
+pub(crate) fn same_value(a: &KdlValue, b: &KdlValue) -> bool {
+    match (a, b) {
+        (KdlValue::Float(a), KdlValue::Float(b)) => a.to_bits() == b.to_bits(),
+        (a, b) => a == b,
+    }
 }
 
 /// Whether `f` is in f32's range. f32 has infinities and NaN too.
@@ -474,6 +493,35 @@ fn encode_user(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<Option<Kdl
             user.name,
             plain.get_type().qualname()?
         ))),
+    }
+}
+
+/// Whether the Type's decode accepts the plain value. Only an `Exception` counts as "no"; anything else, such as
+/// `KeyboardInterrupt`, propagates.
+fn decodes(user: &UserType, plain: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = plain.py();
+    match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((plain,)) {
+        Ok(_) => Ok(true),
+        Err(err) if err.is_instance_of::<PyException>(py) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+/// Checks that a value reads as type `ty`, so annotating it with `ty` doesn't leave an entry that raises when read.
+pub(crate) fn check_fits(py: Python<'_>, value: &KdlValue, ty: &str, types: &TypeRegistry) -> PyResult<()> {
+    match to_python(py, value, Some(ty), types) {
+        Ok(_) => Ok(()),
+        Err(err) if err.is_instance_of::<PyValueError>(py) => Err(err),
+        Err(err) if err.is_instance_of::<PyException>(py) => {
+            let refused = PyValueError::new_err(format!(
+                "{} doesn't fit type {ty}: its decode raised {}",
+                canonical_repr(value),
+                err.value(py).repr()?
+            ));
+            refused.set_cause(py, Some(err));
+            Err(refused)
+        }
+        Err(err) => Err(err),
     }
 }
 

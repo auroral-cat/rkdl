@@ -7,9 +7,9 @@ use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
-use crate::document::{DocState, Document, lock_both};
+use crate::document::{DocState, Document, lock_all};
 use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
-use crate::index::{Index, insert_at, not_in, pick_one, pick_slice, position};
+use crate::index::{Index, Splice, insert_at, not_in, pick_one, pick_slice, position, search_range};
 use crate::layout::{self, Style};
 use crate::node::Node;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
@@ -187,65 +187,178 @@ fn rehome(s: &mut DocState, id: NodeId, node: KdlNode, to: &NewHome, garbage: &m
     handles::repoint(keys, &to.shared, garbage);
 }
 
-/// Where `insert` puts a node.
-#[derive(Clone, Copy)]
-enum At {
-    /// Like `list.insert(index, node)`.
+/// Which of a block's nodes a splice replaces, by list rules.
+pub(crate) enum At<'py> {
+    /// `list.insert(index, node)`, or `extend` with several.
     Insert(isize),
-    /// Like `list[index] = node`: the node there is detached first.
+    /// `list[index] = node`.
     Replace(isize),
+    /// `list[slice] = nodes`.
+    Slice(Bound<'py, PySlice>),
+    /// `list[:] = nodes`.
+    All,
 }
 
-fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyResult<()> {
-    let id = node.get().id;
-    let home = &node.get().home;
+impl At<'_> {
+    fn splice(&self, len: usize, new: usize) -> PyResult<Splice> {
+        Ok(match self {
+            At::Insert(index) => Splice {
+                picked: Vec::new(),
+                insert_at: insert_at(len, *index),
+            },
+            At::Replace(index) => Splice {
+                picked: vec![position(len, *index, "children")?],
+                insert_at: 0,
+            },
+            At::Slice(slice) => Splice::of(len, slice, new)?,
+            At::All => Splice::all(len),
+        })
+    }
+}
+
+fn inside_itself() -> PyErr {
+    PyValueError::new_err("can't insert a node inside itself")
+}
+
+/// Why nodes whose homes aren't all distinct from each other and from the target can't go in, or `Fail::Changed`
+/// if, against the odds, nothing is wrong. A detached node's home holds only that node's subtree, so a target block
+/// in a node's home is inside the node, and two nodes sharing a home can't both be detached.
+fn shared_home(py: Python<'_>, target: &Py<Document>, nodes: &[(NodeId, &Home)], sources: &[DocRef]) -> Option<Fail> {
+    for (i, source) in sources.iter().enumerate() {
+        let (id, home) = *nodes.get(i)?;
+        if source.is(target) {
+            return Some(
+                target
+                    .get()
+                    .with_state(py, |t| match check_detached(id, home, source, t) {
+                        Ok(()) => inside_itself().into(),
+                        Err(fail) => fail,
+                    }),
+            );
+        }
+        if let Some(j) = sources.iter().take(i).position(|other| other.is(&**source)) {
+            let (other_id, other_home) = *nodes.get(j)?;
+            let other = sources.get(j)?;
+            return Some(source.get().with_state(py, |s| {
+                check_detached(other_id, other_home, other, s)
+                    .and_then(|()| check_detached(id, home, source, s))
+                    .err()
+                    .unwrap_or(Fail::Changed)
+            }));
+        }
+    }
+    None
+}
+
+/// Puts detached `nodes` into the owner's block in place of the nodes `at` picks, by list rules, all in one step: if
+/// any of them can't go in, nothing changes. A picked node that gets a new one in its place hands it its
+/// whitespace, as `children[i] = node` does; the rest are detached. `open` gives a node without a children block one
+/// first.
+pub(crate) fn splice(
+    py: Python<'_>,
+    owner: &Owner,
+    at: &At<'_>,
+    nodes: &[Bound<'_, Node>],
+    open: bool,
+) -> PyResult<()> {
+    let moving: Vec<(NodeId, &Home)> = nodes.iter().map(|n| (n.get().id, &*n.get().home)).collect();
+    for (i, (id, _)) in moving.iter().enumerate() {
+        if moving.iter().take(i).any(|(other, _)| other == id) {
+            return Err(PyValueError::new_err("can't insert the same node twice"));
+        }
+    }
     let garbage = owner.on_doc(py, |target, parent| {
+        let snapshot = target.get().with_state(py, |s| -> Result<_, Fail> {
+            Ok(block_ids(&s.ids, parent)?.map(<[NodeId]>::to_vec))
+        })?;
+        let len = match (&snapshot, open) {
+            (Some(ids), _) => ids.len(),
+            (None, true) => 0,
+            (None, false) => return Err(no_block().into()),
+        };
+        let splice = at.splice(len, nodes.len())?;
         // Only a node's home, never an entry's, empties.
-        let source = home.doc(py).ok_or_else(stale)?;
-        if !source.get().home {
+        let sources = moving
+            .iter()
+            .map(|(_, home)| home.doc(py).ok_or_else(stale))
+            .collect::<PyResult<Vec<_>>>()?;
+        if sources.iter().any(|source| !source.get().home) {
             return Err(attached().into());
         }
+        if let Some(fail) = shared_home(py, target, &moving, &sources) {
+            return Err(fail);
+        }
+        let homes = splice
+            .picked
+            .iter()
+            .map(|_| NewHome::new(py, target))
+            .collect::<PyResult<Vec<_>>>()?;
         let here = Arc::new(target.clone_ref(py));
-        let replaced_home = match at {
-            At::Replace(_) => Some(NewHome::new(py, target)?),
-            At::Insert(_) => None,
-        };
-        lock_both(py, target.get(), source.get(), |t, s| -> Result<Garbage, Fail> {
-            let Some(s) = s else {
-                check_detached(id, home, &source, t)?;
-                // A detached node's home holds only that node's subtree, so the target block is inside the node.
-                return Err(PyValueError::new_err("can't insert a node inside itself").into());
-            };
-            check_detached(id, home, &source, s)?;
-            let ids = block_ids(&t.ids, parent)?.ok_or_else(no_block)?;
-            let (index, replaced) = match at {
-                At::Insert(index) => (insert_at(ids.len(), index), None),
-                At::Replace(index) => {
-                    let i = position(ids.len(), index, "children")?;
-                    (i, ids.get(i).copied())
-                }
-            };
+        let docs: Vec<&Document> = std::iter::once(target.get())
+            .chain(sources.iter().map(|s| s.get()))
+            .collect();
+        lock_all(py, &docs, |states| -> Result<Garbage, Fail> {
+            let (t, from) = states.split_first_mut().expect("the target is locked first");
+            for ((id, home), (source, s)) in moving.iter().zip(sources.iter().zip(from.iter())) {
+                check_detached(*id, home, source, s)?;
+            }
+            if block_ids(&t.ids, parent)?.map(<[NodeId]>::to_vec) != snapshot {
+                return Err(Fail::Changed);
+            }
+            let old = snapshot.clone().unwrap_or_default();
+            if let (None, Some(p)) = (&snapshot, parent) {
+                let path = t.ids.path(p).expect("checked by block_ids");
+                layout::open_block(&mut t.kdl, &path, t.eol);
+                t.ids.open_block(p);
+            }
             let style = style(t, parent);
             let mut garbage = Garbage::default();
-            let kdl_node = s.kdl.nodes_mut().remove(0);
-            let subtree = s.ids.take_subtree(id);
-            let keys = subtree.keys();
-            let block = block_mut(&mut t.kdl, &t.ids, parent);
-            // A replacement takes the old node's place in one step, so the block never empties on the way.
-            if let (Some(old), Some(to)) = (replaced, &replaced_home) {
-                let old_node = layout::replace(block, index, kdl_node, &style);
-                rehome(t, old, old_node, to, &mut garbage);
-            } else {
-                layout::place(block, index, kdl_node, &style);
+            let mut new = moving.iter().zip(from.iter_mut()).map(|(&(id, _), s)| {
+                let node = s.kdl.nodes_mut().remove(0);
+                (node, s.ids.take_subtree(id))
+            });
+            // Replacements come first and leave every position where it was; only then are any left over detached.
+            for (&index, to) in splice.picked.iter().zip(&homes) {
+                let replaced = *old.get(index).expect("picked from this block");
+                let Some((node, subtree)) = new.next() else {
+                    detach(t, parent, replaced, &style, to, &mut garbage)?;
+                    continue;
+                };
+                // The new node takes the old one's place in one step, so the block never empties on the way.
+                let keys = subtree.keys();
+                let replaced_node = layout::replace(block_mut(&mut t.kdl, &t.ids, parent), index, node, &style);
+                rehome(t, replaced, replaced_node, to, &mut garbage);
+                t.ids.put_subtree(parent, index, subtree);
+                handles::repoint(keys, &here, &mut garbage);
             }
-            t.ids.put_subtree(parent, index, subtree);
-            handles::repoint(keys, &here, &mut garbage);
+            for (i, (node, subtree)) in new.enumerate() {
+                let keys = subtree.keys();
+                let index = splice.insert_at + i;
+                layout::place(block_mut(&mut t.kdl, &t.ids, parent), index, node, &style);
+                t.ids.put_subtree(parent, index, subtree);
+                handles::repoint(keys, &here, &mut garbage);
+            }
             Ok(garbage)
         })
     })?;
     handles::edited();
     garbage.release(py);
     Ok(())
+}
+
+/// The nodes in an iterable, for a splice. Anything else raises `TypeError`, naming `what` was being set.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "this message says what was being set; PyO3's doesn't"
+)]
+pub(crate) fn nodes_in<'py>(iterable: &Bound<'py, PyAny>, what: &str) -> PyResult<Vec<Bound<'py, Node>>> {
+    let not_nodes = || PyTypeError::new_err(format!("{what} takes an iterable of Nodes"));
+    let Ok(items) = iterable.try_iter() else {
+        return Err(not_nodes());
+    };
+    items
+        .map(|item| item?.cast_into::<Node>().map_err(|_| not_nodes()))
+        .collect()
 }
 
 /// Takes the nodes `pick` chooses out of the block, each into a private document of its own, and returns their
@@ -309,31 +422,115 @@ fn take_all(ids: &[NodeId]) -> PyResult<Vec<NodeId>> {
     Ok(ids.to_vec())
 }
 
-/// `node.children = []`: an empty block, detaching any children it had.
-pub(crate) fn open_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
-    let had_block = owner.on_doc(py, |doc, parent| {
-        let id = parent.expect("only nodes open blocks");
-        doc.get().with_state(py, |s| -> Result<bool, Fail> {
-            let path = s.ids.path(id).ok_or_else(|| Fail::Missing(stale()))?;
-            if node_at(&s.kdl, &path).children().is_some() {
-                return Ok(true);
-            }
-            layout::open_block(&mut s.kdl, &path, s.eol);
-            s.ids.open_block(id);
-            Ok(false)
-        })
-    })?;
-    handles::edited();
-    if had_block {
-        take_out(py, owner, take_all, false)?;
-    }
-    Ok(())
-}
-
 /// `node.children = None`: removes the block, detaching any children it had.
 pub(crate) fn close_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
     take_out(py, owner, take_all, true)?;
     Ok(())
+}
+
+/// `node.detach()`: takes the node out of whatever block it's in. A detached node stays where it is.
+pub(crate) fn detach_node(py: Python<'_>, node: &Node) -> PyResult<()> {
+    let id = node.id;
+    let garbage = handles::on_home(py, &node.home, |doc| {
+        let parent = doc.get().with_state(py, |s| -> Result<_, Fail> {
+            if !s.ids.contains(id) {
+                return Err(Fail::Missing(stale()));
+            }
+            Ok(s.ids.parent(id))
+        })?;
+        // A private home's one top-level node is the detached node.
+        if parent.is_none() && doc.get().home {
+            return Ok(None);
+        }
+        let to = NewHome::new(py, doc)?;
+        doc.get().with_state(py, |s| {
+            if !s.ids.contains(id) || s.ids.parent(id) != parent {
+                return Err(Fail::Changed);
+            }
+            let style = style(s, parent);
+            let mut garbage = Garbage::default();
+            detach(s, parent, id, &style, &to, &mut garbage)?;
+            Ok(Some(garbage))
+        })
+    })?;
+    if let Some(garbage) = garbage {
+        handles::edited();
+        garbage.release(py);
+    }
+    Ok(())
+}
+
+/// `node.parent`: None at the top level, and for a detached node.
+pub(crate) fn parent<'py>(py: Python<'py>, node: &Node) -> PyResult<Option<Bound<'py, Node>>> {
+    handles::retry(|| {
+        let (doc, parent) = handles::on_home(py, &node.home, |doc| {
+            let parent = doc.get().with_state(py, |s| -> Result<_, Fail> {
+                if !s.ids.contains(node.id) {
+                    return Err(Fail::Missing(stale()));
+                }
+                Ok(s.ids.parent(node.id))
+            })?;
+            Ok((doc.clone_ref(py), parent))
+        })?;
+        match parent {
+            None => Ok(Some(None)),
+            Some(p) => Ok(Document::node_handle(doc.bind(py), p)?.map(Some)),
+        }
+    })
+}
+
+/// `for n in doc` and `for n in node`: the children, read once up front. A node without a block has none.
+pub(crate) fn iter_children<'py>(py: Python<'py>, owner: &Owner) -> PyResult<Bound<'py, PyAny>> {
+    let found = handles::retry(|| {
+        let (doc, ids) = owner.read(py, |s, parent| {
+            Ok(block_ids(&s.ids, parent)?.map(<[NodeId]>::to_vec).unwrap_or_default())
+        })?;
+        handles::publish_all(doc.bind(py), &ids, Document::node_handle)
+    })?;
+    Ok(PyList::new(py, found)?.try_iter()?.into_any())
+}
+
+/// `doc.iter(key)` and `node.iter(key)`: every node below the owner that `key` matches (every node for None), depth
+/// first in file order. It walks a snapshot, so editing while iterating is safe, and a work list, so deep documents
+/// don't run out of stack.
+pub(crate) fn descendants<'py>(owner: &Owner, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = key.py();
+    let key = if key.is_none() { None } else { Some(Key::extract(key)?) };
+    let found = handles::retry(|| {
+        let (doc, found) = owner.read(py, |s, parent| {
+            let Some(top) = block_ids(&s.ids, parent)? else {
+                return Ok(Vec::new());
+            };
+            let mut found = Vec::new();
+            let mut pending: Vec<(NodeId, &KdlNode)> = top
+                .iter()
+                .copied()
+                .zip(block(&s.kdl, &s.ids, parent).nodes())
+                .rev()
+                .collect();
+            while let Some((id, node)) = pending.pop() {
+                if key.as_ref().is_none_or(|k| k.matches(node)) {
+                    found.push(id);
+                }
+                if let (Some(ids), Some(block)) = (s.ids.children(id), node.children()) {
+                    pending.extend(ids.iter().copied().zip(block.nodes()).rev());
+                }
+            }
+            Ok(found)
+        })?;
+        handles::publish_all(doc.bind(py), &found, Document::node_handle)
+    })?;
+    Ok(PyList::new(py, found)?.try_iter()?.into_any())
+}
+
+/// `key in doc` and `key in node`: whether a child matches `key`, as `doc[key]` would find it.
+pub(crate) fn contains(owner: &Owner, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if key.is_instance_of::<Node>() {
+        return Err(PyTypeError::new_err(
+            "`in` on a document or node tests a name or a (type, name) key; use `node in parent.children` for a node",
+        ));
+    }
+    Ok(!lookup(owner, key, true)?.is_empty())
 }
 
 /// Reverses the block in place.
@@ -478,8 +675,15 @@ impl Children {
         Ok(found.pop().expect("chose one node").into_any())
     }
 
-    fn __setitem__(&self, index: Index, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, At::Replace(index.0), node)
+    fn __setitem__(&self, index: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = value.py();
+        if let Ok(slice) = index.cast::<PySlice>() {
+            let nodes = nodes_in(value, "slice assignment to children")?;
+            return splice(py, &self.owner, &At::Slice(slice.clone()), &nodes, false);
+        }
+        let Index(index) = index.extract()?;
+        let node = value.cast::<Node>()?;
+        splice(py, &self.owner, &At::Replace(index), std::slice::from_ref(node), false)
     }
 
     fn __delitem__(&self, index: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -513,17 +717,46 @@ impl Children {
         Ok(self.owner.ids(node.py())?.1.contains(&node.get().id))
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let found = self.owner.chosen(py, take_all)?;
-        Ok(format!("Children({})", PyList::new(py, found)?.repr()?))
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let Ok(found) = self.owner.chosen(py, take_all) else {
+            return "Children(<no children block>)".to_owned();
+        };
+        let found: Vec<_> = found.iter().map(|node| node.get().repr(py)).collect();
+        format!("Children([{}])", found.join(", "))
+    }
+
+    /// Equal to a `Children` or a list holding the same nodes in the same order. Like a list, it isn't equal to a
+    /// tuple.
+    fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = other.py();
+        let theirs: Vec<Option<NodeId>> = if let Ok(other) = other.cast::<Children>() {
+            other.get().owner.ids(py)?.1.into_iter().map(Some).collect()
+        } else if let Ok(other) = other.cast::<PyList>() {
+            other
+                .iter()
+                .map(|n| n.cast::<Node>().ok().map(|n| n.get().id))
+                .collect()
+        } else {
+            return Ok(py.NotImplemented().into_bound(py));
+        };
+        let ours = self.owner.ids(py)?.1;
+        let same = ours.len() == theirs.len() && ours.iter().zip(&theirs).all(|(a, b)| Some(*a) == *b);
+        Ok(same.into_pyobject(py)?.to_owned().into_any())
     }
 
     fn __iadd__(&self, nodes: &Bound<'_, PyAny>) -> PyResult<()> {
         self.extend(nodes)
     }
 
-    fn index(&self, node: &Bound<'_, Node>) -> PyResult<usize> {
-        find_node(&self.owner.ids(node.py())?.1, node)
+    #[pyo3(signature = (node, start=Index(0), stop=Index(isize::MAX)))]
+    fn index(&self, node: &Bound<'_, PyAny>, start: Index, stop: Index) -> PyResult<usize> {
+        let ids = self.owner.ids(node.py())?.1;
+        let range = search_range(ids.len(), start, stop);
+        let found = node.cast::<Node>().ok().and_then(|node| {
+            let id = node.get().id;
+            ids.get(range.clone())?.iter().position(|&n| n == id)
+        });
+        found.map(|i| range.start + i).ok_or_else(|| not_in(node, "children"))
     }
 
     fn count(&self, node: &Bound<'_, PyAny>) -> PyResult<usize> {
@@ -531,17 +764,25 @@ impl Children {
     }
 
     fn insert(&self, index: Index, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, At::Insert(index.0), node)
+        splice(
+            node.py(),
+            &self.owner,
+            &At::Insert(index.0),
+            std::slice::from_ref(node),
+            false,
+        )
     }
 
     fn append(&self, node: &Bound<'_, Node>) -> PyResult<()> {
-        insert(node.py(), &self.owner, At::Insert(isize::MAX), node)
+        self.insert(Index(isize::MAX), node)
     }
 
+    /// All or nothing: if one of the nodes can't go in, none do.
     fn extend(&self, nodes: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = nodes.py();
         // Collected first, so `children.extend(children)` ends (by raising: those nodes are already attached).
-        let nodes: Vec<_> = nodes.try_iter()?.collect::<PyResult<_>>()?;
-        nodes.iter().try_for_each(|node| self.append(node.cast::<Node>()?))
+        let nodes = nodes_in(nodes, "children.extend")?;
+        splice(py, &self.owner, &At::Insert(isize::MAX), &nodes, false)
     }
 
     #[pyo3(signature = (index=Index(-1)))]

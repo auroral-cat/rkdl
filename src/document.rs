@@ -6,11 +6,13 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 
-use crate::children::{self, Children, Owner};
+use pyo3::types::{PyDict, PyTuple};
+
+use crate::children::{self, At, Children, Owner};
 use crate::format::Formatter;
 use crate::handles;
 use crate::layout;
-use crate::node::Node;
+use crate::node::{self, Node, Spec};
 use crate::tree::{IdTree, NodeId};
 use crate::values::TypeRegistry;
 
@@ -93,38 +95,95 @@ impl Document {
     }
 }
 
-/// Locks two documents for an edit that spans both, such as moving a node. They're locked in address order so two
-/// threads moving nodes in opposite directions can't deadlock. If `a` and `b` are the same document it's locked once
-/// and `f` gets `None` for `b`.
-pub(crate) fn lock_both<R: Send>(
+/// Locks several distinct documents for an edit that spans them, such as moving nodes into a block. They're locked
+/// in address order, so two threads moving nodes in opposite directions can't deadlock, and `f` gets their states in
+/// the order given.
+pub(crate) fn lock_all<R: Send>(
     py: Python<'_>,
-    a: &Document,
-    b: &Document,
-    f: impl FnOnce(&mut DocState, Option<&mut DocState>) -> R + Send,
+    docs: &[&Document],
+    f: impl FnOnce(&mut [&mut DocState]) -> R + Send,
 ) -> R {
     py.detach(|| {
-        if std::ptr::eq(a, b) {
-            let mut state = a.lock();
-            let result = f(&mut state, None);
-            state.check();
-            return result;
+        let mut order: Vec<usize> = (0..docs.len()).collect();
+        order.sort_by_key(|&i| docs.get(i).map(|&d| std::ptr::from_ref(d)));
+        let mut guards: Vec<Option<MutexGuard<'_, DocState>>> = docs.iter().map(|_| None).collect();
+        for i in order {
+            if let (Some(doc), Some(guard)) = (docs.get(i), guards.get_mut(i)) {
+                *guard = Some(doc.lock());
+            }
         }
-        let (mut sa, mut sb) = if std::ptr::from_ref(a) < std::ptr::from_ref(b) {
-            let sa = a.lock();
-            (sa, b.lock())
-        } else {
-            let sb = b.lock();
-            (a.lock(), sb)
-        };
-        let result = f(&mut sa, Some(&mut sb));
-        sa.check();
-        sb.check();
+        let mut states: Vec<&mut DocState> = guards.iter_mut().flatten().map(|guard| &mut **guard).collect();
+        let result = f(&mut states);
+        for state in &states {
+            state.check();
+        }
         result
     })
 }
 
 #[pymethods]
 impl Document {
+    /// An empty document with the built-in types. For custom types, parse an empty string with a `Parser`.
+    #[new]
+    fn py_new(py: Python<'_>) -> PyResult<Self> {
+        Ok(Document::new(KdlDocument::new(), TypeRegistry::shared_builtin(py)?))
+    }
+
+    /// A copy with the same types, which shares nothing with this document.
+    fn copy(&self, py: Python<'_>) -> Document {
+        let (kdl, eol) = self.with_state(py, |s| (s.kdl.clone(), s.eol));
+        Document::build(kdl, self.types.clone_ref(py), false, eol)
+    }
+
+    fn __copy__(&self, py: Python<'_>) -> Document {
+        self.copy(py)
+    }
+
+    /// A copy shares nothing with the document, so `copy.deepcopy`'s memo has nothing to record.
+    fn __deepcopy__(&self, py: Python<'_>, _memo: &Bound<'_, PyAny>) -> Document {
+        self.copy(py)
+    }
+
+    /// A new detached node that reads and writes through this document's types, so its values can be of custom
+    /// types. Like `Node(...)`, it doesn't insert the node anywhere.
+    #[pyo3(signature = (name, *args, r#type=None, props=None, children=None, **kwargs))]
+    fn node<'py>(
+        &self,
+        name: String,
+        args: &Bound<'py, PyTuple>,
+        r#type: Option<&Bound<'py, PyAny>>,
+        props: Option<&Bound<'py, PyDict>>,
+        children: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Node>> {
+        let py = args.py();
+        let spec = Spec {
+            ty: r#type,
+            props,
+            kwargs,
+            children,
+        };
+        let eol = self.with_state(py, |s| s.eol);
+        node::build(name, args, &spec, self.types.clone_ref(py), eol)
+    }
+
+    /// The top-level nodes.
+    fn __iter__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        children::iter_children(slf.py(), &Owner::Doc(slf.clone().unbind()))
+    }
+
+    /// Whether a top-level node matches a name or a `(type, name)` key, as `doc[key]` would find it.
+    fn __contains__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        children::contains(&Owner::Doc(slf.clone().unbind()), key)
+    }
+
+    /// Every node in the document that `key` matches, or every node for None, depth first in file order.
+    #[pyo3(signature = (key=None))]
+    fn iter<'py>(slf: &Bound<'py, Self>, key: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
+        let none = slf.py().None().into_bound(slf.py());
+        children::descendants(&Owner::Doc(slf.clone().unbind()), key.unwrap_or(&none))
+    }
+
     fn __str__(&self, py: Python<'_>) -> String {
         self.with_state(py, |s| s.kdl.to_string())
     }
@@ -154,15 +213,23 @@ impl Document {
         Children::new(Owner::Doc(slf.clone().unbind()))
     }
 
+    /// Replaces the top-level nodes with detached nodes, all or nothing. Assigning the document's own view does
+    /// nothing, so `doc.children += nodes` works.
     #[setter]
     fn set_children(slf: &Bound<'_, Self>, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
-        // `doc.children += nodes` extends the view, then assigns it back.
-        if value.is_some_and(|v| children::is_view_of(&v, slf.as_any())) {
+        let value = match value {
+            Some(v) if !v.is_none() => v,
+            _ => {
+                return Err(PyTypeError::new_err(
+                    "a document always has children; use doc.children.clear()",
+                ));
+            }
+        };
+        if children::is_view_of(&value, slf.as_any()) {
             return Ok(());
         }
-        Err(PyTypeError::new_err(
-            "can't assign to Document.children; edit it with insert, append, pop, remove or del",
-        ))
+        let nodes = children::nodes_in(&value, "doc.children")?;
+        children::splice(slf.py(), &Owner::Doc(slf.clone().unbind()), &At::All, &nodes, false)
     }
 
     fn __getitem__<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Node>> {

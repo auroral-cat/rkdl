@@ -117,7 +117,8 @@ def test_entry_reads_while_its_node_moves_between_documents():
 
     counts = run(mover(node, first, second["c"], done, at=1), *[until(done, read)] * 2, until(done, write))
     assert all(counts), counts
-    assert str(first) == "a\nmover 1 port=(u16)8080\nb\n"
+    # Every write was of the value already there.
+    assert str(first) == "a\nmover 1 port=(u16)0x1F90\nb\n"
     assert str(second) == "c {\n    d\n}\n"
 
 

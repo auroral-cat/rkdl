@@ -45,10 +45,15 @@ impl Item {
 
     /// Compares floats by their bits, so a NaN is the same as itself and doesn't retry forever.
     fn same_value(&self, other: &Item) -> bool {
-        match (&self.value, &other.value) {
-            (KdlValue::Float(a), KdlValue::Float(b)) => a.to_bits() == b.to_bits(),
-            (a, b) => a == b,
-        }
+        values::same_value(&self.value, &other.value)
+    }
+
+    /// The value's Python repr, for the views' reprs, which never raise. A value that doesn't fit its type, or whose
+    /// Python repr raises, shows as KDL.
+    pub(crate) fn repr(&self, py: Python<'_>, types: &TypeRegistry) -> String {
+        self.to_python(py, types)
+            .and_then(|value| Ok(value.bind(py).repr()?.to_string()))
+            .unwrap_or_else(|_| values::canonical_repr(&self.value))
     }
 }
 
@@ -112,9 +117,9 @@ impl Target<'_> {
 
     // Plans compute indexes from a snapshot with the same shape, so they're in bounds and KdlNode's panicking
     // insert/remove aren't needed.
-    pub(crate) fn insert(&mut self, index: usize, entry: KdlEntry) {
+    pub(crate) fn insert(&mut self, index: usize, entry: KdlEntry) -> EntryId {
         self.kdl.entries_mut().insert(index, entry);
-        self.ids.insert_entry(self.node, index);
+        self.ids.insert_entry(self.node, index)
     }
 
     /// Removes the entry, and lets go of the document for its handle, which can only raise now.

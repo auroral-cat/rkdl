@@ -306,14 +306,19 @@ def test_node_remove_panic():
 
 
 def test_entry_reset_value_repr():
-    # entry.rs: reset_value_repr. clear_format isn't exposed; writing a value back resets its spelling.
+    # entry.rs: reset_value_repr. clear_format isn't exposed. rkdl keeps a spelling where kdl-rs resets it: writing the
+    # value back changes nothing, and a new value keeps exponent form.
     left = rkdl.parse("n   name=1.03e2")
     right = rkdl.parse("n   name=103.0")
-    assert str(left) != str(right)
     for doc in (left, right):
         node = doc.children[0]
         node.props["name"] = node.props["name"]
-    assert str(left) == str(right) == "n   name=103.0"
+    assert str(left) == "n   name=1.03e2"
+    assert str(right) == "n   name=103.0"
+    for doc in (left, right):
+        doc.children[0].props["name"] = 104.0
+    assert str(left) == "n   name=1.04e2"
+    assert str(right) == "n   name=104.0"
 
 
 def test_entry_parsing():

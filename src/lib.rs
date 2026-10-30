@@ -11,6 +11,7 @@ mod layout;
 mod node;
 mod parser;
 mod props;
+mod spelling;
 mod tree;
 mod values;
 

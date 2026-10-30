@@ -54,6 +54,51 @@ pub(crate) fn sliced(len: usize, slice: &Bound<'_, PySlice>) -> PyResult<Vec<usi
         .collect())
 }
 
+/// What `seq[slice] = new` does to a sequence of `len` items, by list rules. A plain slice replaces the items it
+/// picks with however many new ones there are; an extended slice (a step other than 1) replaces each item it picks
+/// with one new item.
+pub(crate) struct Splice {
+    /// The positions picked, in the order the slice picks them.
+    pub(crate) picked: Vec<usize>,
+    /// For a plain slice, where new items beyond the picked ones go: the slice's start, after the picked items.
+    pub(crate) insert_at: usize,
+}
+
+impl Splice {
+    pub(crate) fn of(len: usize, slice: &Bound<'_, PySlice>, new: usize) -> PyResult<Splice> {
+        let s = slice.indices(isize::try_from(len)?)?;
+        let picked = sliced(len, slice)?;
+        if s.step != 1 && picked.len() != new {
+            return Err(PyValueError::new_err(format!(
+                "attempt to assign sequence of size {new} to extended slice of size {}",
+                picked.len()
+            )));
+        }
+        // A plain slice's start is in 0..=len, and its picks run on from there.
+        let insert_at = if s.step == 1 {
+            s.start.cast_unsigned() + picked.len()
+        } else {
+            0
+        };
+        Ok(Splice { picked, insert_at })
+    }
+
+    /// Every item replaced, as `seq[:] = new` does.
+    pub(crate) fn all(len: usize) -> Splice {
+        Splice {
+            picked: (0..len).collect(),
+            insert_at: len,
+        }
+    }
+}
+
+/// The positions `seq.index(x, start, stop)` searches, by list rules: negative bounds count from the end, and both
+/// clamp to the sequence.
+pub(crate) fn search_range(len: usize, start: Index, stop: Index) -> std::ops::Range<usize> {
+    let start = insert_at(len, start.0);
+    start..insert_at(len, stop.0).max(start)
+}
+
 /// The items a slice picks.
 pub(crate) fn pick_slice<'a, T>(items: &'a [T], slice: &Bound<'_, PySlice>) -> PyResult<Vec<&'a T>> {
     Ok(sliced(items.len(), slice)?

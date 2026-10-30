@@ -743,6 +743,90 @@ class EditSequences(RuleBasedStateMachine):
         for handle, child in zip(handles, old):
             self.detach(handle, child)
 
+    def splice_children(self, data, place, siblings, owner, key, count, assign):
+        """Puts `count` detached nodes in place of `siblings[key]` through `assign`, and updates the model.
+
+        `siblings` is None for a node without a block, which the assignment gives one.
+        """
+        new = [self.node_to_insert(data, owner, f"n{i}") for i in range(count)]
+        if siblings is None:
+            siblings = owner.children = []
+        old = siblings[key]
+        old_handles = [self.nodes.get(id(m), (None,))[0] for m in old]
+        assign([handle for handle, _ in new])
+        siblings[key] = [m for _, m in new]
+        # Whether a block stays on one line depends on what came out of it too, which the model doesn't follow.
+        self.placed(place, owner, True, [m for _, m in new])
+        for handle, m in new:
+            self.nodes[id(m)] = (handle, m)
+        for handle, m in zip(old_handles, old):
+            if handle is not None:
+                self.detach(handle, m)
+            else:
+                self.forget_subtree(m)
+
+    @rule(data=st.data())
+    def assign_children(self, data):
+        """`x.children = nodes`, which replaces every child, giving a node a block if it had none."""
+        places = self.parents() + [(("node", m), None, m) for m in self.all_nodes() if m.children is None]
+        place, siblings, owner = data.draw(st.sampled_from(places), label="parent")
+        holder = self.docs[place[1]] if place[0] == "doc" else self.handle(data, owner)
+        count = data.draw(st.integers(0, 2), label="count")
+
+        def assign(handles):
+            holder.children = handles
+
+        self.splice_children(data, place, siblings, owner, slice(None), count, assign)
+
+    @rule(data=st.data())
+    def assign_children_slice(self, data):
+        place, siblings, owner = data.draw(st.sampled_from(self.parents()), label="parent")
+        n = len(siblings)
+        bound = st.none() | st.integers(-n - 1, n + 1)
+        key = slice(data.draw(bound, label="start"), data.draw(bound, label="stop"),
+                    data.draw(st.sampled_from([None, 1, 2, -1]), label="step"))  # fmt: skip
+        if key.step in (None, 1):
+            count = data.draw(st.integers(0, 2), label="count")
+        else:
+            count = len(range(n)[key])
+        view = self.view(data, place)
+
+        def assign(handles):
+            view[key] = handles
+
+        self.splice_children(data, place, siblings, owner, key, count, assign)
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
+    def detach_node(self, data):
+        m = self.pick_node(data)
+        handle = self.handle(data, m)
+        if any(root is m for _, root in self.detached):
+            assert handle.detach() is handle
+            return
+        for _, siblings, _ in self.parents():
+            if any(s is m for s in siblings):
+                siblings.remove(m)
+                break
+        assert handle.detach() is handle
+        self.detach(handle, m)
+        self.nodes[id(m)] = (handle, m)
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
+    def parent_is_the_enclosing_node(self, data):
+        m = self.pick_node(data)
+        lineage = self.lineage(m)
+        parent = self.handle(data, m).parent
+        if len(lineage) == 1:
+            assert parent is None
+        else:
+            assert parent is self.resolve(lineage[-2])
+
+    @rule(k=st.integers(0, 1))
+    def iter_walks_every_node(self, k):
+        assert [n.name for n in self.docs[k].iter()] == [m.name for root in self.trees[k] for m in root.walk()]
+
     @precondition(lambda self: self.detached)
     @rule(data=st.data())
     def drop_detached(self, data):
@@ -864,6 +948,54 @@ class EditSequences(RuleBasedStateMachine):
 
     @precondition(lambda self: self.has_nodes())
     @rule(data=st.data())
+    def assign_args_slice(self, data):
+        m = self.pick_node(data)
+        n = len(m.args)
+        bound = st.none() | st.integers(-n - 1, n + 1)
+        key = slice(data.draw(bound, label="start"), data.draw(bound, label="stop"),
+                    data.draw(st.sampled_from([None, 1, 2, -1]), label="step"))  # fmt: skip
+        old = m.args[key]
+        if key.step in (None, 1):
+            new = data.draw(st.lists(values, max_size=3), label="values")
+        else:
+            new = data.draw(st.lists(values, min_size=len(old), max_size=len(old)), label="values")
+        if data.draw(st.booleans(), label="whole list"):
+            key, old = slice(None), list(m.args)
+            self.handle(data, m).args = new
+        else:
+            self.handle(data, m).args[key] = new
+        # Each picked argument that gets a value is written in place; the rest go, and extra values are added.
+        for me, value in zip(old, new):
+            me.write(value)
+        for me in old[len(new) :]:
+            me.alive = False
+        m.args[key] = old[: len(new)] + [MEntry(v) for v in new[len(old) :]]
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data(), new=st.dictionaries(names, values, max_size=3), replace=st.booleans())
+    def write_props(self, data, new, replace):
+        m = self.pick_node(data)
+        for key in data.draw(st.lists(st.sampled_from(list(m.props) or [""]), max_size=2), label="existing keys"):
+            new[key] = data.draw(values, label="value")
+        props = self.handle(data, m).props
+        if replace:
+            self.handle(data, m).props = new
+        else:
+            props |= new
+        merged = {}
+        for key, me in m.props.items():
+            if key in new:
+                me.write(new[key])
+            if key in new or not replace:
+                merged[key] = me
+            else:
+                me.alive = False
+        for key, value in new.items():
+            merged.setdefault(key, MEntry(value))
+        m.props = merged
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
     def popitem_prop(self, data):
         m = self.pick_node(data)
         props = self.handle(data, m).props
@@ -878,7 +1010,7 @@ class EditSequences(RuleBasedStateMachine):
         assert same_value(value, me.value, me.type == ANY_TYPE)
 
     @precondition(lambda self: self.has_nodes())
-    @rule(data=st.data(), ty=entry_types)
+    @rule(data=st.data(), ty=entry_types | st.just("u8"))
     def set_entry_type(self, data, ty):
         m = self.pick_node(data)
         choices = [("arg", i) for i in range(len(m.args))] + [("prop", k) for k in m.props]
@@ -890,6 +1022,14 @@ class EditSequences(RuleBasedStateMachine):
             entry, me = node.args.entry(which), m.args[which]
         else:
             entry, me = node.props.entry(which), m.props[which]
+        if ty == "u8":
+            if me.type == ANY_TYPE:
+                return
+            # The value stays as it is, so a type it doesn't fit is refused.
+            if not (type(me.value) is int and 0 <= me.value <= 255):
+                with pytest.raises(ValueError):
+                    entry.type = ty
+                return
         entry.type = ty
         me.type = ty
         self.keep_entry(data, entry, me, m)

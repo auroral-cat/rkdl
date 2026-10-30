@@ -536,7 +536,7 @@ def test_plain_string_reserved_type(ty):
     # A string still fits, so the annotation stays. An integer doesn't, so it goes.
     n.args[0] = "z"
     n.props["k"] = 5
-    assert str(doc) == f"n ({ty})z k=5\n"
+    assert str(doc) == f'n ({ty})"z" k=5\n'
     with pytest.raises(ValueError, match=re.escape(f"({ty})")):
         _ = rkdl.parse(f"n ({ty})5\n")["n"].args[0]
 

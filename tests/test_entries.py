@@ -68,16 +68,16 @@ def test_entries_in_file_order():
 def test_untouched_entries_stay_byte_identical():
     d, n = node('n 0x1F90 /-0o7 #"raw"#   "x"  port=0x1F90 /-gone=1 b=#"r"#\n')
     n.args[2] = "y"
-    assert str(d) == 'n 0x1F90 /-0o7 #"raw"#   y  port=0x1F90 /-gone=1 b=#"r"#\n'
+    assert str(d) == 'n 0x1F90 /-0o7 #"raw"#   "y"  port=0x1F90 /-gone=1 b=#"r"#\n'
     n.props["port"] = 8081
-    assert str(d) == 'n 0x1F90 /-0o7 #"raw"#   y  port=8081 /-gone=1 b=#"r"#\n'
+    assert str(d) == 'n 0x1F90 /-0o7 #"raw"#   "y"  port=0x1F91 /-gone=1 b=#"r"#\n'
 
 
-def test_writing_rewrites_the_spelling():
+def test_writing_keeps_the_spelling_where_it_can():
     d, n = node("n 0x1F90 port=0x1F90\n")
     n.args[0] = 8081
     n.props.entry("port").value = 1.5
-    assert str(d) == "n 8081 port=1.5\n"
+    assert str(d) == "n 0x1F91 port=1.5\n"
 
 
 def test_slashdash_before_an_edited_entry_stays():
@@ -222,12 +222,6 @@ def test_delete_argument_slice():
     assert str(d) == "n 2 x=0 4\n"
 
 
-def test_slice_assignment_is_not_supported():
-    _, n = node("n 1 2\n")
-    with pytest.raises(TypeError):
-        n.args[0:1] = [3]
-
-
 def test_args_search_methods():
     _, n = node("n 1 2 1\n")
     assert n.args.index(2) == 1
@@ -293,15 +287,28 @@ def test_set_and_remove_annotation():
     assert x.value == 2
 
 
-def test_setting_a_type_does_not_convert():
-    _, n = node("n 5\n")
+def test_setting_a_type_the_value_does_not_fit_raises():
+    d, n = node("n 5 300\n")
     e = n.args.entry(0)
-    e.type = "date"
+    with pytest.raises(ValueError, match="date"):
+        e.type = "date"
+    with pytest.raises(ValueError, match="u8"):
+        n.args.entry(1).type = "u8"
+    assert str(d) == "n 5 300\n"
+    assert n.args == [5, 300]
+    e.type = "u8"
+    assert str(d) == "n (u8)5 300\n"
+
+
+def test_a_value_that_does_not_fit_its_type_still_has_a_repr():
+    _, n = node("n (date)5\n")
+    e = n.args.entry(0)
     with pytest.raises(ValueError):
         _ = e.value
     with pytest.raises(ValueError):
         n.args[0]
     assert "(date)5" in repr(e)
+    assert repr(n.args) == "Args([5])"
 
 
 def test_known_type_that_does_not_fit_raises_on_read():
@@ -339,7 +346,7 @@ def test_duplicate_keys_equality_and_popitem():
 
 
 def test_del_removes_the_duplicate_props_reads():
-    n = rkdl.Node("n", props={"a": 1}, a=2)
+    _, n = node("n a=1 a=2\n")
     assert n.props["a"] == 2
     del n.props["a"]
     assert [(e.name, e.value) for e in n.entries] == [("a", 1)]
@@ -402,8 +409,6 @@ def test_entry_attributes():
     assert repr(prop) == "<Entry port=(u16)8080>"
     name, value = prop
     assert (name, value) == ("port", 8080)
-    with pytest.raises(AttributeError):
-        prop.name = "other"
 
 
 def test_entry_repr_quotes_keys_and_types():

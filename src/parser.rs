@@ -8,10 +8,12 @@ use pyo3::PyTraverseError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::document::Document;
 use crate::errors::parse_error;
 use crate::format::Formatter;
+use crate::node::{self, Node, Spec};
 use crate::values::{Type, TypeRegistry};
 
 #[pyclass(module = "rkdl", frozen)]
@@ -39,6 +41,27 @@ impl Parser {
             .detach(|| on_big_stack(|| parse_text(text, formatter)))?
             .map_err(|e| parse_error(py, &e))?;
         Ok(Document::new(kdl, self.types.clone_ref(py)))
+    }
+
+    /// A new detached node that reads and writes through this parser's types, so its values can be of custom types.
+    /// Takes the same arguments as `Node(...)`.
+    #[pyo3(signature = (name, *args, r#type=None, props=None, children=None, **kwargs))]
+    fn node<'py>(
+        &self,
+        name: String,
+        args: &Bound<'py, PyTuple>,
+        r#type: Option<&Bound<'py, PyAny>>,
+        props: Option<&Bound<'py, PyDict>>,
+        children: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Node>> {
+        let spec = Spec {
+            ty: r#type,
+            props,
+            kwargs,
+            children,
+        };
+        node::build(name, args, &spec, self.types.clone_ref(args.py()), "\n")
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {

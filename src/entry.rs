@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use kdl::{KdlEntry, KdlIdentifier, KdlValue};
 use pyo3::PyTraverseError;
+use pyo3::exceptions::PyValueError;
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
@@ -11,15 +12,23 @@ use crate::edit::{Item, chosen, read};
 use crate::handles::{self, Fail, Home, removed};
 use crate::index::{Index, not_in, pick_one, pick_slice};
 use crate::node::Node;
+use crate::spelling;
 use crate::tree::{EntryId, node_at_mut};
 use crate::values;
 
 // Reading and writing a KdlEntry.
 
-/// Writes a value and the annotation `values::from_python` chose for it. Only `value_repr` is rewritten: the rest
-/// of the format holds the entry's whitespace and any `/-` comment in front of it.
+/// Writes a value and the annotation `values::from_python` chose for it. Writing what's already there changes
+/// nothing. Otherwise only `value_repr` is rewritten, in the style of the old text where it can be: the rest of the
+/// format holds the entry's whitespace and any `/-` comment in front of it.
 pub(crate) fn store(entry: &mut KdlEntry, value: KdlValue, ty: Option<String>) {
-    let repr = values::canonical_repr(&value);
+    if values::same_value(entry.value(), &value) && entry.ty().map(KdlIdentifier::value) == ty.as_deref() {
+        return;
+    }
+    let old = entry.format().map(|f| f.value_repr.as_str());
+    let repr = old
+        .and_then(|old| spelling::value(old, &value))
+        .unwrap_or_else(|| values::canonical_repr(&value));
     entry.set_value(value);
     set_ty(entry, ty);
     values::set_value_repr(entry, repr);
@@ -29,7 +38,7 @@ fn set_ty(entry: &mut KdlEntry, ty: Option<String>) {
     match ty {
         // The same annotation keeps its spelling.
         Some(ty) if entry.ty().is_some_and(|old| old.value() == ty) => {}
-        Some(ty) => entry.set_ty(values::identifier(ty)),
+        Some(ty) => entry.set_ty(spelling::identifier(entry.ty(), ty)),
         None if entry.ty().is_some() => *entry = without_ty(entry),
         None => {}
     }
@@ -156,6 +165,29 @@ impl Entry {
         self.with_entry(py, |e| e.name().map(|n| n.value().to_owned()))
     }
 
+    /// Renames a property, keeping its place and its value's text. An argument can't gain a name, nor a property
+    /// lose one.
+    #[setter]
+    fn set_name(&self, py: Python<'_>, name: Option<String>) -> PyResult<()> {
+        let name = name.ok_or_else(|| {
+            PyValueError::new_err("a property can't become an argument; remove it and add its value to node.args")
+        })?;
+        self.with_entry(py, |e| {
+            let Some(old) = e.name() else {
+                return Err(PyValueError::new_err(
+                    "an argument can't be given a name; remove it and add it to node.props",
+                ));
+            };
+            if old.value() != name {
+                let new = spelling::identifier(Some(old), name);
+                e.set_name(Some(new));
+            }
+            Ok(())
+        })??;
+        handles::edited();
+        Ok(())
+    }
+
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let (item, doc) = self.item(py)?;
@@ -184,15 +216,31 @@ impl Entry {
         Ok(())
     }
 
-    /// Setting it doesn't convert the value, so reading `value` afterwards raises if the contents don't fit.
     #[getter]
     fn r#type(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.with_entry(py, |e| e.ty().map(|t| t.value().to_owned()))
     }
 
+    /// Setting it doesn't convert the value, so it refuses a type the value doesn't read as.
     #[setter]
-    fn set_type(&self, py: Python<'_>, ty: Option<String>) -> PyResult<()> {
-        self.with_entry(py, |e| set_ty(e, ty))?;
+    fn set_type(&self, py: Python<'_>, ty: Option<&str>) -> PyResult<()> {
+        handles::on_home(py, &self.home, |doc| {
+            let value = doc
+                .get()
+                .with_state(py, |s| entry_mut(s, self.id).map(|e| e.value().clone()))?;
+            // Checking may call a Type's decode, so it happens between two locks.
+            if let Some(ty) = ty {
+                values::check_fits(py, &value, ty, doc.get().types.get())?;
+            }
+            doc.get().with_state(py, |s| {
+                let entry = entry_mut(s, self.id)?;
+                if !values::same_value(entry.value(), &value) {
+                    return Err(Fail::Changed);
+                }
+                set_ty(entry, ty.map(str::to_owned));
+                Ok(())
+            })
+        })?;
         handles::edited();
         Ok(())
     }
@@ -212,22 +260,20 @@ impl Entry {
         self.with_entry(py, |e| e.to_string().trim().to_owned())
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let (item, doc) = self.item(py)?;
-        // A value whose contents don't fit its type still gets a repr, in KDL.
-        let value = match item.to_python(py, doc.get().types.get()) {
-            Ok(value) => value.bind(py).repr()?.to_string(),
-            Err(_) => values::canonical_repr(&item.value),
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let Ok((item, doc)) = self.item(py) else {
+            return "<Entry (removed)>".to_owned();
         };
+        let value = item.repr(py, doc.get().types.get());
         let ty = item
             .ty
             .as_deref()
             .map(|t| format!("({})", values::identifier(t)))
             .unwrap_or_default();
-        Ok(match item.key() {
+        match item.key() {
             Some(key) => format!("<Entry {}={ty}{value}>", values::identifier(key)),
             None => format!("<Entry {ty}{value}>"),
-        })
+        }
     }
 
     #[expect(clippy::needless_pass_by_value, reason = "PyO3 extracts arguments as PyRef by value")]

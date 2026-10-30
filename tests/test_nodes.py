@@ -88,7 +88,8 @@ def test_name_and_type():
     assert n.type == "old"
     n.name = "renamed"
     n.type = "new"
-    assert str(d) == "(new)renamed 1\n"
+    # A quoted name stays quoted.
+    assert str(d) == '(new)"renamed" 1\n'
     n.type = None
     n.name = "two words"
     assert n.type is None
@@ -535,10 +536,14 @@ def test_children_empty_list_after_fmt(text, start):
 
 def test_children_assignment_errors():
     d = doc()
+    before = str(d)
     with pytest.raises(TypeError):
-        d["a"].children = [rkdl.Node("x")]
+        d["a"].children = 5
     with pytest.raises(TypeError):
-        d.children = []
+        d["a"].children = [rkdl.Node("x"), 1]
+    with pytest.raises(TypeError):
+        d.children = None
+    assert str(d) == before
 
 
 def test_children_iadd():
@@ -554,11 +559,12 @@ def test_children_assigning_another_view_errors():
     a = d["a"]
     e = d["e"]
     other = rkdl.parse("x\n")
-    with pytest.raises(TypeError):
+    # Another view holds attached nodes, which have to be detached or copied first.
+    with pytest.raises(ValueError, match="already in a document"):
         a.children = e.children
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="already in a document"):
         d.children = other.children
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="already in a document"):
         d.children = a.children
     assert str(d) == "a { b; }\ne { f; }\n"
 
