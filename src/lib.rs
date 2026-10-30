@@ -35,7 +35,7 @@ mod _rkdl {
     #[pymodule_export]
     use crate::props::Props;
     #[pymodule_export]
-    use crate::values::{_debug_from_python, _debug_to_python, Type};
+    use crate::values::{_debug_assertions, _debug_from_python, _debug_to_python, Type};
 
     #[pymodule_init]
     fn init(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {

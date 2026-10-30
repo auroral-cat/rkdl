@@ -615,6 +615,13 @@ fn registry(py: Python<'_>, types: Option<Vec<Py<Type>>>) -> TypeRegistry {
     types.map_or_else(TypeRegistry::builtin, |types| TypeRegistry::with_user_types(py, types))
 }
 
+/// Whether this build runs the debug-only checks, such as the id-tree shape check after every edit. `test_build.py`
+/// asserts it, so the Python suite can't silently run against a release build.
+#[pyfunction]
+pub(crate) fn _debug_assertions() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// Direct conversion hook for `test_values.py`: parses one entry and converts its value.
 #[pyfunction]
 #[pyo3(signature = (kdl_entry_text, types=None))]

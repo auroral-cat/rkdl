@@ -20,5 +20,8 @@ python-source = "python"
 module-name = "rkdl._rkdl"
 
 [tool.uv]
+# The development install is a debug build, so the Python tests run with the debug-only checks on (the id-tree shape
+# check after every edit). Only uv's builds see this; `maturin build --release` still builds release.
+config-settings-package = { rkdl = { build-args = "--profile=dev" } }
 # Rebuild the extension when the Rust side changes.
 cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "src/**/*.rs" }, { file = "python/**/*.py" }]
