@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "rkdl"
 description = "Format-preserving KDL for Python, backed by kdl-rs"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
 dynamic = ["version"]
@@ -12,6 +13,7 @@ dynamic = ["version"]
 [dependency-groups]
 dev = [
     "hypothesis>=6.168.5",
+    "mypy>=2.4.1",
     "pytest",
     "ruff>=0.17.3",
 ]

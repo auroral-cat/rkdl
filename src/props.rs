@@ -130,7 +130,10 @@ pub(crate) fn assign(node: &Node, value: &Bound<'_, PyAny>) -> PyResult<()> {
     write(node, value.py(), &pairs(Some(value), None)?, true)
 }
 
-/// A live dict of a node's properties, as plain Python values.
+/// A node's properties, as a live dict of values.
+///
+/// It works like a dict, and every edit changes the node. A new key goes after the last property. If a key appears
+/// more than once in the text, the last one counts, as in KDL.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Props {
     node: Py<Node>,
@@ -192,7 +195,7 @@ impl Props {
         found.ok_or_else(|| PyKeyError::new_err(key.clone().unbind()))
     }
 
-    /// Writes the entry `[]` reads, or adds a property at the end.
+    // Writes the entry `[]` reads, or adds a property at the end.
     fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let key = str_key(key).ok_or_else(|| PyTypeError::new_err("property keys must be str"))?;
         write(self.node.get(), value.py(), &[(key, value.clone())], false)
@@ -225,6 +228,7 @@ impl Props {
         Ok(PyList::new(py, keys(&snapshot.items))?.try_iter()?.into_any())
     }
 
+    /// Returns the value of property `key`, or `default`.
     #[pyo3(signature = (key, default=None))]
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let found = match str_key(key) {
@@ -234,6 +238,10 @@ impl Props {
         Ok(found.or(default).unwrap_or_else(|| py.None()))
     }
 
+    /// Removes property `key` and returns its value, or `default` if there's no such property.
+    ///
+    /// Raises:
+    ///     KeyError: There's no property `key`, and no default.
     #[pyo3(signature = (key, *default))]
     fn pop(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Vec<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         if default.len() > 1 {
@@ -248,7 +256,7 @@ impl Props {
             .ok_or_else(|| PyKeyError::new_err(key.clone().unbind()))
     }
 
-    /// Reads the key, or adds it with `default` if it isn't there, in one step.
+    /// Returns the value of property `key`, first adding it with `default` if there's no such property.
     #[pyo3(signature = (key, default=None))]
     fn setdefault(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let key = str_key(key).ok_or_else(|| PyTypeError::new_err("property keys must be str"))?;
@@ -274,8 +282,10 @@ impl Props {
         )
     }
 
-    /// Like `dict.update`, all or nothing: a value that can't be written leaves the node unchanged.
-    #[pyo3(signature = (other=None, **kwargs))]
+    /// Sets properties from a mapping or an iterable of pairs, and from keyword arguments.
+    ///
+    /// If any value can't be converted, nothing changes.
+    #[pyo3(signature = (other=None, /, **kwargs))]
     fn update(
         &self,
         py: Python<'_>,
@@ -285,12 +295,12 @@ impl Props {
         write(self.node.get(), py, &pairs(other, kwargs)?, false)
     }
 
-    /// The properties as a plain dict.
+    /// Returns the properties as a plain dict.
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         self.dict(py)
     }
 
-    /// `props | mapping` is a plain dict, as `dict | dict` is.
+    // `props | mapping` is a plain dict, as `dict | dict` is.
     fn __or__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = other.py();
         if !is_mapping(other)? {
@@ -312,12 +322,13 @@ impl Props {
         Ok(merged.into_any())
     }
 
-    /// `props |= other` is `props.update(other)`, which, like a dict's, also takes an iterable of pairs.
+    // `props |= other` is `props.update(other)`, which, like a dict's, also takes an iterable of pairs.
     fn __ior__(&self, other: &Bound<'_, PyAny>) -> PyResult<()> {
         self.update(other.py(), Some(other), None)
     }
 
-    /// Removes every property. Not through `KdlNode::remove`, which can't find parsed keys.
+    // Not through `KdlNode::remove`, which can't find parsed keys.
+    /// Removes every property.
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         edit(
             py,
@@ -335,8 +346,11 @@ impl Props {
         )
     }
 
-    /// Removes and returns the last property, as `dict.popitem` does. With duplicate keys that's the entry `[]`
-    /// reads, and an earlier one with the same key stays.
+    // With duplicate keys, the last property is the entry `[]` reads, and an earlier one with the same key stays.
+    /// Removes the last property and returns its key and value.
+    ///
+    /// Raises:
+    ///     KeyError: There are no properties.
     fn popitem(&self, py: Python<'_>) -> PyResult<(String, Py<PyAny>)> {
         edit(
             py,
@@ -359,7 +373,7 @@ impl Props {
         )
     }
 
-    /// `Mapping`'s equality: the same keys with equal values, compared as dicts.
+    // `Mapping`'s equality: the same keys with equal values, compared as dicts.
     fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = other.py();
         if !is_mapping(other)? {
@@ -371,19 +385,25 @@ impl Props {
         Ok(same.into_pyobject(py)?.to_owned().into_any())
     }
 
+    /// Returns a live view of the keys.
     fn keys<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         abc_view(slf, "KeysView")
     }
 
+    /// Returns a live view of the values.
     fn values<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         abc_view(slf, "ValuesView")
     }
 
+    /// Returns a live view of the `(key, value)` pairs.
     fn items<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         abc_view(slf, "ItemsView")
     }
 
-    /// The handle for the entry `[key]` reads.
+    /// Returns the `Entry` for a property.
+    ///
+    /// Raises:
+    ///     KeyError: There's no property `key`.
     fn entry<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, Entry>> {
         let mut found = chosen(py, self.node.get(), |items| {
             Ok(vec![last(items, key).ok_or_else(|| key_error(key))?.id])

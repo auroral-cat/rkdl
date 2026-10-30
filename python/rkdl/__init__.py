@@ -49,7 +49,17 @@ def load(source):
     """Parses a KDL document from a path, a binary file or a text file.
 
     Paths and binary files are read as UTF-8 bytes, so line endings survive exactly. A text file opened without
-    ``newline=""`` turns CRLF into LF as it reads.
+    `newline=""` turns CRLF into LF as it reads.
+
+    Args:
+        source: A path, or a file opened for reading.
+
+    Returns:
+        The document.
+
+    Raises:
+        ParseError: The text isn't valid KDL.
+        UnicodeDecodeError: The bytes aren't UTF-8.
     """
     if isinstance(source, (str, os.PathLike)):
         with open(source, "rb") as f:
@@ -64,8 +74,12 @@ def load(source):
 def dump(doc, target):
     """Writes a document's text to a path, a binary file or a text file.
 
-    Paths and binary files get UTF-8 bytes, exactly as ``str(doc)`` has them. A text file opened without
-    ``newline=""`` may turn LF into the platform's line ending as it writes.
+    Paths and binary files get UTF-8 bytes, exactly as `str(doc)` has them. A text file opened without `newline=""`
+    may turn LF into the platform's line ending as it writes.
+
+    Args:
+        doc: The document to write.
+        target: A path, or a file opened for writing.
     """
     if isinstance(target, (str, os.PathLike)):
         with open(target, "wb") as f:

@@ -49,6 +49,10 @@ impl Drop for DocState {
     }
 }
 
+/// A KDL document: its top-level nodes, plus every bit of formatting and every comment in the text.
+///
+/// `str(doc)` gives the text back, with your edits. `Document()` is an empty document. To read custom types, parse
+/// an empty string with a `Parser` instead.
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Document {
     state: Mutex<DocState>,
@@ -140,13 +144,13 @@ pub(crate) fn lock_all<R: Send>(
 
 #[pymethods]
 impl Document {
-    /// An empty document with the built-in types. For custom types, parse an empty string with a `Parser`.
     #[new]
     fn py_new(py: Python<'_>) -> PyResult<Self> {
         Ok(Document::new(KdlDocument::new(), TypeRegistry::shared_builtin(py)?))
     }
 
-    /// A copy with the same types, which shares nothing with this document.
+    // The copy has the same types.
+    /// Returns a copy that shares nothing with this document.
     fn copy(&self, py: Python<'_>) -> PyResult<Document> {
         let (kdl, eol) = self.with_state(py, |s| {
             let deep = parser::too_deep_for_the_stack(s.kdl.nodes());
@@ -159,13 +163,14 @@ impl Document {
         self.copy(py)
     }
 
-    /// A copy shares nothing with the document, so `copy.deepcopy`'s memo has nothing to record.
+    // A copy shares nothing with the document, so `copy.deepcopy`'s memo has nothing to record.
     fn __deepcopy__(&self, py: Python<'_>, _memo: &Bound<'_, PyAny>) -> PyResult<Document> {
         self.copy(py)
     }
 
-    /// A new detached node that reads and writes through this document's types, so its values can be of custom
-    /// types. Like `Node(...)`, it doesn't insert the node anywhere.
+    /// Makes a detached node that reads and writes values through this document's types.
+    ///
+    /// Takes the same arguments as `Node`. The node isn't added to the document.
     #[pyo3(signature = (name, *args, r#type=None, props=None, children=None, **kwargs))]
     fn node<'py>(
         &self,
@@ -187,17 +192,22 @@ impl Document {
         node::build(name, args, &spec, self.types.clone_ref(py), eol)
     }
 
-    /// The top-level nodes.
+    // The top-level nodes.
     fn __iter__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         children::iter_children(slf.py(), &Owner::Doc(slf.clone().unbind()))
     }
 
-    /// Whether a top-level node matches a name or a `(type, name)` key, as `doc[key]` would find it.
+    // Whether a top-level node matches a name or a `(type, name)` key, as `doc[key]` would find it.
     fn __contains__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         children::contains(&Owner::Doc(slf.clone().unbind()), key)
     }
 
-    /// Every node in the document that `key` matches, or every node for None, depth first in file order.
+    /// Iterates over every node in the document, at any depth, depth first in file order.
+    ///
+    /// Editing the document while iterating is safe: the nodes are found up front.
+    ///
+    /// Args:
+    ///     key: Only nodes that match: a name, or a `(type, name)` tuple. None means every node.
     #[pyo3(signature = (key=None))]
     fn iter<'py>(slf: &Bound<'py, Self>, key: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
         let none = slf.py().None().into_bound(slf.py());
@@ -220,6 +230,10 @@ impl Document {
     }
 
     // autoformat only rewrites format strings, never structure, so the IdTree stays valid.
+    /// Reformats the whole document in place, with kdl-rs's autoformatter.
+    ///
+    /// Args:
+    ///     formatter: The settings. None means `Formatter()`.
     #[pyo3(signature = (formatter=None))]
     fn fmt(&self, py: Python<'_>, formatter: Option<Bound<'_, Formatter>>) -> PyResult<()> {
         let formatter = match formatter {
@@ -234,13 +248,16 @@ impl Document {
         })
     }
 
+    /// The top-level nodes, as a live list.
+    ///
+    /// Assigning a list of detached nodes replaces them all. If any of the nodes can't go in, nothing changes.
     #[getter]
     fn children(slf: &Bound<'_, Self>) -> Children {
         Children::new(Owner::Doc(slf.clone().unbind()))
     }
 
-    /// Replaces the top-level nodes with detached nodes, all or nothing. Assigning the document's own view does
-    /// nothing, so `doc.children += nodes` works.
+    // Replaces the top-level nodes with detached nodes, all or nothing. Assigning the document's own view does
+    // nothing, so `doc.children += nodes` works.
     #[setter]
     fn set_children(slf: &Bound<'_, Self>, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
         let value = match value {
@@ -262,6 +279,11 @@ impl Document {
         children::lookup_one(&Owner::Doc(slf.clone().unbind()), key)
     }
 
+    /// Returns the first top-level node that matches a key, or `default`.
+    ///
+    /// Args:
+    ///     key: A name, or a `(type, name)` tuple. A type of None matches nodes without a type.
+    ///     default: What to return if no node matches.
     #[pyo3(signature = (key, default=None))]
     fn get<'py>(
         slf: &Bound<'py, Self>,
@@ -271,6 +293,10 @@ impl Document {
         children::lookup_get(&Owner::Doc(slf.clone().unbind()), key, default)
     }
 
+    /// Returns every top-level node that matches a key, in order.
+    ///
+    /// Args:
+    ///     key: A name, or a `(type, name)` tuple. A type of None matches nodes without a type.
     fn get_all<'py>(slf: &Bound<'py, Self>, key: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, Node>>> {
         children::lookup(&Owner::Doc(slf.clone().unbind()), key, false)
     }

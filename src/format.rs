@@ -10,15 +10,29 @@ use crate::values;
 /// Far deeper than any real file. A huge level makes kdl-rs loop until allocation fails, which aborts the process.
 const MAX_INDENT_LEVEL: usize = 1000;
 
-/// Autoformat settings, mirroring kdl-rs's `FormatConfig`.
+/// Settings for `Document.fmt`, which mirror kdl-rs's `FormatConfig`.
+///
+/// Args:
+///     indent: The text for one level of indentation. Only KDL whitespace, such as spaces or tabs.
+///     indent_level: How many levels to indent the top-level nodes by.
+///     no_comments: Remove comments.
+///     entry_autoformat_keep: Leave each argument and property as written, with the space in front of it, and only
+///         reformat the nodes around them.
+///
+/// Raises:
+///     ValueError: `indent` holds something other than whitespace, or `indent_level` is over 1000.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Formatter {
+    /// The text for one level of indentation.
     #[pyo3(get)]
     indent: String,
+    /// How many levels to indent the top-level nodes by.
     #[pyo3(get)]
     indent_level: usize,
+    /// Whether comments are removed.
     #[pyo3(get)]
     no_comments: bool,
+    /// Whether arguments and properties are left as written.
     #[pyo3(get)]
     entry_autoformat_keep: bool,
 }
@@ -26,7 +40,10 @@ pub struct Formatter {
 #[pymethods]
 impl Formatter {
     #[new]
-    #[pyo3(signature = (indent="    ".to_string(), indent_level=0, no_comments=false, entry_autoformat_keep=false))]
+    #[pyo3(
+        signature = (indent="    ".to_string(), indent_level=0, no_comments=false, entry_autoformat_keep=false),
+        text_signature = "(indent='    ', indent_level=0, no_comments=False, entry_autoformat_keep=False)"
+    )]
     fn new(indent: String, indent_level: usize, no_comments: bool, entry_autoformat_keep: bool) -> PyResult<Self> {
         // autoformat writes the indent as is, so anything but spaces would change what the document says.
         if let Some(c) = indent.chars().find(|c| !KDL_SPACES.contains(c)) {

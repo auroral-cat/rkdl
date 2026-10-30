@@ -744,7 +744,11 @@ pub(crate) fn lookup_get<'py>(
 
 // The view.
 
-/// A live list of child nodes.
+/// A document's top-level nodes or a node's children, as a live list.
+///
+/// It works like a list, and every edit changes the document. Only detached nodes can go in. A node taken out
+/// (`pop`, `remove`, `del`, `clear`) becomes detached. An edit that would add several nodes adds all of them or
+/// none.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Children {
     owner: Owner,
@@ -851,8 +855,8 @@ impl Children {
         format!("Children([{}])", found.join(", "))
     }
 
-    /// Equal to a `Children` or a list holding the same nodes in the same order. Like a list, it isn't equal to a
-    /// tuple.
+    // Equal to a `Children` or a list holding the same nodes in the same order. Like a list, it isn't equal to a
+    // tuple.
     fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = other.py();
         let theirs: Vec<Option<NodeId>> = if let Ok(other) = other.cast::<Children>() {
@@ -874,7 +878,14 @@ impl Children {
         self.extend(nodes)
     }
 
-    #[pyo3(signature = (node, start=Index(0), stop=Index(isize::MAX)))]
+    /// Returns the position of a node.
+    ///
+    /// Raises:
+    ///     ValueError: The node isn't one of these.
+    #[pyo3(
+        signature = (node, start=Index(0), stop=Index(isize::MAX)),
+        text_signature = "($self, node, start=0, stop=sys.maxsize)"
+    )]
     fn index(&self, node: &Bound<'_, PyAny>, start: Index, stop: Index) -> PyResult<usize> {
         let ids = self.owner.ids(node.py())?.1;
         let range = search_range(ids.len(), start, stop);
@@ -885,10 +896,15 @@ impl Children {
         found.map(|i| range.start + i).ok_or_else(|| not_in(node, "children"))
     }
 
+    /// Returns 1 if the node is one of these, else 0.
     fn count(&self, node: &Bound<'_, PyAny>) -> PyResult<usize> {
         Ok(usize::from(self.__contains__(node)?))
     }
 
+    /// Inserts a detached node before the one at `index`.
+    ///
+    /// Raises:
+    ///     ValueError: The node is already in a document.
     fn insert(&self, index: Index, node: &Bound<'_, Node>) -> PyResult<()> {
         splice(
             node.py(),
@@ -899,11 +915,18 @@ impl Children {
         )
     }
 
+    /// Adds a detached node at the end.
+    ///
+    /// Raises:
+    ///     ValueError: The node is already in a document.
     fn append(&self, node: &Bound<'_, Node>) -> PyResult<()> {
         self.insert(Index(isize::MAX), node)
     }
 
-    /// All or nothing: if one of the nodes can't go in, none do.
+    /// Adds detached nodes at the end. If any of them can't go in, none do.
+    ///
+    /// Raises:
+    ///     ValueError: A node is already in a document.
     fn extend(&self, nodes: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = nodes.py();
         // Collected first, so `children.extend(children)` ends (by raising: those nodes are already attached).
@@ -911,12 +934,17 @@ impl Children {
         splice(py, &self.owner, &At::Insert(isize::MAX), &nodes, false)
     }
 
-    #[pyo3(signature = (index=Index(-1)))]
+    /// Takes a node out and returns it, detached.
+    #[pyo3(signature = (index=Index(-1)), text_signature = "($self, index=-1)")]
     fn pop<'py>(&self, py: Python<'py>, index: Index) -> PyResult<Bound<'py, Node>> {
         let mut taken = take_out(py, &self.owner, |ids| pick_id(ids, index.0), false)?;
         Ok(taken.pop().expect("took one node"))
     }
 
+    /// Takes a node out, leaving it detached.
+    ///
+    /// Raises:
+    ///     ValueError: The node isn't one of these.
     fn remove(&self, node: &Bound<'_, Node>) -> PyResult<()> {
         take_out(
             node.py(),
@@ -927,10 +955,12 @@ impl Children {
         Ok(())
     }
 
+    /// Reverses the nodes in place.
     fn reverse(&self, py: Python<'_>) -> PyResult<()> {
         reverse(py, &self.owner)
     }
 
+    /// Takes every node out.
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         take_out(py, &self.owner, take_all, false)?;
         Ok(())
