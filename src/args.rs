@@ -148,7 +148,8 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
 
 /// A node's arguments, as a live list of values.
 ///
-/// It works like a list, and every edit changes the node. Arguments keep their place among the properties.
+/// It works like a list, and every edit changes the node. Arguments keep their place among the properties. A value
+/// written over an argument keeps its annotation and has to fit it, as with `Entry.value`.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Args {
     node: Py<Node>,

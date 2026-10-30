@@ -263,26 +263,31 @@ def test_current_type_kept_when_value_fits(value, current, expected):
 
 
 @pytest.mark.parametrize(
-    ("value", "current", "expected"),
+    ("value", "current", "message"),
     [
         # bool is checked before int.
-        (True, "u8", ("#true", None)),
-        (True, "i32", ("#true", None)),
-        (True, "f64", ("#true", None)),
-        ("May 6th", "date", ('"May 6th"', None)),
-        (datetime.datetime(2024, 5, 6), "date", ('"2024-05-06T00:00:00"', "date-time")),
-        (datetime.date(2024, 5, 6), "date-time", ('"2024-05-06"', "date")),
-        (5, "duration", ("5", None)),
-        (re.compile(rb"x"), "regex", None),
-        (datetime.date(2024, 5, 6), "mine", ('"2024-05-06"', "date")),
+        (True, "u8", "True doesn't fit (u8): not an integer"),
+        (True, "i32", "True doesn't fit (i32): not an integer"),
+        (True, "f64", "True doesn't fit (f64): not a number"),
+        ("7", "u8", "'7' doesn't fit (u8): not an integer"),
+        (None, "u8", "None doesn't fit (u8): not an integer"),
+        ("May 6th", "date", "'May 6th' doesn't fit (date): Invalid isoformat string: 'May 6th'"),
+        (datetime.datetime(2024, 5, 6), "date", "doesn't fit (date): would lose its time"),
+        (datetime.date(2024, 5, 6), "date-time", "doesn't fit (date-time): not a datetime"),
+        (5, "duration", "5 doesn't fit (duration): not a str"),
+        (re.compile(rb"x"), "regex", "doesn't fit (regex): a bytes pattern has no KDL spelling"),
+        (b"hi", "uuid", "b'hi' doesn't fit (uuid): not a UUID"),
+        (decimal.Decimal("1.5"), "u8", "Decimal('1.5') doesn't fit (u8): not an integer"),
     ],
 )
-def test_current_type_replaced_when_value_does_not_fit(value, current, expected):
-    if expected is None:
-        with pytest.raises(TypeError):
-            from_python(value, current)
-    else:
-        assert from_python(value, current) == expected
+def test_a_value_that_does_not_fit_its_annotation_raises(value, current, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        from_python(value, current)
+
+
+def test_an_unknown_annotation_gives_way_to_an_inferred_one():
+    # Only a plain value can keep a label rkdl doesn't know: anything else is written as it would be with none.
+    assert from_python(datetime.date(2024, 5, 6), "mine") == ('"2024-05-06"', "date")
 
 
 @pytest.mark.parametrize(
@@ -510,8 +515,10 @@ def test_decimal64_reads_digits_from_the_text():
 
 
 def test_decimal64_out_of_the_f64_range_doesnt_fit():
-    # Decimal("1e400") is no f64, so it gets the inferred `decimal` annotation, a string.
-    assert from_python(decimal.Decimal("1e400"), "decimal64") == ('"1E+400"', "decimal")
+    # Decimal("1e400") is no f64.
+    message = "Decimal('1E+400') doesn't fit (decimal64): out of range ±1.7976931348623157e+308"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        from_python(decimal.Decimal("1e400"), "decimal64")
 
 
 def test_parser_accepts_types():
@@ -641,10 +648,11 @@ def test_plain_string_reserved_type(ty):
     assert type(n.args[0]) is str
     assert n.args[0] == "x"
     assert n.props["k"] == "y"
-    # A string still fits, so the annotation stays. An integer doesn't, so it goes.
+    # A string fits. An integer doesn't.
     n.args[0] = "z"
-    n.props["k"] = 5
-    assert str(doc) == f'n ({ty})"z" k=5\n'
+    with pytest.raises(ValueError, match=re.escape(f"5 doesn't fit ({ty}): not a str")):
+        n.props["k"] = 5
+    assert str(doc) == f'n ({ty})"z" k=({ty})"y"\n'
     with pytest.raises(ValueError, match=re.escape(f"({ty})")):
         _ = rkdl.parse(f"n ({ty})5\n")["n"].args[0]
 

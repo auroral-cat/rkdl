@@ -4,6 +4,7 @@ The model is a tree of `MNode`s holding `MEntry`s. Model objects stand for API o
 can say which node or entry each handle should still refer to.
 """
 
+import functools
 import gc
 import math
 import os
@@ -40,8 +41,25 @@ class MEntry:
     def copy(self):
         return MEntry(self.value, self.type)
 
+    def fits(self, value):
+        """Whether `value` fits this entry's annotation, so writing it doesn't raise: None when the model doesn't know
+        the annotation's rules (a reserved one other than `u8`)."""
+        if self.type == "u8":
+            if isinstance(value, bool):
+                return False
+            if isinstance(value, int):
+                return 0 <= value <= 255
+            # A whole float converts.
+            return isinstance(value, float) and value.is_integer() and 0 <= value <= 255
+        if self.type is not None and (self.type in RESERVED_TYPES or self.type == ANY_TYPE):
+            return None
+        return True
+
     def write(self, value):
-        """A value write keeps an annotation the value fits, which the model knows only for unreserved ones."""
+        """A value write that fit: the annotation stays, which the model follows only for unreserved ones and u8."""
+        if self.type == "u8":
+            self.value = int(value)
+            return
         self.value = value
         if self.type is not None and (self.type in RESERVED_TYPES or self.type == ANY_TYPE):
             self.type = ANY_TYPE
@@ -479,6 +497,19 @@ class EditSequences(RuleBasedStateMachine):
     def has_nodes(self):
         return any(True for _ in self.all_nodes())
 
+    def write_over(self, writes, call):
+        """Runs `call`, which writes values over existing entries, given as (model entry, value) pairs. A value that
+        doesn't fit its entry's annotation makes the whole call raise `ValueError` and change nothing. Returns whether
+        the write happened, for the caller to update the model."""
+        verdicts = [me.fits(value) for me, value in writes]
+        try:
+            call()
+        except ValueError:
+            assert not all(verdicts)
+            return False
+        assert False not in verdicts
+        return True
+
     def pick_node(self, data):
         return data.draw(st.sampled_from(list(self.all_nodes())), label="node")
 
@@ -846,10 +877,12 @@ class EditSequences(RuleBasedStateMachine):
     def set_prop(self, data, new_key, value):
         m = self.pick_node(data)
         key = data.draw(st.sampled_from([new_key, *m.props]), label="key")
-        self.handle(data, m).props[key] = value
+        props = self.handle(data, m).props
         if key in m.props:
-            m.props[key].write(value)
+            if self.write_over([(m.props[key], value)], lambda: props.__setitem__(key, value)):
+                m.props[key].write(value)
         else:
+            props[key] = value
             m.props[key] = MEntry(value)
 
     @precondition(lambda self: self.has_nodes())
@@ -888,8 +921,9 @@ class EditSequences(RuleBasedStateMachine):
         if not m.args:
             return
         index = data.draw(st.integers(-len(m.args), len(m.args) - 1), label="index")
-        self.handle(data, m).args[index] = value
-        m.args[index].write(value)
+        args = self.handle(data, m).args
+        if self.write_over([(m.args[index], value)], lambda: args.__setitem__(index, value)):
+            m.args[index].write(value)
 
     @precondition(lambda self: self.has_nodes())
     @rule(data=st.data())
@@ -936,11 +970,14 @@ class EditSequences(RuleBasedStateMachine):
             new = data.draw(st.lists(values, max_size=3), label="values")
         else:
             new = data.draw(st.lists(values, min_size=len(old), max_size=len(old)), label="values")
+        node = self.handle(data, m)
         if data.draw(st.booleans(), label="whole list"):
             key, old = slice(None), list(m.args)
-            self.handle(data, m).args = new
+            call = functools.partial(setattr, node, "args", new)
         else:
-            self.handle(data, m).args[key] = new
+            call = functools.partial(node.args.__setitem__, key, new)
+        if not self.write_over(list(zip(old, new)), call):
+            return
         # Each picked argument that gets a value is written in place; the rest go, and extra values are added.
         for me, value in zip(old, new):
             me.write(value)
@@ -954,11 +991,14 @@ class EditSequences(RuleBasedStateMachine):
         m = self.pick_node(data)
         for key in data.draw(st.lists(st.sampled_from(list(m.props) or [""]), max_size=2), label="existing keys"):
             new[key] = data.draw(values, label="value")
-        props = self.handle(data, m).props
+        node = self.handle(data, m)
+        props = node.props
         if replace:
-            self.handle(data, m).props = new
+            call = functools.partial(setattr, node, "props", new)
         else:
-            props |= new
+            call = functools.partial(props.__ior__, new)
+        if not self.write_over([(me, new[key]) for key, me in m.props.items() if key in new], call):
+            return
         merged = {}
         for key, me in m.props.items():
             if key in new:
@@ -1026,8 +1066,8 @@ class EditSequences(RuleBasedStateMachine):
     def write_kept_entry(self, data, value):
         entry, me, _ = data.draw(st.sampled_from(self.entries), label="kept entry")
         if me.alive:
-            entry.value = value
-            me.write(value)
+            if self.write_over([(me, value)], lambda: setattr(entry, "value", value)):
+                me.write(value)
         else:
             with pytest.raises(RuntimeError, match="entry was removed"):
                 entry.value = value

@@ -215,11 +215,14 @@ impl Entry {
 
     /// The value, converted by its type annotation.
     ///
-    /// Writing a value keeps the annotation if the value fits it, and otherwise picks one from the value's class.
+    /// Writing a value keeps the annotation, and the value has to fit it: be of the annotation's class, be a plain
+    /// value it reads (`"2029-01-01"` over `(date)`), or be a number it converts without loss (`7.0` over `(u8)`). To
+    /// change the annotation, set `type` first. An entry without one gets one picked from the value's class, and an
+    /// annotation rkdl doesn't know (not reserved, no custom Type) isn't checked.
     ///
     /// Raises:
-    ///     ValueError: The annotation is a reserved type the value can't be read as, or the new value is a number
-    ///         that doesn't fit it, like 300 or 3.5 written over `(u8)`.
+    ///     ValueError: The annotation is one the value can't be read as, or the new value doesn't fit it, like 300,
+    ///         3.5 or "weekly" written over `(u8)`. The document doesn't change.
     ///     TypeError: The new value can't be converted to KDL.
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

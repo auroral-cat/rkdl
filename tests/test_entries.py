@@ -272,11 +272,20 @@ def test_annotation_kept_when_the_value_fits():
     assert str(d) == "n (u8)200 port=(u16)8080\n"
 
 
-def test_annotation_inferred_when_the_value_does_not_fit():
+def test_a_value_that_does_not_fit_raises():
     d, n = node("n (u8)1 when=(u8)2\n")
-    n.args[0] = "x"
+    with pytest.raises(ValueError, match="doesn't fit \\(u8\\): not an integer"):
+        n.args[0] = "x"
+    with pytest.raises(ValueError, match="doesn't fit \\(u8\\): not an integer"):
+        n.props["when"] = datetime.date(2024, 1, 2)
+    assert str(d) == "n (u8)1 when=(u8)2\n"
+
+
+def test_annotation_inferred_after_removing_it():
+    d, n = node("n when=(u8)2\n")
+    n.props.entry("when").type = None
     n.props["when"] = datetime.date(2024, 1, 2)
-    assert str(d) == 'n x when=(date)"2024-01-02"\n'
+    assert str(d) == 'n when=(date)"2024-01-02"\n'
 
 
 def test_unknown_annotation_is_kept():
@@ -479,6 +488,9 @@ def test_entry_value_write_on_handle():
     e = n.args.entry(0)
     e.value = 2
     assert str(d) == "n (u8)2\n"
+    with pytest.raises(ValueError, match="'s' doesn't fit"):
+        e.value = "s"
+    e.type = None
     e.value = "s"
     assert str(d) == "n s\n"
     assert e.type is None

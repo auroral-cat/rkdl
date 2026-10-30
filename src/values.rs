@@ -340,40 +340,16 @@ pub(crate) fn from_python(
     Ok((encoded.value, encoded.ty))
 }
 
-/// Python object -> what to write, applying the "keep the current annotation if the value fits it" rule from
-/// plan.md.
+/// Python object -> what to write. An entry with an annotation rkdl knows keeps it, and the value has to fit it (see
+/// plan.md's "Value rules"): otherwise the write raises `ValueError`. A value with no current annotation, or one rkdl
+/// doesn't know, gets one inferred from its Python class.
 pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: &TypeRegistry) -> PyResult<Encoded> {
     if let Some(ty) = current_ty {
         let kept = match types.get(ty) {
             // An unknown annotation is the user's own label, so any plain value keeps it.
             None => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
-            Some(Converter::Builtin(b)) => {
-                let kept = encode_builtin(b, value)?;
-                // A number that doesn't fit a numeric type is a mistake, as with `entry.type = ...`, rather than a
-                // reason to drop the annotation.
-                if kept.is_none()
-                    && let Some(reason) = misfit(b, value)?
-                {
-                    return Err(PyValueError::new_err(format!(
-                        "{} doesn't fit {}: {reason}",
-                        value.repr()?,
-                        annotation(ty)
-                    )));
-                }
-                // A plain value keeps the annotation if the type reads it, as with custom types.
-                match kept {
-                    None if is_exact_plain(value) => plain_to_kdl(value)?
-                        .filter(|kdl| decode_builtin(value.py(), b, kdl, None).is_ok())
-                        .map(|kdl| (kdl, None)),
-                    kept => kept,
-                }
-            }
-            Some(Converter::User(user)) => match encode_user(user, value)? {
-                Some(kdl) => Some((kdl, None)),
-                // A plain value keeps a custom annotation if the type reads it, as `(celsius)22.0` would be read.
-                None if is_exact_plain(value) && decodes(user, value)? => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
-                None => None,
-            },
+            Some(Converter::Builtin(b)) => Some(encode_kept_builtin(b, value, ty)?),
+            Some(Converter::User(user)) => Some(encode_kept_user(user, value, ty)?),
         };
         if let Some((kdl, repr)) = kept {
             return Ok(Encoded {
@@ -591,17 +567,6 @@ fn encode_user(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<Option<Kdl
     }
 }
 
-/// Whether the Type's decode accepts the plain value. Only an `Exception` counts as "no"; anything else, such as
-/// `KeyboardInterrupt`, propagates.
-fn decodes(user: &UserType, plain: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = plain.py();
-    match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((plain,)) {
-        Ok(_) => Ok(true),
-        Err(err) if err.is_instance_of::<PyException>(py) => Ok(false),
-        Err(err) => Err(err),
-    }
-}
-
 /// Checks that a value reads as type `ty`, so annotating it with `ty` doesn't leave an entry that raises when read.
 pub(crate) fn check_fits(py: Python<'_>, value: &KdlValue, ty: &str, types: &TypeRegistry) -> PyResult<()> {
     match to_python(py, value, Some(ty), types) {
@@ -794,10 +759,65 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
     }
 }
 
+/// What writing `value` over a built-in annotation stores, or the `ValueError` saying why it doesn't fit: the
+/// annotation's own class, a plain value the annotation reads (`"2029-01-01"` over `(date)`), or a number it converts
+/// without loss.
+fn encode_kept_builtin(b: Builtin, value: &Bound<'_, PyAny>, ty: &str) -> PyResult<(KdlValue, Option<String>)> {
+    if let Some(kept) = encode_builtin(b, value)? {
+        return Ok(kept);
+    }
+    let reason = if let Some(reason) = number_misfit(b, value)? {
+        reason
+    } else if is_exact_plain(value) {
+        let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
+        match decode_builtin(value.py(), b, &kdl, None) {
+            Ok(_) => return Ok((kdl, None)),
+            // A string that doesn't read says why; any other plain value is just the wrong kind.
+            Err(reason) if matches!(kdl, KdlValue::String(_)) && reads_strings(b) => reason,
+            Err(_) => wrong_class(b, value)?,
+        }
+    } else {
+        wrong_class(b, value)?
+    };
+    Err(misfit(value, ty, &reason)?)
+}
+
+/// What writing `value` over a custom annotation stores, or the `ValueError` saying why it doesn't fit: an instance of
+/// the Type's class, or a plain value its decode accepts, as `(celsius)22.0` would be read.
+fn encode_kept_user(user: &UserType, value: &Bound<'_, PyAny>, ty: &str) -> PyResult<(KdlValue, Option<String>)> {
+    let py = value.py();
+    if let Some(kdl) = encode_user(user, value)? {
+        return Ok((kdl, None));
+    }
+    if !is_exact_plain(value) {
+        let cls = Type::hook(user.ty.bind(py), |h| &h.cls)?.qualname()?;
+        return Err(misfit(value, ty, &format!("not a {cls}"))?);
+    }
+    // Only an `Exception` from decode means "doesn't fit"; anything else, such as `KeyboardInterrupt`, propagates.
+    match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
+        Ok(_) => Ok((plain_to_kdl(value)?.expect("exact plain types always convert"), None)),
+        Err(err) if err.is_instance_of::<PyException>(py) => {
+            let refused = misfit(value, ty, &format!("its decode raised {}", err.value(py).repr()?))?;
+            refused.set_cause(py, Some(err));
+            Err(refused)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// `'weekly' doesn't fit (u8): not an integer`.
+fn misfit(value: &Bound<'_, PyAny>, ty: &str, reason: &str) -> PyResult<PyErr> {
+    Ok(PyValueError::new_err(format!(
+        "{} doesn't fit {}: {reason}",
+        value.repr()?,
+        annotation(ty)
+    )))
+}
+
 /// Why a number doesn't fit a numeric built-in type, if `value` is an `int` or `float` (`bool` isn't a number here)
-/// and `b` holds a range. None for anything else, which keeps the "infer the annotation" rule.
+/// and `b` holds a range: it's out of the range, or a float that isn't whole over an integer annotation.
 #[expect(clippy::wildcard_enum_match_arm, reason = "only the numeric types have a range")]
-fn misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     let is_int = value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>();
     let is_float = value.is_instance_of::<PyFloat>();
     Ok(match b {
@@ -811,8 +831,42 @@ fn misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
             }
         }
         Builtin::Int { .. } | Builtin::F32 | Builtin::F64 if is_int || is_float => range_of(b),
+        // A Decimal too big for the f64 kdl-rs keeps.
+        Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => range_of(Builtin::F64),
         _ => None,
     })
+}
+
+/// Whether a plain string over `b` is read as text, so the reason it can't be read is worth showing.
+const fn reads_strings(b: Builtin) -> bool {
+    !matches!(
+        b,
+        Builtin::Int { .. } | Builtin::F32 | Builtin::F64 | Builtin::DecimalNumber
+    )
+}
+
+/// Why a value of the wrong class doesn't fit `b`.
+fn wrong_class(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let expected = match b {
+        Builtin::Int { .. } => "an integer",
+        Builtin::F32 | Builtin::F64 | Builtin::DecimalNumber => "a number",
+        Builtin::DecimalString => "a Decimal",
+        Builtin::DateTime => "a datetime",
+        // A datetime is a date too, but writing it as one would drop the time.
+        Builtin::Date if is_instance(value, "datetime", "datetime")? => return Ok("would lose its time".to_owned()),
+        Builtin::Date => "a date",
+        Builtin::Time => "a time",
+        Builtin::Ipv4 => "an IPv4Address",
+        Builtin::Ipv6 => "an IPv6Address",
+        Builtin::Uuid => "a UUID",
+        Builtin::Regex if is_instance(value, "re", "Pattern")? => {
+            return Ok("a bytes pattern has no KDL spelling".to_owned());
+        }
+        Builtin::Regex => "a re.Pattern",
+        Builtin::Base64 => "bytes",
+        Builtin::PlainString => "a str",
+    };
+    Ok(format!("not {expected}"))
 }
 
 /// "out of range ..." for a numeric built-in type.

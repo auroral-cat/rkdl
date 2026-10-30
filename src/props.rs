@@ -133,7 +133,8 @@ pub(crate) fn assign(node: &Node, value: &Bound<'_, PyAny>) -> PyResult<()> {
 /// A node's properties, as a live dict of values.
 ///
 /// It works like a dict, and every edit changes the node. A new key goes after the last property. If a key appears
-/// more than once in the text, the last one counts, as in KDL.
+/// more than once in the text, the last one counts, as in KDL. A value written over a property keeps its annotation
+/// and has to fit it, as with `Entry.value`.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Props {
     node: Py<Node>,

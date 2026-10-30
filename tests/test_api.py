@@ -1,8 +1,12 @@
 """The convenience API: keeping spellings on write, building nodes, load and dump, and the list and dict operations."""
 
 import copy
+import datetime
+import decimal
 import io
+import ipaddress
 import re
+import uuid
 
 import pytest
 import rkdl
@@ -458,47 +462,67 @@ def test_a_plain_value_the_type_reads_keeps_the_annotation():
     n.args[0] = 22.0
     assert str(doc) == "n (celsius)22.0 (celsius)1.0\n"
     assert n.args[0] == Celsius(22.0)
-    # strict_celsius refuses an int, so the annotation goes.
-    n.args[1] = 3
-    assert str(doc) == "n (celsius)22.0 3\n"
+    # strict_celsius refuses an int, so it doesn't fit.
+    message = "3 doesn't fit (celsius): its decode raised TypeError('celsius is a float')"
+    with pytest.raises(ValueError, match=re.escape(message)) as raised:
+        n.args[1] = 3
+    assert isinstance(raised.value.__cause__, TypeError)
+    assert str(doc) == "n (celsius)22.0 (celsius)1.0\n"
 
 
 def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
     doc, n = node("n (u8)1 (u8)2\n")
     n.args[0] = 3
     assert str(doc) == "n (u8)3 (u8)2\n"
-    # Another kind of value gets its own annotation, as with no annotation.
-    n.args[1] = "x"
-    assert str(doc) == "n (u8)3 x\n"
+    with pytest.raises(ValueError, match=re.escape("'x' doesn't fit (u8): not an integer")):
+        n.args[1] = "x"
+    assert str(doc) == "n (u8)3 (u8)2\n"
 
 
 @pytest.mark.parametrize(
-    ("ty", "old", "fits", "read", "misfit"),
+    ("ty", "old", "fits", "read", "misfit", "reason"),
     [
-        ("date", '"2026-01-01"', "2029-01-01", "datetime.date(2029, 1, 1)", "next tuesday"),
-        ("date-time", '"2026-01-01T09:00:00"', "2029-01-01T10:00:00", "datetime.datetime(2029, 1, 1, 10, 0)", "soon"),
-        ("time", '"09:00:00"', "10:30:00", "datetime.time(10, 30)", "half past"),
-        ("ipv4", '"10.0.0.1"', "10.0.0.2", "IPv4Address('10.0.0.2')", "::1"),
-        ("ipv6", '"::1"', "::2", "IPv6Address('::2')", "10.0.0.2"),
+        (
+            "date",
+            '"2026-01-01"',
+            "2029-01-01",
+            "datetime.date(2029, 1, 1)",
+            "next tuesday",
+            "Invalid isoformat string: 'next tuesday'",
+        ),
+        (
+            "date-time",
+            '"2026-01-01T09:00:00"',
+            "2029-01-01T10:00:00",
+            "datetime.datetime(2029, 1, 1, 10, 0)",
+            "soon",
+            "Invalid isoformat string: 'soon'",
+        ),
+        ("time", '"09:00:00"', "10:30:00", "datetime.time(10, 30)", "half past", "Invalid isoformat string"),
+        ("ipv4", '"10.0.0.1"', "10.0.0.2", "IPv4Address('10.0.0.2')", "::1", "Expected 4 octets"),
+        ("ipv6", '"::1"', "::2", "IPv6Address('::2')", "10.0.0.2", "At least 3 parts expected"),
         (
             "uuid",
             '"00000000-0000-0000-0000-000000000000"',
             "12345678-1234-5678-1234-567812345678",
             "UUID('12345678-1234-5678-1234-567812345678')",
             "not-a-uuid",
+            "badly formed hexadecimal UUID string",
         ),
-        ("regex", '"a+"', "b+", "re.compile('b+')", "(unclosed"),
-        ("base64", '"aGk="', "aGV5", "b'hey'", "not base64!"),
-        ("decimal", '"1.5"', "2.25", "Decimal('2.25')", "lots"),
+        ("regex", '"a+"', "b+", "re.compile('b+')", "(unclosed", "missing ), unterminated subpattern"),
+        ("base64", '"aGk="', "aGV5", "b'hey'", "not base64!", ""),
+        ("decimal", '"1.5"', "2.25", "Decimal('2.25')", "lots", ""),
     ],
 )
-def test_a_plain_string_a_builtin_type_reads_keeps_the_annotation(ty, old, fits, read, misfit):
-    doc, n = node(f"n ({ty}){old} k=({ty}){old}\n")
+def test_a_plain_string_a_builtin_type_reads_keeps_the_annotation(ty, old, fits, read, misfit, reason):
+    text = f"n ({ty}){old} k=({ty}){old}\n"
+    doc, n = node(text)
+    with pytest.raises(ValueError, match=re.escape(f"{misfit!r} doesn't fit ({ty}): {reason}")):
+        n.props["k"] = misfit
+    assert str(doc) == text
     n.args[0] = fits
-    n.props["k"] = misfit
-    assert str(doc) == f'n ({ty})"{fits}" k="{misfit}"\n'
+    assert str(doc) == f'n ({ty})"{fits}" k=({ty}){old}\n'
     assert repr(n.args[0]) == read
-    assert n.props["k"] == misfit
     assert str(rkdl.parse(str(doc))) == str(doc)
 
 
@@ -508,18 +532,222 @@ def test_a_plain_string_a_builtin_type_reads_keeps_the_annotation(ty, old, fits,
         # A number the type reads keeps it, an int too.
         ("decimal64", "1.5", 2, "(decimal64)2"),
         ("decimal128", "1.5", 0.1, "(decimal128)0.1"),
-        # Any other kind of plain value doesn't.
-        ("u8", "1", True, "#true"),
-        ("f32", "1.5", "1.5", '"1.5"'),
-        ("date", '"2026-01-01"', 5, "5"),
-        ("date", '"2026-01-01"', None, "#null"),
-        ("decimal64", "1.5", "1.5", '"1.5"'),
+        ("f64", "1.5", 2, "(f64)2.0"),
     ],
 )
-def test_other_plain_values_over_a_builtin_type(ty, old, value, text):
+def test_a_plain_number_a_builtin_type_reads_keeps_it(ty, old, value, text):
     doc, n = node(f"n ({ty}){old}\n")
     n.args[0] = value
     assert str(doc) == f"n {text}\n"
+
+
+@pytest.mark.parametrize(
+    ("ty", "old", "value", "message"),
+    [
+        ("u8", "1", True, "True doesn't fit (u8): not an integer"),
+        ("f32", "1.5", "1.5", "'1.5' doesn't fit (f32): not a number"),
+        ("date", '"2026-01-01"', 5, "5 doesn't fit (date): not a date"),
+        ("date", '"2026-01-01"', None, "None doesn't fit (date): not a date"),
+        ("decimal64", "1.5", "1.5", "'1.5' doesn't fit (decimal64): not a number"),
+        ("decimal", '"1.5"', 1, "1 doesn't fit (decimal): not a Decimal"),
+        ("email", '"a@b.c"', 5, "5 doesn't fit (email): not a str"),
+    ],
+)
+def test_other_plain_values_over_a_builtin_type_raise(ty, old, value, message):
+    text = f"n ({ty}){old}\n"
+    doc, n = node(text)
+    with pytest.raises(ValueError, match=re.escape(message)):
+        n.args[0] = value
+    assert str(doc) == text
+
+
+def test_changing_an_annotation_is_explicit():
+    doc, n = node("n retries=(u8)7\n")
+    entry = n.props.entry("retries")
+    entry.type = None
+    n.props["retries"] = "weekly"
+    assert str(doc) == "n retries=weekly\n"
+    n.props["retries"] = 7
+    entry.type = "i32"
+    n.props["retries"] = -1
+    assert str(doc) == "n retries=(i32)-1\n"
+    with pytest.raises(ValueError, match="out of range 0..=255"):
+        entry.type = "u8"
+
+
+def test_an_unknown_annotation_isnt_checked():
+    doc, n = node("n (mine)1\n")
+    n.args[0] = "x"
+    n.args[0] = None
+    assert str(doc) == "n (mine)#null\n"
+
+
+# Writes over an annotated entry: each annotation rkdl knows, with a value of its class, a plain value it reads as (or
+# a number it converts), and one that doesn't fit, through every route that writes over an existing entry.
+
+FIT_CASES = [
+    # (annotation, old value text, value of its class, read back as, plain value it reads, read back as, misfit, message)
+    ("u8", "1", 200, 200, 7.0, 7, "weekly", "'weekly' doesn't fit (u8): not an integer"),
+    ("i32", "1", -5, -5, -3.0, -3, 2**40, "1099511627776 doesn't fit (i32): out of range -2147483648..=2147483647"),
+    ("f64", "1.5", 2.5, 2.5, 2, 2.0, True, "True doesn't fit (f64): not a number"),
+    ("f32", "1.5", 0.5, 0.5, 3, 3.0, 1e39, "1e+39 doesn't fit (f32): out of range"),
+    (
+        "decimal64",
+        "1.5",
+        decimal.Decimal("1.25"),
+        decimal.Decimal("1.25"),
+        2,
+        decimal.Decimal(2),
+        "2",
+        "'2' doesn't fit (decimal64): not a number",
+    ),
+    (
+        "decimal",
+        '"1.5"',
+        decimal.Decimal("1.25"),
+        decimal.Decimal("1.25"),
+        "2.5",
+        decimal.Decimal("2.5"),
+        1.5,
+        "1.5 doesn't fit (decimal): not a Decimal",
+    ),
+    (
+        "date",
+        '"2026-01-01"',
+        datetime.date(2029, 1, 1),
+        datetime.date(2029, 1, 1),
+        "2029-01-02",
+        datetime.date(2029, 1, 2),
+        datetime.datetime(2029, 1, 1, 9),
+        "datetime.datetime(2029, 1, 1, 9, 0) doesn't fit (date): would lose its time",
+    ),
+    (
+        "date-time",
+        '"2026-01-01T09:00:00"',
+        datetime.datetime(2029, 1, 1, 9),
+        datetime.datetime(2029, 1, 1, 9),
+        "2029-01-01T10:00:00",
+        datetime.datetime(2029, 1, 1, 10),
+        datetime.date(2029, 1, 1),
+        "datetime.date(2029, 1, 1) doesn't fit (date-time): not a datetime",
+    ),
+    (
+        "time",
+        '"09:00:00"',
+        datetime.time(10, 30),
+        datetime.time(10, 30),
+        "11:00:00",
+        datetime.time(11),
+        None,
+        "None doesn't fit (time): not a time",
+    ),
+    (
+        "ipv4",
+        '"10.0.0.1"',
+        ipaddress.IPv4Address("10.0.0.2"),
+        ipaddress.IPv4Address("10.0.0.2"),
+        "10.0.0.3",
+        ipaddress.IPv4Address("10.0.0.3"),
+        ipaddress.IPv6Address("::1"),
+        "IPv6Address('::1') doesn't fit (ipv4): not an IPv4Address",
+    ),
+    (
+        "ipv6",
+        '"::1"',
+        ipaddress.IPv6Address("::2"),
+        ipaddress.IPv6Address("::2"),
+        "::3",
+        ipaddress.IPv6Address("::3"),
+        "::g",
+        "'::g' doesn't fit (ipv6): ",
+    ),
+    (
+        "uuid",
+        '"00000000-0000-0000-0000-000000000000"',
+        uuid.UUID(int=1),
+        uuid.UUID(int=1),
+        "00000000-0000-0000-0000-000000000002",
+        uuid.UUID(int=2),
+        2,
+        "2 doesn't fit (uuid): not a UUID",
+    ),
+    ("regex", '"a+"', re.compile("b+"), re.compile("b+"), "c+", re.compile("c+"), "(", "'(' doesn't fit (regex): "),
+    ("base64", '"aGk="', b"hey", b"hey", "aGk=", b"hi", "hi", "'hi' doesn't fit (base64): "),
+    ("email", '"a@b.c"', "d@e.f", "d@e.f", "g@h.i", "g@h.i", 5, "5 doesn't fit (email): not a str"),
+]
+
+WRITE_ROUTES = {
+    "args[i]": lambda n, v: n.args.__setitem__(0, v),
+    "args slice": lambda n, v: n.args.__setitem__(slice(0, 1), [v]),
+    "node.args": lambda n, v: setattr(n, "args", [v]),
+    "arg entry.value": lambda n, v: setattr(n.args.entry(0), "value", v),
+    "props[k]": lambda n, v: n.props.__setitem__("k", v),
+    "props.update": lambda n, v: n.props.update(k=v),
+    "props |=": lambda n, v: n.props.__ior__({"k": v}),
+    "node.props": lambda n, v: setattr(n, "props", {"k": v}),
+    "prop entry.value": lambda n, v: setattr(n.props.entry("k"), "value", v),
+}
+
+
+def written(n, route):
+    return n.props.entry("k") if route.startswith(("prop", "node.props")) else n.args.entry(0)
+
+
+@pytest.mark.parametrize("route", WRITE_ROUTES)
+@pytest.mark.parametrize(("ty", "old", "value", "read", "plain", "plain_read", "misfit", "message"), FIT_CASES)
+def test_writes_over_a_builtin_annotation_fit_it_or_raise(
+    route, ty, old, value, read, plain, plain_read, misfit, message
+):
+    write = WRITE_ROUTES[route]
+    text = f"n ({ty}){old} k=({ty}){old}\n"
+    doc, n = node(text)
+    with pytest.raises(ValueError, match="^" + re.escape(message)):
+        write(n, misfit)
+    assert str(doc) == text
+    for v, expected in [(value, read), (plain, plain_read)]:
+        write(n, v)
+        entry = written(n, route)
+        assert entry.type == ty
+        assert entry.value == expected
+        assert type(entry.value) is type(expected)
+        assert str(rkdl.parse(str(doc))) == str(doc)
+
+
+CUSTOM_CASES = [
+    (Celsius(3.0), Celsius(3.0), "(celsius)3.0"),
+    (4.0, Celsius(4.0), "(celsius)4.0"),
+    (3, None, "3 doesn't fit (celsius): its decode raised TypeError('celsius is a float')"),
+    ("x", None, "'x' doesn't fit (celsius): its decode raised TypeError('celsius is a float')"),
+    (datetime.date(2029, 1, 1), None, "datetime.date(2029, 1, 1) doesn't fit (celsius): not a Celsius"),
+]
+
+
+@pytest.mark.parametrize("route", WRITE_ROUTES)
+@pytest.mark.parametrize(("value", "read", "expected"), CUSTOM_CASES)
+def test_writes_over_a_custom_annotation_fit_it_or_raise(route, value, read, expected):
+    write = WRITE_ROUTES[route]
+    text = "n (celsius)1.0 k=(celsius)1.0\n"
+    doc = rkdl.Parser(types=[CELSIUS]).parse(text)
+    n = doc["n"]
+    if read is None:
+        with pytest.raises(ValueError, match="^" + re.escape(expected)):
+            write(n, value)
+        assert str(doc) == text
+    else:
+        write(n, value)
+        entry = written(n, route)
+        assert entry.value == read
+        assert expected in str(doc)
+
+
+def test_a_misfit_among_several_writes_changes_nothing():
+    text = 'n (u8)1 (date)"2026-01-01" k=(u8)2 j=(ipv4)"10.0.0.1"\n'
+    doc, n = node(text)
+    with pytest.raises(ValueError, match=re.escape("'x' doesn't fit (date): ")):
+        n.args = [5, "x"]
+    with pytest.raises(ValueError, match=re.escape("'10.0.0.300' doesn't fit (ipv4): ")):
+        n.props.update(k=3, j="10.0.0.300")
+    assert str(doc) == text
 
 
 def test_a_kept_builtin_annotation_keeps_the_strings_spelling():

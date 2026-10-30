@@ -484,11 +484,14 @@ class Entry:
     def value(self) -> Any:
         """The value, converted by its type annotation.
 
-        Writing a value keeps the annotation if the value fits it, and otherwise picks one from the value's class.
+        Writing a value keeps the annotation, and the value has to fit it: be of the annotation's class, be a plain
+        value it reads (`"2029-01-01"` over `(date)`), or be a number it converts without loss (`7.0` over `(u8)`). To
+        change the annotation, set `type` first. An entry without one gets one picked from the value's class, and an
+        annotation rkdl doesn't know (not reserved, no custom Type) isn't checked.
 
         Raises:
-            ValueError: The annotation is a reserved type the value can't be read as, or the new value is a number
-                that doesn't fit it, like 300 or 3.5 written over `(u8)`.
+            ValueError: The annotation is one the value can't be read as, or the new value doesn't fit it, like 300,
+                3.5 or "weekly" written over `(u8)`. The document doesn't change.
             TypeError: The new value can't be converted to KDL.
         """
     @value.setter
@@ -509,7 +512,8 @@ class Entry:
 class Args(MutableSequence[Any]):
     """A node's arguments, as a live list of values.
 
-    It works like a list, and every edit changes the node. Arguments keep their place among the properties.
+    It works like a list, and every edit changes the node. Arguments keep their place among the properties. A value
+    written over an argument keeps its annotation and has to fit it, as with `Entry.value`.
     """
 
     def entry(self, index: SupportsIndex) -> Entry:
@@ -566,7 +570,8 @@ class Props(MutableMapping[str, Any]):
     """A node's properties, as a live dict of values.
 
     It works like a dict, and every edit changes the node. A new key goes after the last property. If a key appears
-    more than once in the text, the last one counts, as in KDL.
+    more than once in the text, the last one counts, as in KDL. A value written over a property keeps its annotation
+    and has to fit it, as with `Entry.value`.
     """
 
     def entry(self, key: str) -> Entry:
