@@ -749,7 +749,7 @@ class EditSequences(RuleBasedStateMachine):
         for entry, me, owner in self.entries:
             if not me.alive:
                 with pytest.raises(RuntimeError, match="entry was removed"):
-                    entry.value
+                    _ = entry.value
                 continue
             node = self.resolve(owner)
             if any(a is me for a in owner.args):

@@ -193,7 +193,7 @@ def span_at(spans, path):
 def value_key(entry):
     try:
         v = entry.value
-    except Exception as e:  # a typed value that doesn't fit its type
+    except ValueError as e:  # a typed value that doesn't fit its type
         return ("error", type(e).__name__, str(entry).strip())
     if isinstance(v, float) and math.isnan(v):
         return ("float", "nan")

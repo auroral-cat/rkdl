@@ -623,8 +623,10 @@ def test_failure_bad_string():
         (
             "Unexpected newline in single-line quoted string",
             "not quoted string",
-            'You can make a string multi-line by wrapping it in \'"""\', with a newline immediately after the '
-            "opening quotes.",
+            (
+                'You can make a string multi-line by wrapping it in \'"""\', with a newline immediately after the '
+                "opening quotes."
+            ),
             5,
             1,
         ),

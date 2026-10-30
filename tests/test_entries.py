@@ -288,7 +288,7 @@ def test_setting_a_type_does_not_convert():
     e = n.args.entry(0)
     e.type = "date"
     with pytest.raises(ValueError):
-        e.value
+        _ = e.value
     with pytest.raises(ValueError):
         n.args[0]
     assert "(date)5" in repr(e)
@@ -423,7 +423,7 @@ def test_removed_entry_is_dead():
     n.props.clear()
     for e in (first, a):
         with pytest.raises(RuntimeError, match="entry was removed"):
-            e.value
+            _ = e.value
         with pytest.raises(RuntimeError, match="entry was removed"):
             e.value = 5
         with pytest.raises(RuntimeError, match="entry was removed"):

@@ -36,7 +36,7 @@ def run(threads):
 
 
 def test_concurrent_lookups_share_one_handle():
-    for _ in range(50):
+    def attempt():
         d = rkdl.parse("a\nx 1 {\n    y\n}\nb\n")
         barrier = threading.Barrier(8)
         found = []
@@ -49,6 +49,9 @@ def test_concurrent_lookups_share_one_handle():
         xs, ys = [x for x, _ in found], [y for _, y in found]
         assert all(x is xs[0] for x in xs)
         assert all(y is ys[0] for y in ys)
+
+    for _ in range(50):
+        attempt()
 
 
 def test_reads_while_a_node_moves_between_documents():
@@ -89,9 +92,8 @@ def test_reads_while_a_node_moves_between_documents():
 
 
 def test_concurrent_entry_lookups_share_one_handle():
-    for _ in range(50):
-        d = rkdl.parse("x 1 a=2\n")
-        n = d["x"]
+    def attempt():
+        n = rkdl.parse("x 1 a=2\n")["x"]
         barrier = threading.Barrier(8)
         found = []
 
@@ -102,6 +104,9 @@ def test_concurrent_entry_lookups_share_one_handle():
         run([look] * 8)
         assert all(f[0] is found[0][0] for f in found)
         assert all(f[1] is found[0][1] and f[2] is found[0][1] for f in found)
+
+    for _ in range(50):
+        attempt()
 
 
 def test_entry_reads_while_its_node_moves_between_documents():
