@@ -3,7 +3,6 @@ import gc
 import weakref
 
 import pytest
-
 import rkdl
 
 TEXT = """\
@@ -650,7 +649,7 @@ def test_edits_leave_the_rest_byte_identical():
     out = str(d)
     assert out.startswith(BIG[: BIG.index("    retries")])
     assert out.endswith(BIG[BIG.index("    retries") :])
-    assert "client #\"raw\"# {\n    timeout 5\n    retries 3\n}\n" in out
+    assert 'client #"raw"# {\n    timeout 5\n    retries 3\n}\n' in out
 
     d = rkdl.parse(BIG)
     d["server"].name = "srv"

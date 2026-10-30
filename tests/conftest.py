@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 import rkdl
 
 # Everything the tests read from kdl-rs comes from this one checkout: the KDL spec suite and the examples.

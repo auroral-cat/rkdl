@@ -4,7 +4,6 @@ import gc
 import weakref
 
 import pytest
-
 import rkdl
 
 
@@ -262,7 +261,7 @@ def test_annotation_inferred_when_the_value_does_not_fit():
     d, n = node("n (u8)1 when=(u8)2\n")
     n.args[0] = 300
     n.props["when"] = datetime.date(2024, 1, 2)
-    assert str(d) == "n 300 when=(date)\"2024-01-02\"\n"
+    assert str(d) == 'n 300 when=(date)"2024-01-02"\n'
 
 
 def test_unknown_annotation_is_kept():
@@ -296,7 +295,7 @@ def test_setting_a_type_does_not_convert():
 
 
 def test_known_type_that_does_not_fit_raises_on_read():
-    _, n = node("n (u8)300 d=(date)\"nope\"\n")
+    _, n = node('n (u8)300 d=(date)"nope"\n')
     with pytest.raises(ValueError):
         n.args[0]
     with pytest.raises(ValueError):

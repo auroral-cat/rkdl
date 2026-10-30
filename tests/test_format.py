@@ -1,7 +1,6 @@
 import pytest
-from conftest import formatted
-
 import rkdl
+from conftest import formatted
 
 MESSY = """\
 // header
@@ -14,7 +13,9 @@ node1   1    2 {
 
 
 def test_default_indent():
-    assert formatted(MESSY) == """\
+    assert (
+        formatted(MESSY)
+        == """\
 // header
 node1 1 2 {
     // inner
@@ -22,6 +23,7 @@ node1 1 2 {
 }
 node2 #true
 """
+    )
 
 
 def test_fmt_without_argument_uses_defaults():
@@ -40,7 +42,9 @@ def test_no_comments():
 
 def test_entry_autoformat_keep():
     # Keeping entry formatting keeps the whitespace before each entry too; only node indentation changes.
-    assert formatted(MESSY, rkdl.Formatter(entry_autoformat_keep=True)) == """\
+    assert (
+        formatted(MESSY, rkdl.Formatter(entry_autoformat_keep=True))
+        == """\
 // header
 node1   1    2 {
     // inner
@@ -48,6 +52,7 @@ node1   1    2 {
 }
 node2   #true
 """
+    )
 
 
 def test_parser_formatter_matches_fmt():
@@ -86,7 +91,7 @@ def test_parser_formatter_keeps_strings_quoted():
 
 
 def test_fmt_leaves_other_spellings_alone():
-    assert formatted('"a" #"b"# "c d" 0x10 k="v"\n') == "a b \"c d\" 16 k=v\n"
+    assert formatted('"a" #"b"# "c d" 0x10 k="v"\n') == 'a b "c d" 16 k=v\n'
 
 
 @pytest.mark.parametrize("comment", ["/* end */", "; // end", "; /* end */"])

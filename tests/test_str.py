@@ -1,5 +1,4 @@
 import pytest
-
 import rkdl
 
 NESTED = """\
@@ -19,12 +18,7 @@ def test_str_node_keeps_inner_comments():
     doc = rkdl.parse(NESTED)
     assert str(doc) == NESTED
     assert str(doc["parent"]) == (
-        "parent 1 key=v {\n"
-        "    // above child\n"
-        "    child /* inline */ 2\n"
-        "    /-gone\n"
-        "    other { deep; }\n"
-        "}"
+        "parent 1 key=v {\n    // above child\n    child /* inline */ 2\n    /-gone\n    other { deep; }\n}"
     )
     # The comment above a node is part of that node's leading text, which str(node) leaves out.
     assert str(doc["next"]) == "next"

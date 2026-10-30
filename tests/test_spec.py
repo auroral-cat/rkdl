@@ -1,9 +1,16 @@
 """The official KDL test suite (vendored in kdl-rs), run through rkdl's Python API."""
 
 import pytest
-from conftest import SPEC_EXPECTED, has_duplicate_props, is_valid_case, read_case, skip_module_without_kdl_rs, spec_inputs, walk
-
 import rkdl
+from conftest import (
+    SPEC_EXPECTED,
+    has_duplicate_props,
+    is_valid_case,
+    read_case,
+    skip_module_without_kdl_rs,
+    spec_inputs,
+    walk,
+)
 
 skip_module_without_kdl_rs()
 
@@ -29,7 +36,9 @@ INVALID = [p for p in spec_inputs() if not is_valid_case(p)]
 
 def cases(paths, fails):
     return [
-        pytest.param(p, id=p.name, marks=[pytest.mark.xfail(strict=True, reason=fails[p.name])] if p.name in fails else [])
+        pytest.param(
+            p, id=p.name, marks=[pytest.mark.xfail(strict=True, reason=fails[p.name])] if p.name in fails else []
+        )
         for p in paths
     ]
 

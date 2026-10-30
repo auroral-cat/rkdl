@@ -14,9 +14,8 @@ Skipped, because they test Rust-only API:
 """
 
 import pytest
-from conftest import EXAMPLES, MISSING_KDL_RS, formatted, have_kdl_rs, parse_error
-
 import rkdl
+from conftest import EXAMPLES, MISSING_KDL_RS, formatted, have_kdl_rs, parse_error
 
 
 def diagnostics(text):
@@ -573,9 +572,7 @@ TERMINATOR_HELP = (
 NAME_HELP = (
     "This can be any string type, including a quoted, raw, or multiline string, as well as a plain identifier string."
 )
-CHILD_HELP = (
-    "Did you forget to add the node name itself? Or perhaps terminated the node before its child block?"
-)
+CHILD_HELP = "Did you forget to add the node name itself? Or perhaps terminated the node before its child block?"
 
 
 def test_failure_bad_node_name():
@@ -626,7 +623,7 @@ def test_failure_bad_string():
         (
             "Unexpected newline in single-line quoted string",
             "not quoted string",
-            "You can make a string multi-line by wrapping it in '\"\"\"', with a newline immediately after the "
+            'You can make a string multi-line by wrapping it in \'"""\', with a newline immediately after the '
             "opening quotes.",
             5,
             1,

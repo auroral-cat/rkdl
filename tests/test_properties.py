@@ -10,12 +10,11 @@ import os
 import re
 
 import pytest
+import rkdl
 from conftest import MISSING_KDL_RS, has_duplicate_props, have_kdl_rs, read_case, spec_inputs, walk
 from hypothesis import note, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
-
-import rkdl
 
 settings.register_profile("default", max_examples=120, stateful_step_count=40, deadline=None)
 settings.register_profile("long", max_examples=1000, stateful_step_count=60, deadline=None)
@@ -144,7 +143,7 @@ def check_children(children, expected, where):
 
 I128 = 2**127
 # Code points a quoted string in generated text has to escape, since KDL doesn't allow them literally.
-UNPRINTABLE = set(map(chr, [*range(0x00, 0x08), *range(0x0E, 0x20), 0x0B, 0x85, 0x2028, 0x2029]))
+UNPRINTABLE = set(map(chr, [*range(0x08), *range(0x0E, 0x20), 0x0B, 0x85, 0x2028, 0x2029]))
 UNPRINTABLE |= set(map(chr, [0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF]))
 
 AWKWARD_STRINGS = [
@@ -766,4 +765,3 @@ class EditSequences(RuleBasedStateMachine):
 
 TestEditSequences = EditSequences.TestCase
 TestEditSequences.settings = PROFILE
-

@@ -8,9 +8,8 @@ import functools
 import math
 
 import pytest
-from conftest import SPEC_INPUT, is_valid_case, read_case, skip_module_without_kdl_rs, spec_inputs, walk
-
 import rkdl
+from conftest import SPEC_INPUT, is_valid_case, read_case, skip_module_without_kdl_rs, spec_inputs, walk
 
 skip_module_without_kdl_rs()
 
@@ -432,14 +431,16 @@ def collect():
         for path, node in walk(rkdl.parse(text)):
             for edit in EDITS:
                 if applies(edit, node):
-                    cases.append(pytest.param(file.name, path, edit, id=f"{file.name}:{'.'.join(map(str, path))}:{edit}"))
+                    cases.append(
+                        pytest.param(file.name, path, edit, id=f"{file.name}:{'.'.join(map(str, path))}:{edit}")
+                    )
     return cases
 
 
 CASES = collect()
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def run(file, path, edit):
     """Returns the text before and after the edit, and the expected snapshot."""
     doc = rkdl.parse(read_case(SPEC_INPUT / file))
@@ -565,4 +566,3 @@ def test_scanner_agrees_with_rkdl():
         if reparses(read_case(file)):
             doc = rkdl.parse(read_case(file))
             assert span_shape(scan(str(doc))) == shape(doc.children), file.name
-

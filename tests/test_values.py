@@ -1,4 +1,3 @@
-import base64
 import datetime
 import decimal
 import enum
@@ -8,7 +7,6 @@ import re
 import uuid
 
 import pytest
-
 import rkdl
 from rkdl._rkdl import _debug_from_python as from_python
 from rkdl._rkdl import _debug_to_python as to_python
@@ -63,7 +61,7 @@ KNOWN = [
     ("(f64)1", 1.0),
     ("(f64)#inf", math.inf),
     ("(decimal64)0.1", decimal.Decimal("0.1")),
-    ("(decimal128)12", decimal.Decimal("12")),
+    ("(decimal128)12", decimal.Decimal(12)),
     ('(decimal)"3.14159265358979323846264338327950288"', decimal.Decimal("3.14159265358979323846264338327950288")),
     ('(date-time)"2024-05-06T07:08:09+00:00"', datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)),
     ('(date)"2024-05-06"', datetime.date(2024, 5, 6)),
@@ -145,7 +143,7 @@ def test_known_type_that_does_not_fit_raises(text):
         ("+.5e3", ('"+.5e3"', None)),
         ('+."\\', ('"+.\\"\\\\"', None)),
         ("+.x", ("+.x", None)),
-        (5,("5", None)),
+        (5, ("5", None)),
         (1.5, ("1.5", None)),
         (1e20, ("1e20", None)),
         (True, ("#true", None)),
@@ -165,7 +163,7 @@ def test_plain_from_python(value, expected):
 # The spec's "Disallowed Literal Code Points" (less surrogates, which a str can't hold here), plus the newlines a
 # single-line string can't hold literally.
 BANNED = [
-    *range(0x00, 0x09), *range(0x0E, 0x20), 0x7F, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF,
+    *range(0x09), *range(0x0E, 0x20), 0x7F, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF,
 ]  # fmt: skip
 NEWLINES = [0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029]
 

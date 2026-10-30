@@ -1,7 +1,6 @@
 import pytest
-from conftest import parse_error
-
 import rkdl
+from conftest import parse_error
 
 
 def test_parse_error_is_value_error():
@@ -34,7 +33,7 @@ def test_several_diagnostics():
 
 
 def test_report_has_snippet_and_no_ansi():
-    err = parse_error("\tnode \"ünïcødé\" {\n\t\tchild }}\n")
+    err = parse_error('\tnode "ünïcødé" {\n\t\tchild }}\n')
     report = str(err)
     assert "\x1b[" not in report
     assert "\x1b]" not in report
@@ -46,7 +45,9 @@ def test_report_has_snippet_and_no_ansi():
     strict=True,
     reason="kdl-rs: an integer outside i128 fails as 'Expected end of document' and 'Found invalid node name'",
 )
-@pytest.mark.parametrize("number", ["170141183460469231731687303715884105728", "-170141183460469231731687303715884105729"])
+@pytest.mark.parametrize(
+    "number", ["170141183460469231731687303715884105728", "-170141183460469231731687303715884105729"]
+)
 def test_integer_outside_i128_is_reported_as_one(number):
     report = str(parse_error(f"n {number}"))
     assert "end of document" not in report

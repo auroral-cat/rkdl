@@ -2,7 +2,6 @@ import gc
 import weakref
 
 import pytest
-
 import rkdl
 
 
