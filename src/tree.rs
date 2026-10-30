@@ -193,15 +193,6 @@ impl IdTree {
         Some((node, index))
     }
 
-    /// Assigns fresh ids to `node` and its whole subtree. `parent: None` means top level. The handles insert through
-    /// `put_subtree` instead, so only tests build trees this way.
-    #[cfg(test)]
-    pub(crate) fn insert_node(&mut self, parent: Option<NodeId>, index: usize, node: &KdlNode) -> NodeId {
-        let id = self.add_node(parent, node);
-        self.siblings_mut(parent).insert(index, id);
-        id
-    }
-
     pub(crate) fn take_subtree(&mut self, node: NodeId) -> Subtree {
         let parent = self.parent(node);
         let siblings = self.siblings_mut(parent);
@@ -343,8 +334,12 @@ mod tests {
         KdlDocument::parse(text).unwrap()
     }
 
-    fn node(text: &str) -> KdlNode {
-        parse(text).nodes()[0].clone()
+    /// A new node and its ids, taken out of its own one-node tree the way a detached node's are.
+    fn detached(text: &str) -> (KdlNode, Subtree) {
+        let doc = parse(text);
+        let mut home = IdTree::from_document(&doc);
+        let root = home.top()[0];
+        (doc.nodes()[0].clone(), home.take_subtree(root))
     }
 
     fn at(tree: &IdTree, path: &[usize]) -> NodeId {
@@ -392,11 +387,13 @@ mod tests {
         let (a, b) = (tree.top()[0], tree.top()[1]);
 
         for (index, text) in [(0, "first 1"), (2, "middle x=1 {\n    k\n}"), (4, "last")] {
-            let new = node(text);
-            let id = tree.insert_node(None, index, &new);
+            let (new, subtree) = detached(text);
+            let id = subtree.root();
+            tree.put_subtree(None, index, subtree);
             doc.nodes_mut().insert(index, new);
             tree.check_shape(&doc);
             assert_eq!(tree.path(id), Some(vec![index]));
+            assert_eq!(tree.parent(id), None);
         }
         assert_eq!(tree.path(a), Some(vec![1]));
         assert_eq!(tree.path(b), Some(vec![3]));
@@ -413,8 +410,9 @@ mod tests {
         let (a, b) = (tree.children(p).unwrap()[0], tree.children(p).unwrap()[1]);
 
         for (index, text) in [(0, "first"), (2, "middle 1 2"), (4, "last {}")] {
-            let new = node(text);
-            let id = tree.insert_node(Some(p), index, &new);
+            let (new, subtree) = detached(text);
+            let id = subtree.root();
+            tree.put_subtree(Some(p), index, subtree);
             node_at_mut(&mut doc, &[0])
                 .ensure_children()
                 .nodes_mut()
@@ -422,6 +420,9 @@ mod tests {
             tree.check_shape(&doc);
             assert_eq!(tree.path(id), Some(vec![0, index]));
             assert_eq!(tree.parent(id), Some(p));
+            for (i, &entry) in tree.entries(id).iter().enumerate() {
+                assert_eq!(tree.entry_position(entry), Some((id, i)));
+            }
         }
         assert_eq!(tree.path(a), Some(vec![0, 1]));
         assert_eq!(tree.path(b), Some(vec![0, 3]));
