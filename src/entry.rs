@@ -9,7 +9,7 @@ use pyo3::types::{PyList, PySlice, PyTuple};
 use crate::document::{DocState, Document};
 use crate::edit::{Item, chosen, read};
 use crate::handles::{self, Fail, Home, removed};
-use crate::index::{not_in, pick_one, pick_slice};
+use crate::index::{Index, not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::tree::{EntryId, node_at_mut};
 use crate::values;
@@ -278,7 +278,7 @@ impl Entries {
             })?;
             return Ok(PyList::new(py, found)?.into_any());
         }
-        let index: isize = index.extract()?;
+        let Index(index) = index.extract()?;
         let mut found = chosen(py, node, |items| Ok(vec![pick_one(items, index, "entries")?.id]))?;
         Ok(found.pop().expect("chose one entry").into_any())
     }

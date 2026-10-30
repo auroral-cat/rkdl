@@ -132,3 +132,22 @@ def test_defaults_and_repr():
     assert repr(rkdl.Formatter(indent="\t", no_comments=True)) == (
         "Formatter(indent='\\t', indent_level=0, no_comments=True, entry_autoformat_keep=False)"
     )
+
+
+@pytest.mark.parametrize("indent", ["", " ", "\t", "  \t", "　", " "])
+def test_indent_can_be_any_kdl_space(indent):
+    assert formatted("a {\nb\n}\n", rkdl.Formatter(indent=indent)) == f"a {{\n{indent}b\n}}\n"
+
+
+# Each of these would change what the document says: a new node, children commented out, or text that doesn't parse.
+@pytest.mark.parametrize("indent", ["x", "  // ", "x}", "\n", "\r\n  ", ";", "\\"])
+def test_indent_must_be_kdl_space(indent):
+    with pytest.raises(ValueError, match="indent must be KDL whitespace"):
+        rkdl.Formatter(indent=indent)
+
+
+def test_indent_level_is_bounded():
+    assert rkdl.Formatter(indent_level=1000).indent_level == 1000
+    # Far past that, kdl-rs's autoformat would loop until allocation fails and abort the process.
+    with pytest.raises(ValueError, match="indent_level must be at most 1000"):
+        rkdl.Formatter(indent_level=2**40)

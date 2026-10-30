@@ -94,6 +94,33 @@ def test_regex_to_python():
     assert to_python(r'(regex)#"\d+"#') == re.compile(r"\d+")
 
 
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        (re.IGNORECASE, "re.IGNORECASE"),
+        (re.IGNORECASE | re.MULTILINE, "re.IGNORECASE|re.MULTILINE"),
+        (re.ASCII, "re.ASCII"),
+    ],
+)
+def test_regex_flags_cant_be_written(flags, named):
+    # KDL keeps only the pattern, so the flags would be lost.
+    pattern = re.compile(r"\d", flags)
+    with pytest.raises(ValueError, match=re.escape(named)):
+        from_python(pattern)
+    with pytest.raises(ValueError, match=re.escape(named)):
+        from_python(pattern, "regex")
+    doc = rkdl.parse("n 1\n")
+    with pytest.raises(ValueError, match="put flags inline"):
+        doc["n"].args.append(pattern)
+    assert str(doc) == "n 1\n"
+
+
+def test_inline_regex_flags_are_part_of_the_pattern():
+    pattern = re.compile(r"(?i)\d")
+    assert from_python(pattern) == (r'"(?i)\\d"', "regex")
+    assert to_python(r'(regex)"(?i)\\d"') == pattern
+
+
 def test_decimal_from_integer_is_exact():
     assert to_python("(decimal128)170141183460469231731687303715884105727") == decimal.Decimal(2**127 - 1)
 
@@ -512,3 +539,46 @@ def test_plain_string_reserved_type(ty):
     assert str(doc) == f"n ({ty})z k=5\n"
     with pytest.raises(ValueError, match=re.escape(f"({ty})")):
         _ = rkdl.parse(f"n ({ty})5\n")["n"].args[0]
+
+
+class Idx:
+    """An index through `__index__`, the way numpy integers are."""
+
+    def __init__(self, i):
+        self.i = i
+
+    def __index__(self):
+        return self.i
+
+
+@pytest.mark.parametrize("huge", [2**70, -(2**70), Idx(2**70)])
+def test_indexes_past_isize_are_out_of_range(huge):
+    # Any int works as an index, like a list's: past isize it's out of range, not an OverflowError.
+    doc = rkdl.parse("n 1 2 { c }\n")
+    n = doc["n"]
+    for view in (n.args, n.entries, n.children, doc.children):
+        with pytest.raises(IndexError):
+            _ = view[huge]
+    for view in (n.args, n.children):
+        with pytest.raises(IndexError):
+            view.pop(huge)
+        with pytest.raises(IndexError):
+            del view[huge]
+    with pytest.raises(IndexError):
+        n.args[huge] = 3
+    with pytest.raises(IndexError):
+        n.children[huge] = rkdl.Node("d")
+    with pytest.raises(IndexError):
+        n.args.entry(huge)
+    assert str(doc) == "n 1 2 { c }\n"
+
+
+def test_insert_past_isize_clamps():
+    doc = rkdl.parse("n 1 2 { c }\n")
+    n = doc["n"]
+    n.args.insert(2**70, 3)
+    n.args.insert(-(2**70), 0)
+    n.children.insert(Idx(2**70), rkdl.Node("d"))
+    n.children.insert(-(2**70), rkdl.Node("b"))
+    assert list(n.args) == [0, 1, 2, 3]
+    assert [c.name for c in n.children] == ["b", "c", "d"]
