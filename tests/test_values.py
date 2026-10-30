@@ -8,7 +8,9 @@ import uuid
 
 import pytest
 import rkdl
+from conftest import run_threads
 from rkdl._rkdl import _debug_from_python as from_python
+from rkdl._rkdl import _debug_reserved_types
 from rkdl._rkdl import _debug_to_python as to_python
 
 
@@ -392,3 +394,118 @@ def test_types_come_from_the_document_a_node_is_in():
     assert node.args[0] == 21
     typed.children.append(plain.children.pop(0))
     assert node.args[0] == Celsius(21)
+
+
+# Through a document
+
+
+def test_custom_type_reads_through_a_document():
+    doc = rkdl.Parser(types=[CELSIUS]).parse("t (celsius)21.5 low=(celsius)-3 plain=1\n")
+    t = doc["t"]
+    assert t.args[0] == Celsius(21.5)
+    assert t.args.entry(0).value == Celsius(21.5)
+    assert t.props["low"] == Celsius(-3)
+    assert t.props["plain"] == 1
+
+
+def test_custom_type_writes_through_a_document():
+    doc = rkdl.Parser(types=[CELSIUS]).parse("t 1 k=2\n")
+    t = doc["t"]
+    t.args.append(Celsius(3))
+    t.props["k"] = Celsius(4)
+    t.args.entry(0).value = Celsius(5)
+    assert str(doc) == "t (celsius)5 (celsius)3 k=(celsius)4\n"
+    assert list(t.args) == [Celsius(5), Celsius(3)]
+    assert t.props == {"k": Celsius(4)}
+
+
+def test_callbacks_can_read_their_own_document():
+    # The document is unlocked while a callback runs, so one that reads the document doesn't deadlock. The calls run
+    # on a thread so a deadlock fails the test instead of hanging it.
+    docs = []
+
+    def decode(degrees):
+        return Celsius(degrees + docs[0]["offset"].args[0])
+
+    def encode(c):
+        return c.degrees - docs[0]["offset"].args[0]
+
+    offset = rkdl.Type("offset", Celsius, decode=decode, encode=encode)
+    doc = rkdl.Parser(types=[offset]).parse("offset 10\nt (offset)1\n")
+    docs.append(doc)
+    t = doc["t"]
+    assert run_threads(lambda: t.args[0]) == [Celsius(11)]
+    run_threads(lambda: t.args.append(Celsius(15)))
+    assert str(doc) == "offset 10\nt (offset)1 (offset)5\n"
+
+
+VALUE_WRITES = {
+    "args.append": lambda n, v: n.args.append(v),
+    "args.insert": lambda n, v: n.args.insert(0, v),
+    "args[i] =": lambda n, v: n.args.__setitem__(0, v),
+    "props[new] =": lambda n, v: n.props.__setitem__("new", v),
+    "props[old] =": lambda n, v: n.props.__setitem__("k", v),
+    "entry.value =": lambda n, v: setattr(n.args.entry(0), "value", v),
+    "Node(arg)": lambda n, v: n.children.append(rkdl.Node("x", v)),
+    "Node(prop)": lambda n, v: n.children.append(rkdl.Node("x", p=v)),
+}
+
+NAME_WRITES = {
+    "node.name =": lambda n, v: setattr(n, "name", v),
+    "node.type =": lambda n, v: setattr(n, "type", v),
+    "entry.type =": lambda n, v: setattr(n.args.entry(0), "type", v),
+    "Node(name)": lambda n, v: n.children.append(rkdl.Node(v)),
+    "Node(type=)": lambda n, v: n.children.append(rkdl.Node("x", type=v)),
+}
+
+TOO_BIG = [2**127, -(2**127) - 1]
+LONE_SURROGATE = "a\ud800b"
+
+
+class Unsupported:
+    pass
+
+
+@pytest.mark.parametrize("write", VALUE_WRITES)
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [*[(v, OverflowError) for v in TOO_BIG], (LONE_SURROGATE, ValueError), (Unsupported(), TypeError)],
+)
+def test_bad_value_leaves_the_document_unchanged(write, value, error):
+    doc = rkdl.parse("n 1 k=2 {\n    c\n}\n")
+    before = str(doc)
+    with pytest.raises(error):
+        VALUE_WRITES[write](doc["n"], value)
+    assert str(doc) == before
+
+
+# Names are strings, so an int of any size is the wrong type.
+@pytest.mark.parametrize("write", NAME_WRITES)
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [*[(v, TypeError) for v in TOO_BIG], (LONE_SURROGATE, ValueError), (Unsupported(), TypeError)],
+)
+def test_bad_name_leaves_the_document_unchanged(write, value, error):
+    doc = rkdl.parse("n 1 k=2 {\n    c\n}\n")
+    before = str(doc)
+    with pytest.raises(error):
+        NAME_WRITES[write](doc["n"], value)
+    assert str(doc) == before
+
+
+PLAIN_STRING_TYPES = [name for name, plain in _debug_reserved_types() if plain]
+
+
+@pytest.mark.parametrize("ty", PLAIN_STRING_TYPES)
+def test_plain_string_reserved_type(ty):
+    doc = rkdl.parse(f'n ({ty})"x" k=({ty})"y"\n')
+    n = doc["n"]
+    assert type(n.args[0]) is str
+    assert n.args[0] == "x"
+    assert n.props["k"] == "y"
+    # A string still fits, so the annotation stays. An integer doesn't, so it goes.
+    n.args[0] = "z"
+    n.props["k"] = 5
+    assert str(doc) == f"n ({ty})z k=5\n"
+    with pytest.raises(ValueError, match=re.escape(f"({ty})")):
+        _ = rkdl.parse(f"n ({ty})5\n")["n"].args[0]

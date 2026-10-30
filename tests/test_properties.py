@@ -15,18 +15,14 @@ from conftest import MISSING_KDL_RS, has_duplicate_props, have_kdl_rs, read_case
 from hypothesis import note, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
+from rkdl._rkdl import _debug_reserved_types
 
 settings.register_profile("default", max_examples=120, stateful_step_count=40, deadline=None)
 settings.register_profile("long", max_examples=1000, stateful_step_count=60, deadline=None)
 PROFILE = settings.get_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 # Type annotations rkdl converts. Entry annotations the tests set avoid these, so values stay plain.
-RESERVED_TYPES = {
-    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
-    "decimal64", "decimal128", "decimal", "date-time", "date", "time", "ipv4", "ipv6", "uuid", "regex", "base64",
-    "duration", "currency", "country-2", "country-3", "country-subdivision", "email", "idn-email", "hostname",
-    "idn-hostname", "url", "url-reference", "irl", "irl-reference", "url-template", "base85",
-}  # fmt: skip
+RESERVED_TYPES = {name for name, _ in _debug_reserved_types()}
 
 # The model doesn't follow annotations it didn't set (reserved ones from the spec corpus, after a value write).
 ANY_TYPE = "<any>"
@@ -58,15 +54,21 @@ class MNode:
         self.args = list(args)
         self.props = dict(props)
         self.children = children
+        # Layout the model knows for sure, for generated text and new nodes. False means "don't know".
+        self.flat = False  # the node's text, comments above it included, is one line
+        self.one_line = False  # its children block is written on one line, like `a { b; c }`
+        self.foreign = False  # from the spec corpus, whose text the model knows nothing about
 
     def copy(self):
-        return MNode(
+        m = MNode(
             self.name,
             self.type,
             [e.copy() for e in self.args],
             {k: e.copy() for k, e in self.props.items()},
             None if self.children is None else [c.copy() for c in self.children],
         )
+        m.flat, m.one_line, m.foreign = self.flat, self.one_line, self.foreign
+        return m
 
     def walk(self):
         yield self
@@ -143,7 +145,7 @@ def check_children(children, expected, where):
 
 I128 = 2**127
 # Code points a quoted string in generated text has to escape, since KDL doesn't allow them literally.
-UNPRINTABLE = set(map(chr, [*range(0x08), *range(0x0E, 0x20), 0x0B, 0x85, 0x2028, 0x2029]))
+UNPRINTABLE = set(map(chr, [*range(0x08), *range(0x0E, 0x20), 0x0B, 0x7F, 0x85, 0x2028, 0x2029]))
 UNPRINTABLE |= set(map(chr, [0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF]))
 
 AWKWARD_STRINGS = [
@@ -225,52 +227,83 @@ def render_entry(draw, key, entry):
     return text if key is None else render_string(draw, key) + "=" + text
 
 
-def render_nodes(draw, nodes, indent, level):
-    pad = indent * level
+def render_head(draw, node):
+    """A node's type, name and entries, and a skipped block if it has a block. All on one line."""
+    parts = []
+    if node.type is not None:
+        # No whitespace inside `(type)`: kdl-rs 6.7.1 drops it (notes/upstream.md).
+        parts.append("(" + render_string(draw, node.type) + ")" + render_string(draw, node.name))
+    else:
+        parts.append(render_string(draw, node.name))
+    # Properties go between arguments, keeping their own order.
+    entries = [(None, e) for e in node.args]
+    lowest = 0
+    for key, e in node.props.items():
+        at = draw(st.integers(lowest, len(entries)))
+        entries.insert(at, (key, e))
+        lowest = at + 1
+    for key, e in entries:
+        if draw(st.integers(0, 6)) == 0:
+            parts.append("/-" + draw(st.sampled_from(["0", "x=1", '"s"'])))
+        if draw(st.integers(0, 8)) == 0:
+            parts.append("/* c */")
+        parts.append(render_entry(draw, key, e))
+    line = draw(st.sampled_from([" ", "  ", "\t"])).join(parts)
+    if node.children is not None and draw(st.integers(0, 6)) == 0:
+        line += " /-{ skipped }"
+    return line
+
+
+def render_block_on_one_line(draw, nodes):
+    """A children block written on one line, like ` { b; c }`. Every node in it is flat."""
     out = []
     for node in nodes:
+        node.flat = True
+        node.one_line = node.children is not None
+        line = render_head(draw, node)
+        if node.children:
+            line += render_block_on_one_line(draw, node.children)
+        elif node.children is not None:
+            line += draw(st.sampled_from([" {}", "{}"]))
+        out.append(line)
+    return " { " + "; ".join(out) + draw(st.sampled_from(["", ";"])) + " }"
+
+
+def render_nodes(draw, nodes, indent, level):
+    """Nodes one per line, setting each model node's `flat` and `one_line` to match the text."""
+    pad = indent * level
+    out = []
+    end = "\n"
+    for node in nodes:
+        # kdl-rs gives a comment after `;` to the next node, as part of its leading.
+        above = "//" in end
         if draw(st.integers(0, 5)) == 0:
             out.append("\n")
+            above = True
         if draw(st.integers(0, 4)) == 0:
             out.append(pad + "// a comment\n")
+            above = True
         if draw(st.integers(0, 6)) == 0:
             # No `;` after a slashdashed node: kdl-rs rejects it (notes/upstream.md).
             out.append(pad + "/- gone 1 {\n" + pad + indent + "x\n" + pad + "}\n")
-        parts = []
-        if node.type is not None:
-            # No whitespace inside `(type)`: kdl-rs 6.7.1 drops it (notes/upstream.md).
-            parts.append("(" + render_string(draw, node.type) + ")" + render_string(draw, node.name))
-        else:
-            parts.append(render_string(draw, node.name))
-        # Properties go between arguments, keeping their own order.
-        entries = [(None, e) for e in node.args]
-        lowest = 0
-        for key, e in node.props.items():
-            at = draw(st.integers(lowest, len(entries)))
-            entries.insert(at, (key, e))
-            lowest = at + 1
-        for key, e in entries:
-            if draw(st.integers(0, 6)) == 0:
-                parts.append("/-" + draw(st.sampled_from(["0", "x=1", '"s"'])))
-            if draw(st.integers(0, 8)) == 0:
-                parts.append("/* c */")
-            parts.append(render_entry(draw, key, e))
-        line = pad + draw(st.sampled_from([" ", "  ", "\t"])).join(parts)
-        if node.children is not None:
-            if draw(st.integers(0, 6)) == 0:
-                line += " /-{ skipped }"
-            if node.children:
-                line += " {\n" + render_nodes(draw, node.children, indent, level + 1) + pad + "}"
-            else:
-                line += draw(st.sampled_from([" {}", "{}", " {\n" + pad + "}"]))
+            above = True
+        line = pad + render_head(draw, node)
+        if node.children and draw(st.integers(0, 3)) == 0:
+            line += render_block_on_one_line(draw, node.children)
+        elif node.children:
+            line += " {\n" + render_nodes(draw, node.children, indent, level + 1) + pad + "}"
+        elif node.children is not None:
+            line += draw(st.sampled_from([" {}", "{}", " {\n" + pad + "}"]))
         # Nothing but a terminator right after `}`: kdl-rs drops whitespace (notes/upstream.md) and comments
         # (test_comment_after_a_block_survives) there. A node without a block may get one later, so the same goes for
         # it, except for a block comment, which the new block goes after.
         if node.children is None:
-            line += draw(st.sampled_from(["\n", "\n", ";\n", " /* end */\n", "; // end\n"]))
+            end = draw(st.sampled_from(["\n", "\n", ";\n", " /* end */\n", "; // end\n"]))
         else:
-            line += draw(st.sampled_from(["\n", "\n", ";\n", "; // end\n"]))
-        out.append(line)
+            end = draw(st.sampled_from(["\n", "\n", ";\n", "; // end\n"]))
+        node.one_line = node.children is not None and "\n" not in line
+        node.flat = "\n" not in line and not above and end in ("\n", ";\n")
+        out.append(line + end)
     return "".join(out)
 
 
@@ -291,7 +324,11 @@ def model_nodes(draw, level=0):
 def generated_documents(draw):
     nodes = draw(model_nodes())
     indent = draw(st.sampled_from(["    ", "  ", "\t"]))
-    return render_nodes(draw, nodes, indent, 0), nodes
+    text = render_nodes(draw, nodes, indent, 0)
+    # The generator never puts a line ending inside a value or comment, so this changes only the line ends.
+    if draw(st.booleans()):
+        text = text.replace("\n", "\r\n")
+    return text, nodes
 
 
 def corpus_is_usable(text):
@@ -357,6 +394,13 @@ start_documents = st.one_of(*start_documents)
 
 # The state machine
 
+# Whitespace right after a `}`. kdl-rs drops it when parsing, with the line ending if one follows, and what it prints
+# then may not parse at all (notes/upstream.md). rkdl writes it in a few places: a node at the end of a one-line block
+# that gets a block of its own (test_block_at_the_end_of_a_one_line_block), and a block given to a node with trailing
+# whitespace, which a node taken from the end of a one-line block has
+# (test_block_on_a_node_with_trailing_space_reads_back).
+SPACE_AFTER_BLOCK = re.compile(r"\}[ \t]+(?:(?=\})|\r?\n)")
+
 
 class EditSequences(RuleBasedStateMachine):
     def __init__(self):
@@ -366,6 +410,7 @@ class EditSequences(RuleBasedStateMachine):
         self.detached = []  # (handle, model) of detached roots we still hold
         self.nodes = {}  # id(model) -> (handle, model): node handles kept from earlier steps
         self.entries = []  # (handle, model entry, model owner): entry handles kept from earlier steps
+        self.crlf = []  # per document: whether it's written with `\r\n` line endings
 
     # Finding things
 
@@ -398,6 +443,19 @@ class EditSequences(RuleBasedStateMachine):
             if path is not None:
                 return [i, *path]
         return None
+
+    def lineage(self, target):
+        """The model nodes from the top of target's tree down to target itself."""
+        for _, tree in self.roots():
+            for m in tree:
+                path = self.path_in(m, target)
+                if path is not None:
+                    out = [m]
+                    for i in path:
+                        m = m.children[i]
+                        out.append(m)
+                    return out
+        raise AssertionError("node not found")
 
     def resolve(self, target):
         """Looks a model node up fresh through the API, without the pool."""
@@ -475,6 +533,7 @@ class EditSequences(RuleBasedStateMachine):
                 if sibling is m:
                     popped = self.view(data, place).pop(i)
                     siblings.pop(i)
+                    self.emptied(place, siblings)
                     return popped
         raise AssertionError("node not found")
 
@@ -485,28 +544,88 @@ class EditSequences(RuleBasedStateMachine):
         for text, expected in (first, second):
             note(f"document {len(self.docs)}: {text!r}")
             doc = rkdl.parse(text)
-            tree = [read_model(n) for n in doc.children]
-            if expected is not None:
+            if expected is None:
+                tree = [read_model(n) for n in doc.children]
+                for root in tree:
+                    for m in root.walk():
+                        m.foreign = True
+            else:
                 check_children(doc.children, expected, "generated")
+                # The generated model knows the layout too.
+                tree = [m.copy() for m in expected]
             self.docs.append(doc)
             self.trees.append(tree)
+            self.crlf.append("\r\n" in text)
+
+    # Layout bookkeeping
+
+    def emptied(self, place, siblings):
+        """Notes that a document with no nodes left forgets its line ending style
+        (test_crlf_survives_emptying_the_document)."""
+        if place[0] == "doc" and not siblings:
+            self.crlf[place[1]] = False
+
+    def placed(self, place, owner, was_empty, new):
+        """Updates the layout flags after `new` model nodes went into owner's block (None for a document).
+
+        A block written on one line stays that way unless a node that doesn't fit on a line goes in, or the block was
+        empty. Otherwise it spreads over lines, and so does every block around it.
+
+        A node from the corpus can bring line endings rkdl doesn't restyle: `\\` continuations
+        (test_moved_line_continuation_takes_crlf) and multi-line strings. A CRLF document stops being one then.
+        """
+        if owner is not None and (was_empty or not all(n.flat for n in new)):
+            for m in self.lineage(owner):
+                m.flat = m.one_line = False
+        if any(d.foreign for n in new for d in n.walk()):
+            top = owner and self.lineage(owner)[0]
+            for k, tree in enumerate(self.trees):
+                if (place[0] == "doc" and place[1] == k) or any(root is top for root in tree):
+                    self.crlf[k] = False
 
     # Children
 
     @rule(data=st.data(), name=names, ty=st.none() | names, args=st.lists(values, max_size=2),
           props=st.dictionaries(names, values, max_size=2), block=st.booleans())  # fmt: skip
     def insert_new(self, data, name, ty, args, props, block):
-        place, siblings, _ = data.draw(st.sampled_from(self.parents()), label="parent")
+        place, siblings, owner = data.draw(st.sampled_from(self.parents()), label="parent")
         index = data.draw(st.integers(-len(siblings) - 1, len(siblings) + 1), label="index")
+        node, m = self.new_node(name, ty, args, props, block)
+        was_empty = not siblings
+        self.view(data, place).insert(index, node)
+        siblings.insert(index, m)
+        self.placed(place, owner, was_empty, [m])
+        if data.draw(st.booleans(), label="keep new node"):
+            self.nodes[id(m)] = (node, m)
+
+    def new_node(self, name, ty=None, args=(), props=None, block=False):
+        props = props or {}
         node = rkdl.Node(name, *args, type=ty, props=props)
         m = MNode(name, ty, [MEntry(v) for v in args], {k: MEntry(v) for k, v in props.items()})
         if block:
             node.children = []
             m.children = []
-        self.view(data, place).insert(index, node)
-        siblings.insert(index, m)
-        if data.draw(st.booleans(), label="keep new node"):
-            self.nodes[id(m)] = (node, m)
+        m.flat = True
+        m.one_line = block
+        return node, m
+
+    def node_to_insert(self, data, owner, name):
+        """A detached node to put into owner's block: a new one, a copy, or a detached root we hold.
+
+        Returns (handle, model).
+        """
+        fits = [(handle, m) for handle, m in self.detached if owner is None or not any(n is owner for n in m.walk())]
+        hows = ["new"] + ["copy"] * self.has_nodes() + ["detached"] * bool(fits)
+        how = data.draw(st.sampled_from(hows), label="how")
+        if how == "new":
+            return self.new_node(name)
+        if how == "copy":
+            m = self.pick_node(data)
+            return self.handle(data, m).copy(), m.copy()
+        handle, m = data.draw(st.sampled_from(fits), label="detached root")
+        self.detached = [(h, d) for h, d in self.detached if d is not m]
+        self.nodes[id(m)] = (handle, m)
+        return handle, m
 
     @precondition(lambda self: any(siblings for _, siblings, _ in self.parents()))
     @rule(data=st.data(), how=st.sampled_from(["pop", "remove", "del"]))
@@ -525,6 +644,7 @@ class EditSequences(RuleBasedStateMachine):
             handle = kept
             del view[index]
         siblings.pop(index)
+        self.emptied(place, siblings)
         if kept is not None:
             assert handle is kept
         if handle is not None:
@@ -537,11 +657,13 @@ class EditSequences(RuleBasedStateMachine):
     def move(self, data):
         m = self.pick_node(data)
         targets = [p for p in self.parents() if p[2] is None or not any(n is p[2] for n in m.walk())]
-        place, siblings, _ = data.draw(st.sampled_from(targets), label="new parent")
+        place, siblings, owner = data.draw(st.sampled_from(targets), label="new parent")
         handle = self.take_out(data, m)
         index = data.draw(st.integers(-len(siblings) - 1, len(siblings) + 1), label="index")
+        was_empty = not siblings
         self.view(data, place).insert(index, handle)
         siblings.insert(index, m)
+        self.placed(place, owner, was_empty, [m])
         self.nodes[id(m)] = (handle, m)
 
     @rule(data=st.data())
@@ -560,12 +682,70 @@ class EditSequences(RuleBasedStateMachine):
         m = self.pick_node(data)
         copy = self.handle(data, m).copy()
         cm = m.copy()
-        place, siblings, _ = data.draw(st.sampled_from(self.parents()), label="parent")
+        place, siblings, owner = data.draw(st.sampled_from(self.parents()), label="parent")
         index = data.draw(st.integers(-len(siblings) - 1, len(siblings) + 1), label="index")
+        was_empty = not siblings
         self.view(data, place).insert(index, copy)
         siblings.insert(index, cm)
+        self.placed(place, owner, was_empty, [cm])
         if data.draw(st.booleans(), label="keep copy"):
             self.nodes[id(cm)] = (copy, cm)
+
+    @precondition(lambda self: any(siblings for _, siblings, _ in self.parents()))
+    @rule(data=st.data(), name=names)
+    def replace_child(self, data, name):
+        place, siblings, owner = data.draw(st.sampled_from([p for p in self.parents() if p[1]]), label="parent")
+        index = data.draw(st.integers(-len(siblings), len(siblings) - 1), label="index")
+        old = siblings[index]
+        old_handle = self.nodes.get(id(old), (None,))[0]
+        if old_handle is None and data.draw(st.booleans(), label="hold old"):
+            old_handle = self.resolve(old)
+        handle, m = self.node_to_insert(data, owner, name)
+        self.view(data, place)[index] = handle
+        siblings[index] = m
+        # Replacing the only node in a one-line block spreads it (test_replace_only_child_keeps_one_line_block).
+        self.placed(place, owner, len(siblings) == 1, [m])
+        if old_handle is not None:
+            self.detach(old_handle, old)
+        else:
+            self.forget_subtree(old)
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
+    def reverse_children(self, data):
+        place, siblings, _ = data.draw(st.sampled_from(self.parents()), label="parent")
+        self.view(data, place).reverse()
+        siblings.reverse()
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
+    def count_children(self, data):
+        place, siblings, _ = data.draw(st.sampled_from(self.parents()), label="parent")
+        m = self.pick_node(data)
+        view = self.view(data, place)
+        assert view.count(self.handle(data, m)) == sum(s is m for s in siblings)
+        assert view.count(rkdl.Node(m.name)) == 0
+
+    @rule(data=st.data(), name=names, through_node=st.booleans())
+    def extend_children(self, data, name, through_node):
+        place, siblings, owner = data.draw(st.sampled_from(self.parents()), label="parent")
+        new = [self.node_to_insert(data, owner, name) for _ in range(data.draw(st.integers(0, 2), label="count"))]
+        handles = [handle for handle, _ in new]
+        was_empty = not siblings
+        if through_node:
+            # `x.children += ...` reads the view, extends it, then assigns it back.
+            kind, what = place
+            holder = self.docs[what] if kind == "doc" else self.handle(data, what)
+            holder.children += handles
+        else:
+            view = self.view(data, place)
+            before = view
+            view += handles
+            assert view is before
+        siblings.extend(m for _, m in new)
+        self.placed(place, owner, was_empty and bool(new), [m for _, m in new])
+        for handle, m in new:
+            self.nodes[id(m)] = (handle, m)
 
     @precondition(lambda self: self.has_nodes())
     @rule(data=st.data(), block=st.sampled_from([None, []]))
@@ -679,6 +859,41 @@ class EditSequences(RuleBasedStateMachine):
         assert same_value(value, me.value, me.type == ANY_TYPE)
 
     @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
+    def reverse_args(self, data):
+        m = self.pick_node(data)
+        self.handle(data, m).args.reverse()
+        # The values move and the slots stay, so an entry handle keeps its place and sees another value.
+        contents = [(e.value, e.type) for e in m.args]
+        for e, (value, ty) in zip(m.args, reversed(contents)):
+            e.value, e.type = value, ty
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data(), more=st.lists(values, max_size=3))
+    def extend_args(self, data, more):
+        m = self.pick_node(data)
+        args = self.handle(data, m).args
+        before = args
+        args += more
+        assert args is before
+        m.args.extend(MEntry(v) for v in more)
+
+    @precondition(lambda self: self.has_nodes())
+    @rule(data=st.data())
+    def popitem_prop(self, data):
+        m = self.pick_node(data)
+        props = self.handle(data, m).props
+        if not m.props:
+            with pytest.raises(KeyError):
+                props.popitem()
+            return
+        key, value = props.popitem()
+        expected_key, me = m.props.popitem()
+        me.alive = False
+        assert key == expected_key
+        assert same_value(value, me.value, me.type == ANY_TYPE)
+
+    @precondition(lambda self: self.has_nodes())
     @rule(data=st.data(), ty=entry_types)
     def set_entry_type(self, data, ty):
         m = self.pick_node(data)
@@ -721,6 +936,11 @@ class EditSequences(RuleBasedStateMachine):
     @rule(k=st.integers(0, 1))
     def fmt(self, k):
         self.docs[k].fmt()
+        # kdl-rs's autoformat writes `\n` line endings and spreads every block over lines.
+        self.crlf[k] = False
+        for root in self.trees[k]:
+            for m in root.walk():
+                m.flat = m.one_line = False
 
     # Invariants
 
@@ -730,8 +950,35 @@ class EditSequences(RuleBasedStateMachine):
             text = str(doc)
             again = rkdl.parse(text)
             check_children(again.children, tree, "reparsed")
-            assert str(again) == text
+            # Text kdl-rs can't print back as it read it still has to mean the same.
+            assert str(again) == text or SPACE_AFTER_BLOCK.search(text), text
             check_children(doc.children, tree, "live")
+
+    @invariant()
+    def views_compare_by_content(self):
+        for m in self.all_nodes():
+            node = self.resolve(m)
+            # nan != nan, so a dict holding one never compares equal.
+            if not any(isinstance(e.value, float) and math.isnan(e.value) for e in m.props.values()):
+                assert node.props == {k: e.value for k, e in m.props.items()}, m
+            assert node.entries == node.entries
+
+    @invariant()
+    def line_endings_keep_the_document_style(self):
+        for k, doc in enumerate(self.docs):
+            text = str(doc)
+            if "\n" not in text:
+                # Nothing left to take the style from.
+                self.crlf[k] = False
+            if self.crlf[k]:
+                assert re.search(r"(?<!\r)\n", text) is None, text
+
+    @invariant()
+    def one_line_blocks_stay_on_one_line(self):
+        for m in self.all_nodes():
+            if m.one_line and m.children is not None:
+                text = str(self.resolve(m)).rstrip("\r\n")
+                assert "\n" not in text, text
 
     @invariant()
     def kept_handles_still_point_at_their_nodes(self):

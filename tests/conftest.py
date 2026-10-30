@@ -1,6 +1,8 @@
 """Paths into the kdl-rs checkout, and helpers more than one test file uses."""
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -67,3 +69,41 @@ def walk(container, path=()):
 
 def has_duplicate_props(container):
     return any(len(node.props) != sum(1 for e in node.entries if e.name is not None) for _, node in walk(container))
+
+
+# Long enough for any test on a slow machine, short enough that a deadlock fails instead of hanging.
+THREAD_TIMEOUT = 60
+
+
+def run_threads(*targets):
+    """Runs each target in its own thread, all starting together, and returns what each returned.
+
+    A thread that's still running after the timeout fails the test, and so does any exception a thread raised.
+    """
+    barrier = threading.Barrier(len(targets))
+    results = [None] * len(targets)
+    errors = []
+
+    def wrap(i, target):
+        def go():
+            try:
+                barrier.wait()
+                results[i] = target()
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        return go
+
+    # Daemon threads, so a deadlocked one can't keep the test process alive either.
+    threads = [threading.Thread(target=wrap(i, t), daemon=True) for i, t in enumerate(targets)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + THREAD_TIMEOUT
+    for t in threads:
+        t.join(max(0, deadline - time.monotonic()))
+    stuck = sum(t.is_alive() for t in threads)
+    if stuck:
+        pytest.fail(f"{stuck} of {len(threads)} threads still running after {THREAD_TIMEOUT}s: deadlock?")
+    if errors:
+        raise errors[0]
+    return results

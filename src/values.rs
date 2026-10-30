@@ -622,6 +622,16 @@ pub(crate) fn _debug_assertions() -> bool {
     cfg!(debug_assertions)
 }
 
+/// The built-in reserved type names, each with whether its value stays a plain `str`, so the tests don't keep a hand
+/// copy of the table.
+#[pyfunction]
+pub(crate) fn _debug_reserved_types() -> Vec<(&'static str, bool)> {
+    BUILTINS
+        .iter()
+        .map(|&(name, b)| (name, matches!(b, Builtin::PlainString)))
+        .collect()
+}
+
 /// Direct conversion hook for `test_values.py`: parses one entry and converts its value.
 #[pyfunction]
 #[pyo3(signature = (kdl_entry_text, types=None))]
