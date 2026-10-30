@@ -68,10 +68,6 @@ def test_document_outlives_a_parser_whose_type_refers_to_it():
     assert doc_ref() is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="handles a move repointed share one document pointer, so none of them reports it to the collector",
-)
 def test_cycle_through_a_moved_node():
     box = []
     doc = typed_parser(box).parse("a\n")
@@ -87,7 +83,30 @@ def test_cycle_through_a_moved_node():
     assert doc_ref() is None
 
 
-@pytest.mark.xfail(strict=True, reason="Entry and the views have no __traverse__ yet")
+def test_cycle_through_nodes_moved_together():
+    # Every handle in the subtree moves at once, and each of them must report its document on its own. The second
+    # document's Type holds them all, and they end up there after moving away and back.
+    box = []
+    parser = typed_parser(box)
+    source = parser.parse("x\n")
+    target = parser.parse("y\n")
+    node = rkdl.Node("a", 1, k=2)
+    node.children = []
+    for name in "bcd":
+        node.children.append(rkdl.Node(name, 3))
+    handles = [node, *node.children, node.args.entry(0), node.props.entry("k"), node.children[0].args.entry(0)]
+    target.children.append(node)
+    source.children.append(target.children.pop())
+    target.children.append(source.children.pop())
+    box.extend(handles)
+    target_ref = weakref.ref(target)
+    handle_refs = [weakref.ref(h) for h in handles]
+    del parser, source, target, node, handles, box
+    gc.collect()
+    assert target_ref() is None
+    assert [r() for r in handle_refs] == [None] * len(handle_refs)
+
+
 @pytest.mark.parametrize("handle", ["entry", "args", "props", "entries", "children"])
 def test_cycle_through_an_entry_or_a_view(handle):
     box = []

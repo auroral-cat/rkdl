@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString, PyType};
 use pyo3::{PyTraverseError, PyTypeInfo};
 
@@ -181,10 +180,11 @@ struct UserType {
     ty: Py<Type>,
 }
 
-/// Built-in reserved types plus any user Types. Immutable once built, shared by Arc.
+/// Built-in reserved types plus any user Types. Immutable once built, and shared as a Python object by parsers,
+/// documents and detached nodes' homes, each of which reports its own reference to the cycle collector.
 ///
-/// Each document gets its own registry (see `private_copy`), because the cycle collector has to be told about every
-/// reference to a Type by exactly the object that holds it. See `traverse`.
+/// No `__clear__`: its references never change, and every cycle through it passes a Type, which clears.
+#[pyclass(module = "rkdl", frozen)]
 pub(crate) struct TypeRegistry {
     // In the order given, which is the order inference tries them. A later Type shadows an earlier one with the same
     // name.
@@ -207,33 +207,13 @@ impl TypeRegistry {
         TypeRegistry { user }
     }
 
-    /// The same Types for another document, through references of its own. A registry without user types holds no
-    /// references, so it's shared as is.
-    pub(crate) fn private_copy(this: &Arc<Self>, py: Python<'_>) -> Arc<Self> {
-        if this.user.is_empty() {
-            return Arc::clone(this);
-        }
-        let user = this
-            .user
-            .iter()
-            .map(|u| UserType {
-                name: u.name.clone(),
-                ty: u.ty.clone_ref(py),
-            })
-            .collect();
-        Arc::new(TypeRegistry { user })
-    }
-
-    /// Tells the cycle collector about the registry's Types, for the object that holds `this`. Only the sole holder
-    /// reports them: reporting a shared registry from each holder would count more references than exist, and the
-    /// collector would then free objects still in use. A shared registry's cycles just stay uncollected.
-    pub(crate) fn traverse(this: &Arc<Self>, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        if Arc::strong_count(this) == 1 {
-            for user in &this.user {
-                visit.call(&user.ty)?;
-            }
-        }
-        Ok(())
+    /// The registry for documents and nodes without user types. It holds no Python references, so they can all share
+    /// it.
+    pub(crate) fn shared_builtin(py: Python<'_>) -> PyResult<Py<TypeRegistry>> {
+        static BUILTIN: PyOnceLock<Py<TypeRegistry>> = PyOnceLock::new();
+        Ok(BUILTIN
+            .get_or_try_init(py, || Py::new(py, TypeRegistry::builtin()))?
+            .clone_ref(py))
     }
 
     fn get(&self, name: &str) -> Option<Converter<'_>> {
@@ -253,6 +233,16 @@ impl TypeRegistry {
             .enumerate()
             .filter(|&(i, u)| !self.user.iter().skip(i + 1).any(|later| later.name == u.name))
             .map(|(_, u)| u)
+    }
+}
+
+#[pymethods]
+impl TypeRegistry {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for user in &self.user {
+            visit.call(&user.ty)?;
+        }
+        Ok(())
     }
 }
 

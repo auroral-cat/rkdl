@@ -1,13 +1,11 @@
 //! Reading and editing a node's entries, shared by the `args`, `props` and `entries` views.
 
-use std::sync::Arc;
-
 use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
 use pyo3::prelude::*;
 
-use crate::document::DocState;
+use crate::document::{DocState, Document};
 use crate::entry::Entry;
-use crate::handles::{self, DocRef, Fail, stale};
+use crate::handles::{self, Fail, stale};
 use crate::node::Node;
 use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
@@ -59,27 +57,27 @@ fn items(s: &DocState, node: NodeId) -> Result<Vec<Item>, Fail> {
 
 /// A node's entries in file order, and the document they were read from.
 pub(crate) struct Snapshot {
-    pub(crate) doc: DocRef,
+    pub(crate) doc: Py<Document>,
     pub(crate) items: Vec<Item>,
 }
 
 impl Snapshot {
     pub(crate) fn types(&self) -> &TypeRegistry {
-        &self.doc.get().types
+        self.doc.get().types.get()
     }
 }
 
 /// Reads the node's entries from `doc`, once. The caller runs it under `on_home`, which retries.
-fn snapshot(py: Python<'_>, doc: &DocRef, node: NodeId) -> Result<Snapshot, Fail> {
+fn snapshot(py: Python<'_>, doc: &Py<Document>, node: NodeId) -> Result<Snapshot, Fail> {
     let items = doc.get().with_state(py, |s| items(s, node))?;
     Ok(Snapshot {
-        doc: Arc::clone(doc),
+        doc: doc.clone_ref(py),
         items,
     })
 }
 
 pub(crate) fn read(py: Python<'_>, node: &Node) -> PyResult<Snapshot> {
-    handles::on_home(&node.home, |doc| snapshot(py, doc, node.id))
+    handles::on_home(py, &node.home, |doc| snapshot(py, doc, node.id))
 }
 
 /// A node's entries, open for editing. Edits go to the `KdlNode` and the `IdTree` together.
@@ -125,7 +123,7 @@ pub(crate) fn edit<P: Send, R: Send>(
     mut plan: impl FnMut(&Snapshot) -> PyResult<P>,
     apply: impl Fn(Target<'_>, P) -> R + Sync,
 ) -> PyResult<R> {
-    handles::on_home(&node.home, |doc| {
+    handles::on_home(py, &node.home, |doc| {
         let snapshot = snapshot(py, doc, node.id)?;
         let planned = plan(&snapshot)?;
         // A plan that can't be applied goes back out unapplied: it may hold Python objects, which are dropped only

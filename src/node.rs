@@ -12,7 +12,6 @@ use crate::children::{self, Children, Owner};
 use crate::document::Document;
 use crate::entry::{Entries, new_entry};
 use crate::handles::{self, Fail, Home, stale};
-use crate::parser::builtin_types;
 use crate::props::Props;
 use crate::tree::{IdTree, NodeId, node_at, node_at_mut};
 use crate::values::{self, TypeRegistry};
@@ -33,7 +32,7 @@ impl Node {
     pub(crate) fn with_node<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&mut KdlNode) -> R + Send) -> PyResult<R> {
         let id = self.id;
         let mut f = Some(f);
-        handles::on_home(&self.home, |doc| {
+        handles::on_home(py, &self.home, |doc| {
             doc.get().with_state(py, |s| {
                 let path = s.ids.path(id).ok_or_else(|| Fail::Missing(stale()))?;
                 let f = f.take().expect("runs once it finds the node");
@@ -43,9 +42,8 @@ impl Node {
     }
 }
 
-/// Wraps one `KdlNode` in a private document of its own, with fresh ids. `types` should be the home's own registry
-/// (see `TypeRegistry::private_copy`).
-pub(crate) fn detached(py: Python<'_>, node: KdlNode, types: Arc<TypeRegistry>) -> PyResult<Bound<'_, Node>> {
+/// Wraps one `KdlNode` in a private document of its own, with fresh ids, that reads and writes through `types`.
+pub(crate) fn detached(py: Python<'_>, node: KdlNode, types: Py<TypeRegistry>) -> PyResult<Bound<'_, Node>> {
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
     let ids = IdTree::from_document(&kdl);
@@ -75,13 +73,13 @@ impl Node {
         props: Option<&Bound<'_, PyDict>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<Node>> {
-        let types = builtin_types();
+        let types = TypeRegistry::shared_builtin(py)?;
         let mut node = KdlNode::new(values::identifier(name));
         if let Some(ty) = r#type {
             node.set_ty(values::identifier(ty));
         }
         for value in args.iter() {
-            node.entries_mut().push(entry(&value, None, &types)?);
+            node.entries_mut().push(entry(&value, None, types.get())?);
         }
         for dict in [props, kwargs].into_iter().flatten() {
             for (key, value) in dict.iter() {
@@ -92,7 +90,7 @@ impl Node {
                 let key: String = key
                     .extract()
                     .map_err(|_| PyTypeError::new_err("property keys must be str"))?;
-                node.entries_mut().push(entry(&value, Some(key), &types)?);
+                node.entries_mut().push(entry(&value, Some(key), types.get())?);
             }
         }
         Ok(detached(py, node, types)?.unbind())
@@ -144,6 +142,8 @@ impl Node {
     fn set_children(slf: &Bound<'_, Self>, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
         let owner = Owner::Node(slf.clone().unbind());
         match value {
+            // `node.children += nodes` extends the view, then assigns it back.
+            Some(v) if children::is_view_of(&v, slf.as_any()) => Ok(()),
             Some(v) if !v.is_none() => {
                 let empty = v.cast::<PyList>().is_ok_and(PyListMethods::is_empty);
                 if !empty {
@@ -158,12 +158,12 @@ impl Node {
     }
 
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Node>> {
-        let (node, types) = handles::on_home(&self.home, |doc| {
+        let (node, types) = handles::on_home(py, &self.home, |doc| {
             let node = doc.get().with_state(py, |s| {
                 let path = s.ids.path(self.id).ok_or_else(|| Fail::Missing(stale()))?;
                 Ok::<_, Fail>(node_at(&s.kdl, &path).clone())
             })?;
-            Ok((node, TypeRegistry::private_copy(&doc.get().types, py)))
+            Ok((node, doc.get().types.clone_ref(py)))
         })?;
         detached(py, node, types)
     }
@@ -211,8 +211,8 @@ impl Node {
         self.id.key()
     }
 
-    // The home is the node's only strong reference. No `__clear__`: a cycle through a node also passes a Type (the
-    // document's only strong references), which clears.
+    // The home is the node's only strong reference. No `__clear__`: a cycle through a node also passes a Type (behind
+    // the document's only strong reference), which clears.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.home.traverse(&visit)
     }

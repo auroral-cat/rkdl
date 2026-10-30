@@ -1,5 +1,3 @@
-use std::sync::{Arc, LazyLock};
-
 use kdl::KdlDocument;
 use pyo3::PyTraverseError;
 use pyo3::gc::PyVisit;
@@ -12,7 +10,7 @@ use crate::values::{Type, TypeRegistry};
 
 #[pyclass(module = "rkdl", frozen)]
 pub struct Parser {
-    types: Arc<TypeRegistry>,
+    types: Py<TypeRegistry>,
     // A Formatter holds no Python references, so it can't be part of a cycle.
     formatter: Option<Py<Formatter>>,
 }
@@ -21,12 +19,12 @@ pub struct Parser {
 impl Parser {
     #[new]
     #[pyo3(signature = (types=None, formatter=None))]
-    fn new(py: Python<'_>, types: Option<Vec<Py<Type>>>, formatter: Option<Py<Formatter>>) -> Self {
+    fn new(py: Python<'_>, types: Option<Vec<Py<Type>>>, formatter: Option<Py<Formatter>>) -> PyResult<Self> {
         let types = match types {
-            Some(types) => Arc::new(TypeRegistry::with_user_types(py, types)),
-            None => builtin_types(),
+            Some(types) => Py::new(py, TypeRegistry::with_user_types(py, types))?,
+            None => TypeRegistry::shared_builtin(py)?,
         };
-        Parser { types, formatter }
+        Ok(Parser { types, formatter })
     }
 
     fn parse(&self, py: Python<'_>, text: &str) -> PyResult<Document> {
@@ -35,30 +33,19 @@ impl Parser {
         if let Some(formatter) = &self.formatter {
             formatter.get().apply(&mut kdl);
         }
-        Ok(Document::new(kdl, TypeRegistry::private_copy(&self.types, py)))
+        Ok(Document::new(kdl, self.types.clone_ref(py)))
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        TypeRegistry::traverse(&self.types, &visit)
-    }
-}
-
-/// The registry for documents parsed without user types. It holds no Python references, so they can all share it.
-pub(crate) fn builtin_types() -> Arc<TypeRegistry> {
-    static BUILTIN: LazyLock<Arc<TypeRegistry>> = LazyLock::new(|| Arc::new(TypeRegistry::builtin()));
-    Arc::clone(&BUILTIN)
-}
-
-impl Default for Parser {
-    fn default() -> Self {
-        Parser {
-            types: builtin_types(),
-            formatter: None,
-        }
+        visit.call(&self.types)
     }
 }
 
 #[pyfunction]
 pub fn parse(py: Python<'_>, text: &str) -> PyResult<Document> {
-    Parser::default().parse(py, text)
+    let parser = Parser {
+        types: TypeRegistry::shared_builtin(py)?,
+        formatter: None,
+    };
+    parser.parse(py, text)
 }

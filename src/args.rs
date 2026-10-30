@@ -1,4 +1,6 @@
+use pyo3::PyTraverseError;
 use pyo3::exceptions::PyTypeError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
@@ -236,5 +238,10 @@ impl Args {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let found = arg_values(py, &read(py, self.node.get())?)?;
         Ok(format!("Args({})", PyList::new(py, found)?.repr()?))
+    }
+
+    // No `__clear__`: a cycle through the node passes a Type, which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.node)
     }
 }

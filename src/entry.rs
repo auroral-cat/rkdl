@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use kdl::{KdlEntry, KdlIdentifier, KdlValue};
+use pyo3::PyTraverseError;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
 
 use crate::document::{DocState, Document};
 use crate::edit::{Item, chosen, read};
-use crate::handles::{self, DocRef, Fail, Home};
+use crate::handles::{self, Fail, Home};
 use crate::index::{not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::tree::{EntryId, node_at_mut};
@@ -132,7 +134,7 @@ impl Entry {
     /// Runs `f` on this entry under its document's lock.
     fn with_entry<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&mut KdlEntry) -> R + Send) -> PyResult<R> {
         let mut f = Some(f);
-        handles::on_home(&self.home, |doc| {
+        handles::on_home(py, &self.home, |doc| {
             doc.get().with_state(py, |s| {
                 let entry = entry_mut(s, self.id)?;
                 let f = f.take().expect("runs once it finds the entry");
@@ -141,12 +143,12 @@ impl Entry {
         })
     }
 
-    fn item(&self, py: Python<'_>) -> PyResult<(Item, DocRef)> {
-        handles::on_home(&self.home, |doc| {
+    fn item(&self, py: Python<'_>) -> PyResult<(Item, Py<Document>)> {
+        handles::on_home(py, &self.home, |doc| {
             let item = doc
                 .get()
                 .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e)))?;
-            Ok((item, Arc::clone(doc)))
+            Ok((item, doc.clone_ref(py)))
         })
     }
 }
@@ -162,18 +164,18 @@ impl Entry {
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let (item, doc) = self.item(py)?;
-        item.to_python(py, &doc.get().types)
+        item.to_python(py, doc.get().types.get())
     }
 
     #[setter]
     fn set_value(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = value.py();
-        handles::on_home(&self.home, |doc| {
+        handles::on_home(py, &self.home, |doc| {
             let before = doc
                 .get()
                 .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e).ty))?;
             // Converting may call Python, so it happens between two locks.
-            let (value, ty) = values::from_python(value, before.as_deref(), &doc.get().types)?;
+            let (value, ty) = values::from_python(value, before.as_deref(), doc.get().types.get())?;
             doc.get().with_state(py, |s| {
                 let entry = entry_mut(s, self.id)?;
                 if entry.ty().map(KdlIdentifier::value) != before.as_deref() {
@@ -199,7 +201,7 @@ impl Entry {
     /// `name, value = entry`.
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let (item, doc) = self.item(py)?;
-        let value = item.to_python(py, &doc.get().types)?;
+        let value = item.to_python(py, doc.get().types.get())?;
         Ok(
             PyTuple::new(py, [item.key().into_pyobject(py)?.into_any().unbind(), value])?
                 .try_iter()?
@@ -214,7 +216,7 @@ impl Entry {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let (item, doc) = self.item(py)?;
         // A value whose contents don't fit its type still gets a repr, in KDL.
-        let value = match item.to_python(py, &doc.get().types) {
+        let value = match item.to_python(py, doc.get().types.get()) {
             Ok(value) => value.bind(py).repr()?.to_string(),
             Err(_) => values::canonical_repr(&item.value),
         };
@@ -236,6 +238,11 @@ impl Entry {
 
     fn __hash__(&self) -> u64 {
         self.id.key()
+    }
+
+    // No `__clear__`, as for Node: any cycle through the home passes a Type, which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.home.traverse(&visit)
     }
 }
 
@@ -335,5 +342,10 @@ impl Entries {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let found = chosen(py, self.node.get(), |items| Ok(ids(items)))?;
         Ok(format!("Entries({})", PyList::new(py, found)?.repr()?))
+    }
+
+    // No `__clear__`: a cycle through the node passes a Type, which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.node)
     }
 }

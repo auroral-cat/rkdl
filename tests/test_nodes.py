@@ -487,6 +487,28 @@ def test_children_assignment_errors():
         d.children = []
 
 
+def test_children_iadd():
+    d = rkdl.parse("a { b; }\n")
+    node = d["a"]
+    node.children += [rkdl.Node("c")]
+    d.children += [rkdl.Node("d")]
+    assert str(d) == "a { b; c; }\nd\n"
+
+
+def test_children_assigning_another_view_errors():
+    d = rkdl.parse("a { b; }\ne { f; }\n")
+    a = d["a"]
+    e = d["e"]
+    other = rkdl.parse("x\n")
+    with pytest.raises(TypeError):
+        a.children = e.children
+    with pytest.raises(TypeError):
+        d.children = other.children
+    with pytest.raises(TypeError):
+        d.children = a.children
+    assert str(d) == "a { b; }\ne { f; }\n"
+
+
 # Lookups
 
 

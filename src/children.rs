@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use kdl::{KdlDocument, KdlNode};
+use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice};
 
 use crate::document::{DocState, Document, lock_both};
-use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
+use crate::handles::{self, Fail, Garbage, Home, stale};
 use crate::index::{insert_at, not_in, pick_one, pick_slice, position};
 use crate::layout::{self, Style};
 use crate::node::Node;
@@ -21,13 +23,24 @@ pub(crate) enum Owner {
 impl Owner {
     /// Runs `op` on the owner's document and parent node (None for the top level), again if the owner moved while
     /// `op` waited for the lock.
-    fn on_doc<R>(&self, py: Python<'_>, mut op: impl FnMut(&DocRef, Option<NodeId>) -> Result<R, Fail>) -> PyResult<R> {
+    fn on_doc<R>(
+        &self,
+        py: Python<'_>,
+        mut op: impl FnMut(&Py<Document>, Option<NodeId>) -> Result<R, Fail>,
+    ) -> PyResult<R> {
         match self {
-            Owner::Doc(doc) => handles::on_home(&Home::new(Arc::new(doc.clone_ref(py))), |doc| op(doc, None)),
+            Owner::Doc(doc) => handles::on_home(py, &Home::new(doc.clone_ref(py)), |doc| op(doc, None)),
             Owner::Node(node) => {
                 let node = node.get();
-                handles::on_home(&node.home, |doc| op(doc, Some(node.id)))
+                handles::on_home(py, &node.home, |doc| op(doc, Some(node.id)))
             }
+        }
+    }
+
+    fn as_py(&self) -> &Py<PyAny> {
+        match self {
+            Owner::Doc(doc) => doc.as_any(),
+            Owner::Node(node) => node.as_any(),
         }
     }
 
@@ -36,14 +49,14 @@ impl Owner {
         &self,
         py: Python<'_>,
         f: impl Fn(&DocState, Option<NodeId>) -> Result<R, Fail> + Sync,
-    ) -> PyResult<(DocRef, R)> {
+    ) -> PyResult<(Py<Document>, R)> {
         self.on_doc(py, |doc, parent| {
             let result = doc.get().with_state(py, |s| f(s, parent))?;
-            Ok((doc.clone(), result))
+            Ok((doc.clone_ref(py), result))
         })
     }
 
-    fn ids(&self, py: Python<'_>) -> PyResult<(DocRef, Vec<NodeId>)> {
+    fn ids(&self, py: Python<'_>) -> PyResult<(Py<Document>, Vec<NodeId>)> {
         self.read(py, |s, parent| {
             Ok(block_ids(&s.ids, parent)?.ok_or_else(no_block)?.to_vec())
         })
@@ -123,15 +136,17 @@ fn check_insertable(target: &Py<Document>, source: &Py<Document>) -> PyResult<()
 /// Python.
 struct NewHome {
     doc: Py<Document>,
-    home: DocRef,
+    /// For `handles::repoint`, which runs locked and detached, where it can't make references of its own.
+    shared: Arc<Py<Document>>,
 }
 
 impl NewHome {
+    /// The node keeps reading and writing through the types of the document it left.
     fn new(py: Python<'_>, from: &Py<Document>) -> PyResult<NewHome> {
-        let doc = Py::new(py, Document::empty_home(Arc::clone(&from.get().types)))?;
+        let doc = Py::new(py, Document::empty_home(from.get().types.clone_ref(py)))?;
         Ok(NewHome {
-            doc: doc.clone_ref(py),
-            home: Arc::new(doc),
+            shared: Arc::new(doc.clone_ref(py)),
+            doc,
         })
     }
 }
@@ -156,7 +171,7 @@ fn detach(
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
     to.doc.get().fill(kdl, IdTree::from_subtree(subtree));
-    handles::repoint(keys, &to.home, garbage);
+    handles::repoint(keys, &to.shared, garbage);
     Ok(())
 }
 
@@ -173,7 +188,7 @@ fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyRe
     let id = node.get().id;
     let home = &node.get().home;
     let garbage = owner.on_doc(py, |target, parent| {
-        let source = home.doc();
+        let source = home.doc(py);
         check_insertable(target, &source)?;
         let here = Arc::new(target.clone_ref(py));
         let replaced_home = match at {
@@ -213,7 +228,7 @@ fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyRe
             Ok(garbage)
         })
     })?;
-    drop(garbage);
+    garbage.release(py);
     Ok(())
 }
 
@@ -258,7 +273,7 @@ fn take_out<'py>(
             }
             Ok(garbage)
         })?;
-        drop(garbage);
+        garbage.release(py);
         Ok(picked
             .into_iter()
             .zip(homes)
@@ -405,6 +420,13 @@ impl Children {
     }
 }
 
+/// Whether `value` is a children view of `owner`, a document or node.
+pub(crate) fn is_view_of(value: &Bound<'_, PyAny>, owner: &Bound<'_, PyAny>) -> bool {
+    value
+        .cast::<Children>()
+        .is_ok_and(|view| view.get().owner.as_py().is(owner))
+}
+
 /// Where `node` is among `ids`.
 fn find_node(ids: &[NodeId], node: &Bound<'_, Node>) -> PyResult<usize> {
     ids.iter()
@@ -532,5 +554,10 @@ impl Children {
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         take_out(py, &self.owner, take_all, false)?;
         Ok(())
+    }
+
+    // No `__clear__`, as for the other views: any cycle through the owner passes a Type, which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(self.owner.as_py())
     }
 }

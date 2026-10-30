@@ -1,4 +1,6 @@
+use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyKeyError, PyTypeError};
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -280,6 +282,11 @@ impl Props {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!("Props({})", self.dict(py)?.repr()?))
+    }
+
+    // No `__clear__`: a cycle through the node passes a Type, which clears.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.node)
     }
 }
 

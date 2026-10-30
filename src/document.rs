@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use kdl::KdlDocument;
 use pyo3::PyTraverseError;
@@ -29,24 +29,23 @@ impl DocState {
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Document {
     state: Mutex<DocState>,
-    /// Not shared with other documents unless it has no user types. See `TypeRegistry::traverse`.
-    pub(crate) types: Arc<TypeRegistry>,
+    pub(crate) types: Py<TypeRegistry>,
     /// A detached node's private one-node document. Never handed to Python as a Document.
     pub(crate) home: bool,
 }
 
 impl Document {
-    pub(crate) fn new(kdl: KdlDocument, types: Arc<TypeRegistry>) -> Self {
+    pub(crate) fn new(kdl: KdlDocument, types: Py<TypeRegistry>) -> Self {
         Document::build(kdl, types, false)
     }
 
     /// A private home for a detached node, empty until `fill` puts the node in. It starts empty so the caller can
     /// create its Python object before locking anything.
-    pub(crate) fn empty_home(types: Arc<TypeRegistry>) -> Self {
+    pub(crate) fn empty_home(types: Py<TypeRegistry>) -> Self {
         Document::build(KdlDocument::new(), types, true)
     }
 
-    fn build(kdl: KdlDocument, types: Arc<TypeRegistry>, home: bool) -> Self {
+    fn build(kdl: KdlDocument, types: Py<TypeRegistry>, home: bool) -> Self {
         Document {
             state: Mutex::new(DocState {
                 ids: IdTree::from_document(&kdl),
@@ -149,8 +148,11 @@ impl Document {
     }
 
     #[setter]
-    #[expect(clippy::unused_self, reason = "PyO3 setters take self")]
-    fn set_children(&self, _value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+    fn set_children(slf: &Bound<'_, Self>, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        // `doc.children += nodes` extends the view, then assigns it back.
+        if value.is_some_and(|v| children::is_view_of(&v, slf.as_any())) {
+            return Ok(());
+        }
         Err(PyTypeError::new_err(
             "can't assign to Document.children; edit it with insert, append, pop, remove or del",
         ))
@@ -173,9 +175,9 @@ impl Document {
         children::lookup(&Owner::Doc(slf.clone().unbind()), key, false)
     }
 
-    // The registry's Types are the document's only strong references; it holds its handles weakly. There's no
-    // `__clear__`: the registry never changes, and every cycle through it passes a Type, which clears.
+    // The registry is the document's only strong reference; it holds its handles weakly. There's no `__clear__`: the
+    // registry never changes, and every cycle through it passes a Type, which clears.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        TypeRegistry::traverse(&self.types, &visit)
+        visit.call(&self.types)
     }
 }
