@@ -1,3 +1,4 @@
+pub(crate) mod annotation;
 mod blocks;
 pub(crate) mod prescan;
 
@@ -130,6 +131,7 @@ fn parse_text(text: &str, formatter: Option<&Formatter>) -> Result<(KdlDocument,
     if scan.broke_at.is_none() {
         blocks::restore(text, &mut kdl, &scan.closes);
     }
+    annotation::restore(&mut kdl);
     // Positions come from the spans, which say where things were in `text`, so they're read before formatting.
     let ids = IdTree::from_parse(&kdl, text);
     // Formatting before the Document exists is the same as doc.fmt() but needs no lock.

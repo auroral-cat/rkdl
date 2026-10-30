@@ -249,8 +249,9 @@ def render_head(draw, node):
     """A node's type, name and entries, and a skipped block if it has a block. All on one line."""
     parts = []
     if node.type is not None:
-        # No whitespace inside `(type)`: kdl-rs 6.7.1 drops it (notes/upstream.md).
-        parts.append("(" + render_string(draw, node.type) + ")" + render_string(draw, node.name))
+        pad = st.sampled_from(["", "", " ", "\t", "/* c */", " /* c */ "])
+        ty = draw(pad) + render_string(draw, node.type) + draw(pad)
+        parts.append("(" + ty + ")" + draw(pad) + render_string(draw, node.name))
     else:
         parts.append(render_string(draw, node.name))
     # Properties go between arguments, keeping their own order.
