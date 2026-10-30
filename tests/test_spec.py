@@ -16,15 +16,6 @@ from conftest import (
 
 skip_module_without_kdl_rs()
 
-TYPE_SPACE = "kdl-rs drops whitespace and comments in and after a node's type annotation"
-
-ROUND_TRIP_FAILS = {
-    "comment_after_node_type.kdl": TYPE_SPACE,
-    "comment_in_node_type.kdl": TYPE_SPACE,
-    "space_after_node_type.kdl": TYPE_SPACE,
-    "space_in_node_type.kdl": TYPE_SPACE,
-}
-
 INVALID_ACCEPTED = {
     "hex.kdl": "valid KDL (fits i128) with no expected file in kdl-rs's copy of the suite",
     "multiline_raw_string_single_line_err_fail.kdl": 'kdl-rs reads #"""one line"""# as a raw string',
@@ -61,7 +52,7 @@ def canonical(doc):
     return re.sub(r"\r\n|[\r\x0b\x0c\x85\u2028\u2029]", "\n", str(doc))
 
 
-@pytest.mark.parametrize("path", cases(VALID, ROUND_TRIP_FAILS))
+@pytest.mark.parametrize("path", cases(VALID, {}))
 def test_round_trip(path):
     text = read_case(path)
     assert str(rkdl.parse(text)) == text

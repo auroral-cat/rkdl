@@ -122,6 +122,15 @@ pub(crate) struct Spec<'a, 'py> {
     pub(crate) children: Option<&'a Bound<'py, PyAny>>,
 }
 
+/// Forgets the whitespace and comments inside a node's `(...)` and between it and the name.
+pub(crate) fn drop_annotation_text(node: &mut KdlNode) {
+    if let Some(f) = node.format_mut() {
+        f.before_ty_name.clear();
+        f.after_ty_name.clear();
+        f.after_ty.clear();
+    }
+}
+
 /// Builds a detached node that reads and writes through `types`, with line endings `eol`.
 pub(crate) fn build<'py>(
     name: String,
@@ -211,7 +220,7 @@ impl Node {
     fn set_name(&self, py: Python<'_>, name: String) -> PyResult<()> {
         self.with_node(py, |n| {
             if n.name().value() != name {
-                n.set_name(spelling::identifier(Some(n.name()), name));
+                parser::annotation::editing(n, |n| n.set_name(spelling::identifier(Some(n.name()), name)));
             }
         })
     }
@@ -227,8 +236,15 @@ impl Node {
     fn set_type(&self, py: Python<'_>, ty: Option<String>) -> PyResult<()> {
         self.with_node(py, |n| {
             if n.ty().map(KdlIdentifier::value) != ty.as_deref() {
-                let new = ty.map(|ty| spelling::identifier(n.ty(), ty));
-                *n.ty_mut() = new;
+                parser::annotation::editing(n, |n| {
+                    // A new annotation keeps the whitespace and comments around the one it replaces. Adding or
+                    // removing one starts from none: `(t)  n` without its annotation is `n`.
+                    if n.ty().is_none() || ty.is_none() {
+                        drop_annotation_text(n);
+                    }
+                    let new = ty.map(|ty| spelling::identifier(n.ty(), ty));
+                    *n.ty_mut() = new;
+                });
             }
         })
     }

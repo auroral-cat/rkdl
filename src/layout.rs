@@ -370,19 +370,21 @@ impl Shift {
 /// its entries, where `\` continuations end their lines, but not their values: a line ending inside a string is part
 /// of the string.
 fn restyle_node(node: &mut KdlNode, eol: &str) {
-    if let Some(f) = node.format_mut() {
-        for text in [
-            &mut f.before_ty_name,
-            &mut f.after_ty_name,
-            &mut f.after_ty,
-            &mut f.before_children,
-            &mut f.before_terminator,
-            &mut f.terminator,
-            &mut f.trailing,
-        ] {
-            *text = restyle(text, eol);
+    crate::parser::annotation::editing(node, |node| {
+        if let Some(f) = node.format_mut() {
+            for text in [
+                &mut f.before_ty_name,
+                &mut f.after_ty_name,
+                &mut f.after_ty,
+                &mut f.before_children,
+                &mut f.before_terminator,
+                &mut f.terminator,
+                &mut f.trailing,
+            ] {
+                *text = restyle(text, eol);
+            }
         }
-    }
+    });
     for entry in node.entries_mut() {
         if let Some(f) = entry.format_mut() {
             for text in [

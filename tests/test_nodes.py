@@ -96,6 +96,60 @@ def test_name_and_type():
     assert str(d) == '"two words" 1\n'
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "(dev)  dep 1\n",
+        "(dev)/*hey*/dep 1\n",
+        "( the-type ) the-node-name\n",
+        '(\t"a type" /* c */ )\t"a name"\n',
+        "a { (t)  b }\n",
+        "a {\n    ( t ) \\\n    b\n}\n",
+        "(u8)  n (u8)  7\n",
+    ],
+)
+def test_text_around_a_node_annotation_survives(text):
+    assert str(rkdl.parse(text)) == text
+
+
+def test_text_around_a_node_annotation_through_edits():
+    doc = rkdl.parse('( old ) /* c */ "q" 1\n')
+    node = doc["q"]
+    # A new annotation or name keeps the text around the annotation, and quoting keeps its style.
+    node.type = "new"
+    node.name = "renamed"
+    assert str(doc) == '( new ) /* c */ "renamed" 1\n'
+    assert node.type == "new"
+    assert node.name == "renamed"
+    copied = node.copy()
+    assert str(copied) == '( new ) /* c */ "renamed" 1'
+    # Removing the annotation takes the text inside it and between it and the name.
+    node.type = None
+    assert str(doc) == '"renamed" 1\n'
+    node.type = "back"
+    assert str(doc) == '(back)"renamed" 1\n'
+    # The copy is untouched.
+    assert copied.type == "new"
+    assert str(copied) == '( new ) /* c */ "renamed" 1'
+
+
+def test_text_around_a_node_annotation_moves_with_the_node():
+    doc = rkdl.parse("a {\r\n    ( t ) \\\r\n    b 1\r\n}\r\n")
+    node = doc["a"].children.pop(0)
+    other = rkdl.parse("z\n")
+    other.children.append(node)
+    # Line endings follow the new document. Like a continuation between entries, the next line keeps its indent.
+    assert str(other) == "z\n( t ) \\\n    b 1\n"
+    assert other["b"].type == "t"
+
+
+def test_fmt_drops_the_text_around_a_node_annotation():
+    doc = rkdl.parse("( t ) /* c */ n 1\n")
+    doc.fmt()
+    assert str(doc) == "(t)n 1\n"
+    assert str(rkdl.parse(str(doc))) == str(doc)
+
+
 def test_constructor_rejects_unconvertible_values():
     with pytest.raises(TypeError):
         rkdl.Node("n", object())

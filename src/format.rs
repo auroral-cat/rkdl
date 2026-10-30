@@ -92,6 +92,9 @@ fn requote(doc: &mut KdlDocument) {
     let mut pending = vec![doc];
     while let Some(block) = pending.pop() {
         for node in block.nodes_mut() {
+            // autoformat cleared the annotation's and name's text, where the text around the annotation printed
+            // (`parser::annotation`). It goes as the text around an entry's annotation does: `(t)n`.
+            crate::node::drop_annotation_text(node);
             values::fix_identifier(node.name_mut());
             if let Some(ty) = node.ty_mut() {
                 values::fix_identifier(ty);

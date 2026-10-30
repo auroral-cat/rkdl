@@ -700,9 +700,6 @@ def test_formatting_fresh_nested_nodes_with_custom_indent():
     assert str(doc) == "parent {\n  child {\n    innermost\n  }\n}\n"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="kdl-rs behaviour: kdl 6.7.1 drops the spaces inside and after the type annotation"
-)
 def test_formatting_node_ty():
     # formatting.rs: format_node_ty
     src = "( the-type ) the-node-name"
