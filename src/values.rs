@@ -349,14 +349,15 @@ pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: 
             None => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
             Some(Converter::Builtin(b)) => {
                 let kept = encode_builtin(b, value)?;
-                // A number of the type's own kind that's outside its range is a mistake, as with `entry.type = ...`,
-                // rather than a reason to drop the annotation.
+                // A number that doesn't fit a numeric type is a mistake, as with `entry.type = ...`, rather than a
+                // reason to drop the annotation.
                 if kept.is_none()
-                    && let Some(range) = range_of(b, value)
+                    && let Some(reason) = misfit(b, value)?
                 {
                     return Err(PyValueError::new_err(format!(
-                        "{} doesn't fit type {ty}: out of range {range}",
-                        value.repr()?
+                        "{} doesn't fit {}: {reason}",
+                        value.repr()?,
+                        annotation(ty)
                     )));
                 }
                 // A plain value keeps the annotation if the type reads it, as with custom types.
@@ -608,8 +609,9 @@ pub(crate) fn check_fits(py: Python<'_>, value: &KdlValue, ty: &str, types: &Typ
         Err(err) if err.is_instance_of::<PyValueError>(py) => Err(err),
         Err(err) if err.is_instance_of::<PyException>(py) => {
             let refused = PyValueError::new_err(format!(
-                "{} doesn't fit type {ty}: its decode raised {}",
+                "{} doesn't fit {}: its decode raised {}",
                 canonical_repr(value),
+                annotation(ty),
                 err.value(py).repr()?
             ));
             refused.set_cause(py, Some(err));
@@ -718,10 +720,18 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
         Ok(Some((KdlValue::String(v.extract()?), None)))
     };
     match b {
-        Builtin::Int { min, max } => Ok(match is_int.then(|| value.extract::<i128>()) {
-            Some(Ok(i)) if (min..=max).contains(&i) => Some((KdlValue::Integer(i), None)),
-            _ => None,
-        }),
+        Builtin::Int { min, max } => {
+            let whole = if is_int {
+                value.extract::<i128>().ok()
+            } else if value.is_instance_of::<PyFloat>() {
+                whole_float(value.extract()?)
+            } else {
+                None
+            };
+            Ok(whole
+                .filter(|i| (min..=max).contains(i))
+                .map(|i| (KdlValue::Integer(i), None)))
+        }
         Builtin::F32 | Builtin::F64 => {
             if !value.is_instance_of::<PyFloat>() && !is_int {
                 return Ok(None);
@@ -784,17 +794,51 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
     }
 }
 
-/// The range of a numeric built-in type, if `value` is a number of the kind it holds: an `int` for an integer type,
-/// an `int` or `float` for a float type. `bool` isn't a number here.
+/// Why a number doesn't fit a numeric built-in type, if `value` is an `int` or `float` (`bool` isn't a number here)
+/// and `b` holds a range. None for anything else, which keeps the "infer the annotation" rule.
 #[expect(clippy::wildcard_enum_match_arm, reason = "only the numeric types have a range")]
-fn range_of(b: Builtin, value: &Bound<'_, PyAny>) -> Option<String> {
+fn misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     let is_int = value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>();
+    let is_float = value.is_instance_of::<PyFloat>();
+    Ok(match b {
+        Builtin::Int { .. } if is_float => {
+            let f: f64 = value.extract()?;
+            // A whole float converts, so one that gets here is either not whole or out of range.
+            if f.is_finite() && f.fract() == 0.0 {
+                range_of(b)
+            } else {
+                Some("not a whole number".to_owned())
+            }
+        }
+        Builtin::Int { .. } | Builtin::F32 | Builtin::F64 if is_int || is_float => range_of(b),
+        _ => None,
+    })
+}
+
+/// "out of range ..." for a numeric built-in type.
+#[expect(clippy::wildcard_enum_match_arm, reason = "only the numeric types have a range")]
+fn range_of(b: Builtin) -> Option<String> {
     match b {
-        Builtin::Int { min, max } if is_int => Some(format!("{min}..={max}")),
-        Builtin::F32 if is_int || value.is_instance_of::<PyFloat>() => Some("±3.4028234663852886e+38".to_owned()),
-        Builtin::F64 if is_int || value.is_instance_of::<PyFloat>() => Some("±1.7976931348623157e+308".to_owned()),
+        Builtin::Int { min, max } => Some(format!("out of range {min}..={max}")),
+        Builtin::F32 => Some("out of range ±3.4028234663852886e+38".to_owned()),
+        Builtin::F64 => Some("out of range ±1.7976931348623157e+308".to_owned()),
         _ => None,
     }
+}
+
+/// An annotation spelled the way a file does: `(u8)`, or `("my type")`.
+fn annotation(ty: &str) -> String {
+    format!("({})", identifier(ty))
+}
+
+/// A float that's a whole number in i128's range, as that integer. A float over an integer annotation converts, as an
+/// int over a float annotation does.
+fn whole_float(f: f64) -> Option<i128> {
+    // i128::MAX as f64 rounds up to 2^127, which is out of range, so the upper bound is exclusive.
+    #[expect(clippy::cast_precision_loss, reason = "-2^127 and 2^127 are exact in an f64")]
+    let (low, high) = (i128::MIN as f64, i128::MAX as f64);
+    #[expect(clippy::cast_possible_truncation, reason = "checked whole and in range just above")]
+    (f.is_finite() && f.fract() == 0.0 && f >= low && f < high).then_some(f as i128)
 }
 
 /// A `Decimal` as a `decimal64` or `decimal128`, written with its own digits so none are lost to the f64 kdl-rs

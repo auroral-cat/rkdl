@@ -509,7 +509,6 @@ def test_a_plain_string_a_builtin_type_reads_keeps_the_annotation(ty, old, fits,
         ("decimal64", "1.5", 2, "(decimal64)2"),
         ("decimal128", "1.5", 0.1, "(decimal128)0.1"),
         # Any other kind of plain value doesn't.
-        ("u8", "1", 1.5, "1.5"),
         ("u8", "1", True, "#true"),
         ("f32", "1.5", "1.5", '"1.5"'),
         ("date", '"2026-01-01"', 5, "5"),
@@ -530,7 +529,7 @@ def test_a_kept_builtin_annotation_keeps_the_strings_spelling():
     assert str(doc) == 'n (date)#"2029-01-01"# (ipv4)"10.0.0.1"\n'
 
 
-OUT_OF_RANGE = "300 doesn't fit type u8: out of range 0..=255"
+OUT_OF_RANGE = "300 doesn't fit (u8): out of range 0..=255"
 
 
 @pytest.mark.parametrize(
@@ -555,6 +554,48 @@ def test_an_out_of_range_write_to_a_builtin_type_raises_and_changes_nothing(writ
     assert str(doc) == text
 
 
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda n: n.args.__setitem__(0, 3.5),
+        lambda n: n.args.__setitem__(slice(0, 2), [1, 3.5]),
+        lambda n: setattr(n, "args", [1, 3.5]),
+        lambda n: n.args.entry(1).__setattr__("value", 3.5),
+        lambda n: n.props.update({"j": 1, "k": 3.5}),
+        lambda n: setattr(n, "props", {"j": 1, "k": 3.5}),
+        lambda n: n.props.entry("k").__setattr__("value", 3.5),
+    ],
+)
+def test_a_fractional_float_over_an_integer_type_raises_and_changes_nothing(write):
+    text = "n (u8)1 (u8)2 j=(u8)3 k=(u8)4\n"
+    doc, n = node(text)
+    with pytest.raises(ValueError, match=re.escape("3.5 doesn't fit (u8): not a whole number")):
+        write(n)
+    assert str(doc) == text
+
+
+def test_a_whole_float_over_an_integer_type_converts():
+    doc, n = node("n (u8)1 k=(i32)2\n")
+    n.args[0] = 7.0
+    n.props["k"] = -3.0
+    assert str(doc) == "n (u8)7 k=(i32)-3\n"
+    assert n.args[0] == 7
+    assert type(n.args[0]) is int
+
+
+def test_a_type_whose_decode_raises_is_named_as_written():
+    def refuse(value):
+        raise LookupError("no")
+
+    spaced = rkdl.Type("my type", Celsius, decode=refuse, encode=lambda c: c.degrees)
+    doc = rkdl.Parser(types=[spaced]).parse("n 5\n")
+    with pytest.raises(
+        ValueError, match=re.escape("""5 doesn't fit ("my type"): its decode raised LookupError('no')""")
+    ):
+        doc["n"].args.entry(0).type = "my type"
+    assert str(doc) == "n 5\n"
+
+
 def test_new_entries_have_no_range_to_check():
     doc, n = node("n (u8)1\n")
     n.args.append(300)
@@ -566,7 +607,7 @@ def test_new_entries_have_no_range_to_check():
 
 def test_float_types_check_their_range():
     doc, n = node("n (f32)1.5 (f64)2.5\n")
-    with pytest.raises(ValueError, match=re.escape("1e+39 doesn't fit type f32: out of range ±3.4028234663852886e+38")):
+    with pytest.raises(ValueError, match=re.escape("1e+39 doesn't fit (f32): out of range ±3.4028234663852886e+38")):
         n.args[0] = 1e39
     n.args[0] = 3
     n.args[1] = 1e39

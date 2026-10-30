@@ -242,6 +242,9 @@ def test_inferred_from_python(value, expected):
         (-1, "i8", ("-1", "i8")),
         (1, "i32", ("1", "i32")),
         (2**64 - 1, "usize", ("18446744073709551615", "usize")),
+        # A whole float converts, as an int does over a float annotation.
+        (3.0, "u8", ("3", "u8")),
+        (-0.0, "i8", ("0", "i8")),
         (1.5, "f64", ("1.5", "f64")),
         (2, "f64", ("2.0", "f64")),
         (1.5, "f32", ("1.5", "f32")),
@@ -265,7 +268,6 @@ def test_current_type_kept_when_value_fits(value, current, expected):
         # bool is checked before int.
         (True, "u8", ("#true", None)),
         (True, "i32", ("#true", None)),
-        (1.5, "i32", ("1.5", None)),
         (True, "f64", ("#true", None)),
         ("May 6th", "date", ('"May 6th"', None)),
         (datetime.datetime(2024, 5, 6), "date", ('"2024-05-06T00:00:00"', "date-time")),
@@ -286,12 +288,17 @@ def test_current_type_replaced_when_value_does_not_fit(value, current, expected)
 @pytest.mark.parametrize(
     ("value", "current", "message"),
     [
-        (256, "u8", "256 doesn't fit type u8: out of range 0..=255"),
-        (-1, "u32", "-1 doesn't fit type u32: out of range 0..=4294967295"),
-        (128, "i8", "128 doesn't fit type i8: out of range -128..=127"),
-        (1e39, "f32", "1e+39 doesn't fit type f32: out of range ±3.4028234663852886e+38"),
-        (2**200, "f32", "doesn't fit type f32: out of range ±3.4028234663852886e+38"),
-        (2**1024, "f64", "doesn't fit type f64: out of range ±1.7976931348623157e+308"),
+        (256, "u8", "256 doesn't fit (u8): out of range 0..=255"),
+        (-1, "u32", "-1 doesn't fit (u32): out of range 0..=4294967295"),
+        (128, "i8", "128 doesn't fit (i8): out of range -128..=127"),
+        (1e39, "f32", "1e+39 doesn't fit (f32): out of range ±3.4028234663852886e+38"),
+        (2**200, "f32", "doesn't fit (f32): out of range ±3.4028234663852886e+38"),
+        (2**1024, "f64", "doesn't fit (f64): out of range ±1.7976931348623157e+308"),
+        (1.5, "i32", "1.5 doesn't fit (i32): not a whole number"),
+        (float("nan"), "u8", "nan doesn't fit (u8): not a whole number"),
+        (float("inf"), "u8", "inf doesn't fit (u8): not a whole number"),
+        (300.0, "u8", "300.0 doesn't fit (u8): out of range 0..=255"),
+        (1e40, "i128", "1e+40 doesn't fit (i128): out of range"),
     ],
 )
 def test_a_number_out_of_its_types_range_raises(value, current, message):
@@ -305,7 +312,7 @@ def test_int_outside_i128_overflows():
     with pytest.raises(OverflowError, match=re.escape("(i128)")):
         from_python(-(2**127) - 1)
     # Under an integer annotation it's out of that type's range instead.
-    with pytest.raises(ValueError, match=re.escape("doesn't fit type u128: out of range 0..=")):
+    with pytest.raises(ValueError, match=re.escape("doesn't fit (u128): out of range 0..=")):
         from_python(2**127, "u128")
 
 

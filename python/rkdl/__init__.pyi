@@ -487,8 +487,8 @@ class Entry:
         Writing a value keeps the annotation if the value fits it, and otherwise picks one from the value's class.
 
         Raises:
-            ValueError: The annotation is a reserved type the value can't be read as, or the new value is out of
-                range for it.
+            ValueError: The annotation is a reserved type the value can't be read as, or the new value is a number
+                that doesn't fit it, like 300 or 3.5 written over `(u8)`.
             TypeError: The new value can't be converted to KDL.
         """
     @value.setter
