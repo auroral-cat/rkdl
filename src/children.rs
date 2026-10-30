@@ -166,13 +166,18 @@ fn detach(
         .position(|&n| n == id)
         .expect("picked from this block");
     let node = layout::unplace(block_mut(&mut s.kdl, &s.ids, parent), index, style);
+    rehome(s, id, node, to, garbage);
+    Ok(())
+}
+
+/// Moves the node `id`, already taken out of the `KdlDocument` as `node`, into `to` along with its handles.
+fn rehome(s: &mut DocState, id: NodeId, node: KdlNode, to: &NewHome, garbage: &mut Garbage) {
     let subtree = s.ids.take_subtree(id);
     let keys = subtree.keys();
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
     to.doc.get().fill(kdl, IdTree::from_subtree(subtree));
     handles::repoint(keys, &to.shared, garbage);
-    Ok(())
 }
 
 /// Where `insert` puts a node.
@@ -216,13 +221,17 @@ fn insert(py: Python<'_>, owner: &Owner, at: At, node: &Bound<'_, Node>) -> PyRe
             }
             let style = style(t, parent);
             let mut garbage = Garbage::default();
-            if let (Some(old), Some(to)) = (replaced, &replaced_home) {
-                detach(t, parent, old, &style, to, &mut garbage)?;
-            }
             let kdl_node = s.kdl.nodes_mut().remove(0);
             let subtree = s.ids.take_subtree(id);
             let keys = subtree.keys();
-            layout::place(block_mut(&mut t.kdl, &t.ids, parent), index, kdl_node, &style);
+            let block = block_mut(&mut t.kdl, &t.ids, parent);
+            // A replacement takes the old node's place in one step, so the block never empties on the way.
+            if let (Some(old), Some(to)) = (replaced, &replaced_home) {
+                let old_node = layout::replace(block, index, kdl_node, &style);
+                rehome(t, old, old_node, to, &mut garbage);
+            } else {
+                layout::place(block, index, kdl_node, &style);
+            }
             t.ids.put_subtree(parent, index, subtree);
             handles::repoint(keys, &here, &mut garbage);
             Ok(garbage)
@@ -298,12 +307,10 @@ pub(crate) fn open_block(py: Python<'_>, owner: &Owner) -> PyResult<()> {
         let id = parent.expect("only nodes open blocks");
         doc.get().with_state(py, |s| -> Result<bool, Fail> {
             let path = s.ids.path(id).ok_or_else(|| Fail::Missing(stale()))?;
-            let eol = layout::line_ending(&s.kdl);
-            let node = node_at_mut(&mut s.kdl, &path);
-            if node.children().is_some() {
+            if node_at(&s.kdl, &path).children().is_some() {
                 return Ok(true);
             }
-            layout::open_block(node, eol);
+            layout::open_block(&mut s.kdl, &path);
             s.ids.open_block(id);
             Ok(false)
         })

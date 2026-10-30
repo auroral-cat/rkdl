@@ -1,6 +1,6 @@
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -444,7 +444,13 @@ fn plain_to_kdl(value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
         // bool is a subclass of int, so it has to be checked first.
         KdlValue::Bool(value.is_truthy()?)
     } else if value.is_instance_of::<PyInt>() {
-        KdlValue::Integer(value.extract()?)
+        KdlValue::Integer(value.extract().map_err(|e: PyErr| {
+            if e.is_instance_of::<PyOverflowError>(value.py()) {
+                PyOverflowError::new_err("int doesn't fit in a KDL integer (i128)")
+            } else {
+                e
+            }
+        })?)
     } else if value.is_instance_of::<PyFloat>() {
         KdlValue::Float(value.extract()?)
     } else if value.is_instance_of::<PyString>() {

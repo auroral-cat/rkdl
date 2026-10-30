@@ -4,15 +4,21 @@
 //! The rule: a node starts at the beginning of a line and ends its own line. A new node goes at the first line start
 //! at or after its place. If the rest of the line it lands on is blank, that's after the line's own ending; otherwise
 //! it gets a line ending of its own. Taking a node out keeps whatever followed it at the start of a line if it was
-//! there before. Every line ending rkdl adds is in the block's own style: `\r\n` if it has one, else `\n`.
+//! there before. Every line ending rkdl adds is in the block's own style: `\r\n` if it has one, else `\n`. A moved
+//! node's line endings take that style too, except inside strings. An emptied `\r\n` document keeps one `\r\n`, so it
+//! remembers.
 //!
 //! The exception is a children block written on one line (`a { b; c }`). It stays on one line, with `;` between
 //! nodes, as long as the new node fits on one line. One that doesn't spreads the block over lines first. An empty
 //! block prints as `{}`.
+//!
+//! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading (notes/upstream.md). After a `}` rkdl
+//! writes comes a line ending, a `;`, or the parent's `}`. So a new block goes after a node's trailing spaces, and a
+//! node with a block at the end of a one-line block ends with `;` before the space: `a { b {}; }`.
 
 use kdl::{KdlDocument, KdlDocumentFormat, KdlNode, KdlNodeFormat};
 
-use crate::tree::node_at;
+use crate::tree::{node_at, node_at_mut};
 
 /// KDL's line endings, apart from `\r\n`, which is `\r` then `\n`.
 const NEWLINES: &[char] = &['\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}'];
@@ -176,15 +182,37 @@ fn reindent(text: &str, old: &str, new: &str, line_start: bool, eol: &str) -> St
     out
 }
 
-/// Line endings in a node's own text, apart from its leading and its entries.
-fn restyle_node(f: &mut KdlNodeFormat, eol: &str) {
-    for text in [
-        &mut f.before_children,
-        &mut f.before_terminator,
-        &mut f.terminator,
-        &mut f.trailing,
-    ] {
-        *text = restyle(text, eol);
+/// Line endings in a node's own text, apart from its leading and its children. That includes the whitespace around
+/// its entries, where `\` continuations end their lines, but not their values: a line ending inside a string is part
+/// of the string.
+fn restyle_node(node: &mut KdlNode, eol: &str) {
+    if let Some(f) = node.format_mut() {
+        for text in [
+            &mut f.before_ty_name,
+            &mut f.after_ty_name,
+            &mut f.after_ty,
+            &mut f.before_children,
+            &mut f.before_terminator,
+            &mut f.terminator,
+            &mut f.trailing,
+        ] {
+            *text = restyle(text, eol);
+        }
+    }
+    for entry in node.entries_mut() {
+        if let Some(f) = entry.format_mut() {
+            for text in [
+                &mut f.leading,
+                &mut f.trailing,
+                &mut f.before_ty_name,
+                &mut f.after_ty_name,
+                &mut f.after_ty,
+                &mut f.after_key,
+                &mut f.after_eq,
+            ] {
+                *text = restyle(text, eol);
+            }
+        }
     }
 }
 
@@ -197,14 +225,16 @@ fn reindent_children(node: &mut KdlNode, old: &str, new: &str, eol: &str) {
     let mut line_start = false;
     if let Some(f) = block.format_mut() {
         f.leading = reindent(&f.leading, old, new, false, eol);
-        line_start = ends_line(&f.leading);
+        // Spaces after the last line ending were reindented already, as the start of that line. Only an empty
+        // block has more text on that line: its trailing.
+        line_start = f.leading.ends_with(NEWLINES);
     }
     for child in block.nodes_mut() {
         if let Some(f) = child.format_mut() {
             f.leading = reindent(&f.leading, old, new, line_start, eol);
-            restyle_node(f, eol);
             line_start = ends_line(&format!("{}{}", f.terminator, f.trailing));
         }
+        restyle_node(child, eol);
         reindent_children(child, old, new, eol);
     }
     if let Some(f) = block.format_mut() {
@@ -286,6 +316,50 @@ fn space_before(node: &KdlNode) -> String {
         .to_owned()
 }
 
+/// Splits the spaces off the end of a node's `before_terminator`. At the end of a single-line block, they're the space
+/// before the block's `}`.
+fn split_closing(node: &mut KdlNode) -> String {
+    node.format_mut().map_or_else(String::new, |f| {
+        let content = f.before_terminator.trim_end_matches(is_space).len();
+        f.before_terminator.split_off(content)
+    })
+}
+
+/// Whether nothing follows the node's text: it ends at the parent's `}` or the end of the document.
+fn ends_open(node: &KdlNode) -> bool {
+    node.format()
+        .is_some_and(|f| f.terminator.is_empty() && f.trailing.is_empty())
+}
+
+/// Gives `node` a place in a single-line block: `space` before it, then its `terminator`, with `closing` in between
+/// if it's the last node.
+fn fit_inline(node: &mut KdlNode, space: &str, closing: &str, terminator: String) {
+    split_closing(node);
+    let f = fmt_mut(node, "\n");
+    f.leading = format!("{space}{}", f.leading.trim_start());
+    f.before_terminator.push_str(closing);
+    f.terminator = terminator;
+    f.trailing.clear();
+}
+
+/// Ends the node at `index` with `;` if it has a block and the space before the parent's `}` follows it. That space
+/// would sit right after its own `}`, which kdl-rs drops when it reads the text back (notes/upstream.md). After the
+/// `;`, the space belongs to the block.
+fn semicolon_after_block(block: &mut KdlDocument, index: usize) {
+    let Some(node) = block.nodes_mut().get_mut(index) else {
+        return;
+    };
+    if node.children().is_none() || !ends_open(node) {
+        return;
+    }
+    let closing = split_closing(node);
+    if closing.is_empty() {
+        return;
+    }
+    fmt_mut(node, "\n").terminator = ";".into();
+    block_fmt_mut(block).trailing.insert_str(0, &closing);
+}
+
 /// `place` for a single-line block: `;` between nodes, and the space before `}` stays at the end.
 fn place_inline(block: &mut KdlDocument, index: usize, mut node: KdlNode) {
     let nodes = block.nodes_mut();
@@ -295,34 +369,36 @@ fn place_inline(block: &mut KdlDocument, index: usize, mut node: KdlNode) {
         // The new node takes over the end of the block from the old last one.
         let prev = nodes.last_mut().expect("a single-line block has nodes");
         let space = space_before(prev);
+        let closing = split_closing(prev);
         let f = fmt_mut(prev, "\n");
-        let content = f.before_terminator.trim_end_matches(is_space).len();
-        let closing = f.before_terminator.split_off(content);
         (space, std::mem::replace(&mut f.terminator, ";".into()), closing)
     };
-    let f = fmt_mut(&mut node, "\n");
-    f.leading = format!("{space}{}", f.leading.trim_start());
-    let content = f.before_terminator.trim_end_matches(is_space).len();
-    f.before_terminator.truncate(content);
-    f.before_terminator.push_str(&closing);
-    f.terminator = terminator;
-    f.trailing.clear();
+    fit_inline(&mut node, &space, &closing, terminator);
     nodes.insert(index, node);
+    semicolon_after_block(block, index);
 }
 
 /// `unplace` for a single-line block. The node before keeps its `;`, so its text stays as it was.
 fn unplace_inline(block: &mut KdlDocument, index: usize) -> KdlNode {
-    let node = block.nodes_mut().remove(index);
-    if index == block.nodes().len()
-        && index > 0
-        && let Some(taken) = node.format()
-    {
-        // The space before `}` was the taken node's.
-        let bt = &taken.before_terminator;
-        let closing = bt.get(bt.trim_end_matches(is_space).len()..).unwrap_or_default();
-        block_fmt_mut(block).trailing.insert_str(0, closing);
+    let mut node = block.nodes_mut().remove(index);
+    // The space before `}` belongs to the block, so it stays behind.
+    let closing = split_closing(&mut node);
+    if index == block.nodes().len() && index > 0 {
+        block_fmt_mut(block).trailing.insert_str(0, &closing);
     }
     node
+}
+
+/// `replace` for a single-line block: the new node takes the old one's place on the line.
+fn replace_inline(block: &mut KdlDocument, index: usize, mut node: KdlNode) -> KdlNode {
+    let old = block.nodes_mut().get_mut(index).expect("replace checks the index");
+    let space = space_before(old);
+    let closing = split_closing(old);
+    let terminator = fmt_mut(old, "\n").terminator.clone();
+    fit_inline(&mut node, &space, &closing, terminator);
+    let old = std::mem::replace(old, node);
+    semicolon_after_block(block, index);
+    old
 }
 
 /// Spreads a single-line block over lines, one node per line.
@@ -370,7 +446,10 @@ pub fn place(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: &S
     }
 
     let indent = match &style.nested {
-        None => String::new(),
+        None => {
+            take_back_reminder(block, eol);
+            String::new()
+        }
         Some((parent_indent, unit)) => {
             if block.nodes().is_empty() {
                 // The closing `}` lines up with the parent.
@@ -414,12 +493,14 @@ pub fn place(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: &S
     } else if !ends_own_line(&node) {
         let f = fmt_mut(&mut node, eol);
         if f.trailing.is_empty() {
-            f.terminator = eol.into();
+            // Spaces that came before a `}` or a `;` would now end the line.
+            split_closing(&mut node);
+            fmt_mut(&mut node, eol).terminator = eol.into();
         } else {
             f.trailing.push_str(eol);
         }
     }
-    restyle_node(fmt_mut(&mut node, eol), eol);
+    restyle_node(&mut node, eol);
     reindent_children(&mut node, &old, &indent, eol);
     block.nodes_mut().insert(index, node);
 }
@@ -442,25 +523,80 @@ pub fn unplace(block: &mut KdlDocument, index: usize, style: &Style) -> KdlNode 
         }
         node
     };
-    // An emptied block prints as `{}`.
-    if nested
-        && block.nodes().is_empty()
-        && let Some(f) = block.format_mut()
-        && is_blank(&f.leading)
-        && is_blank(&f.trailing)
-    {
-        f.leading.clear();
-        f.trailing.clear();
+    if block.nodes().is_empty() {
+        if nested {
+            // An emptied block prints as `{}`.
+            if let Some(f) = block.format_mut()
+                && is_blank(&f.leading)
+                && is_blank(&f.trailing)
+            {
+                f.leading.clear();
+                f.trailing.clear();
+            }
+        } else if style.eol == "\r\n" && first_eol(block).is_none() {
+            // An emptied document keeps one line ending, so it still knows its style. `\n` is the default anyway.
+            block_fmt_mut(block).leading.push_str("\r\n");
+        }
     }
     node
 }
 
-/// Gives `node` an empty children block, `{}`. `eol` is the document's line ending style.
-pub fn open_block(node: &mut KdlNode, eol: &str) {
+/// Puts `node` in place of the node at `index`, and returns that one. In a single-line block, the new node takes the
+/// old one's place on the line.
+pub fn replace(block: &mut KdlDocument, index: usize, node: KdlNode, style: &Style) -> KdlNode {
+    if style.nested.is_some() && is_single_line(block) && fits_on_a_line(&node) {
+        return replace_inline(block, index, node);
+    }
+    let old = unplace(block, index, style);
+    place(block, index, node, style);
+    old
+}
+
+/// Before the first node goes into an empty document, drops the line ending that's all the document has, which
+/// `unplace` may have left to keep the style. The node brings its own.
+fn take_back_reminder(doc: &mut KdlDocument, eol: &str) {
+    if doc.nodes().is_empty()
+        && let Some(f) = doc.format_mut()
+        && f.trailing.is_empty()
+        && let Some(rest) = f.leading.strip_suffix(eol)
+        && rest.chars().all(|c| is_space(c) || c == '\u{feff}')
+    {
+        f.leading.truncate(rest.len());
+    }
+}
+
+/// Gives the node at `path` an empty children block, `{}`.
+pub fn open_block(doc: &mut KdlDocument, path: &[usize]) {
+    let eol = line_ending(doc);
+    let (&index, parent) = path.split_last().expect("a node's path isn't empty");
+    let block = if parent.is_empty() {
+        doc
+    } else {
+        node_at_mut(doc, parent)
+            .children_mut()
+            .as_mut()
+            .expect("a parent has a block")
+    };
+    let node = block.nodes_mut().get_mut(index).expect("the path leads to a node");
+    // At the end of a block, the space before the parent's `}` stays after the new `}`, so `semicolon_after_block`
+    // can give it to the block.
+    let closing = if !parent.is_empty() && ends_open(node) {
+        split_closing(node)
+    } else {
+        String::new()
+    };
+    open_node_block(node, eol);
+    fmt_mut(node, eol).before_terminator.push_str(&closing);
+    semicolon_after_block(block, index);
+}
+
+/// Gives `node` an empty children block, `{}`.
+fn open_node_block(node: &mut KdlNode, eol: &str) {
     let f = fmt_mut(node, eol);
     // Without a block, trailing slashdashed entries sit in before_terminator, which prints after the block. They have
-    // to stay in front of it.
-    if !is_blank(&f.before_terminator) {
+    // to stay in front of it. So does any other whitespace there: right after `}`, kdl-rs drops it when it reads the
+    // text back (notes/upstream.md).
+    if !f.before_terminator.is_empty() {
         let mut moved = std::mem::take(&mut f.before_terminator);
         // Autoformat ends before_terminator with a line ending. That goes after the block, not before `{`, where it
         // would end the node early.
@@ -590,7 +726,6 @@ mod tests {
         let text = "a { b; c }\n";
         assert_eq!(placed(text, Some(&[0]), 0, "x"), "a { x; b; c }\n");
         assert_eq!(placed(text, Some(&[0]), 1, "x"), "a { b; x; c }\n");
-        assert_eq!(placed(text, Some(&[0]), 2, "x 1 { y }"), "a { b; c; x 1 { y } }\n");
         assert_eq!(placed("a {b}", Some(&[0]), 1, "x"), "a {b;x}");
         assert_eq!(placed("a { b; }", Some(&[0]), 1, "x"), "a { b; x; }");
         assert_eq!(unplaced(text, Some(&[0]), 0), "a { c }\n");
@@ -635,10 +770,104 @@ mod tests {
         assert_eq!(doc.to_string(), "n 1 \\\n;\na\n");
     }
 
+    fn opened(text: &str, path: &[usize]) -> String {
+        let mut doc = parse(text);
+        open_block(&mut doc, path);
+        let out = doc.to_string();
+        assert_eq!(parse(&out).to_string(), out, "{out:?} doesn't read back as itself");
+        out
+    }
+
     #[test]
     fn open_block_keeps_slashdashed_entries_in_front() {
-        let mut doc = parse("n /- k=v\r\n");
-        open_block(&mut doc.nodes_mut()[0], "\r\n");
-        assert_eq!(doc.to_string(), "n /- k=v {}\r\n");
+        assert_eq!(opened("n /- k=v\r\n", &[0]), "n /- k=v {}\r\n");
+    }
+
+    #[test]
+    fn no_whitespace_after_a_new_closing_brace() {
+        assert_eq!(opened("c \nd\n", &[0]), "c {}\nd\n");
+        assert_eq!(opened("c ", &[0]), "c {}");
+        assert_eq!(opened("a { b }\n", &[0, 0]), "a { b {}; }\n");
+        assert_eq!(opened("a { b; c }\n", &[0, 0]), "a { b {}; c }\n");
+        assert_eq!(opened("a {b}\n", &[0, 0]), "a {b {}}\n");
+        assert_eq!(
+            placed("a { b; c }\n", Some(&[0]), 2, "x 1 { y }"),
+            "a { b; c; x 1 { y }; }\n"
+        );
+    }
+
+    fn replaced(text: &str, parent: Option<&[usize]>, index: usize, new: &str) -> (String, String) {
+        let mut doc = parse(text);
+        let style = Style::of(&doc, parent);
+        let block = match parent {
+            None => &mut doc,
+            Some(path) => crate::tree::node_at_mut(&mut doc, path)
+                .children_mut()
+                .as_mut()
+                .unwrap(),
+        };
+        let old = replace(block, index, node(new), &style);
+        (doc.to_string(), old.to_string())
+    }
+
+    #[test]
+    fn a_replacement_takes_the_old_nodes_place() {
+        assert_eq!(replaced("a { b }\n", Some(&[0]), 0, "c").0, "a { c }\n");
+        assert_eq!(replaced("a { b; }\n", Some(&[0]), 0, "c").0, "a { c; }\n");
+        assert_eq!(replaced("a { b; c }\n", Some(&[0]), 1, "x").0, "a { b; x }\n");
+        assert_eq!(replaced("a { b; c }\n", Some(&[0]), 1, "x {}").0, "a { b; x {}; }\n");
+        assert_eq!(replaced("a {\n    b\n}\n", Some(&[0]), 0, "c").0, "a {\n    c\n}\n");
+        // The space before `}` stays with the block.
+        assert_eq!(replaced("a { b }\n", Some(&[0]), 0, "c").1, " b");
+    }
+
+    #[test]
+    fn the_last_node_of_a_single_line_block_leaves_the_space_before_brace() {
+        let mut doc = parse("a { b; c }\n");
+        let style = Style::of(&doc, Some(&[0]));
+        let block = crate::tree::node_at_mut(&mut doc, &[0])
+            .children_mut()
+            .as_mut()
+            .unwrap();
+        let taken = unplace(block, 1, &style);
+        assert_eq!(doc.to_string(), "a { b; }\n");
+        let style = Style::of(&doc, None);
+        place(&mut doc, 1, taken, &style);
+        assert_eq!(doc.to_string(), "a { b; }\nc\n");
+        // A copy still has the space, and loses it when placed.
+        assert_eq!(placed("a\n", None, 1, "c "), "a\nc\n");
+    }
+
+    #[test]
+    fn an_empty_block_from_the_top_level_lines_up() {
+        assert_eq!(
+            placed("a {\n    b\n}\n", Some(&[0]), 1, "q {\n}"),
+            "a {\n    b\n    q {\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn continuations_take_the_new_style() {
+        assert_eq!(
+            placed("a\r\n", None, 1, "n \\\n    1 \"x\\ny\""),
+            "a\r\nn \\\r\n    1 \"x\\ny\"\r\n"
+        );
+        // A line ending inside a string is the string's.
+        assert_eq!(
+            placed("a\r\n", None, 1, "n \"\"\"\n  x\n  \"\"\""),
+            "a\r\nn \"\"\"\n  x\n  \"\"\"\r\n"
+        );
+    }
+
+    #[test]
+    fn an_emptied_document_keeps_crlf() {
+        let mut doc = parse("a {\r\n    b\r\n}\r\n");
+        let style = Style::of(&doc, None);
+        let taken = unplace(&mut doc, 0, &style);
+        assert_eq!(doc.to_string(), "\r\n");
+        let style = Style::of(&doc, None);
+        place(&mut doc, 0, taken, &style);
+        assert_eq!(doc.to_string(), "a {\r\n    b\r\n}\r\n");
+        assert_eq!(unplaced("a\n", None, 0), "");
     }
 }

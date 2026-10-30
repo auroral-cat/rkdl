@@ -277,9 +277,6 @@ def test_node_that_needs_lines_spreads_a_single_line_block():
     assert str(d) == "top {\n    a {\n        b\n        // about x\n        x\n        c\n    }\n}\n"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="rkdl bug: setitem takes the only node out first, then inserts into an empty block"
-)
 @pytest.mark.parametrize("text", ["a { b }\n", "a { b; }\n"])
 def test_replace_only_child_keeps_one_line_block(text):
     d = rkdl.parse(text)
@@ -287,7 +284,6 @@ def test_replace_only_child_keeps_one_line_block(text):
     assert str(d) == text.replace("b", "c")
 
 
-@pytest.mark.xfail(strict=True, reason="rkdl bug: an empty block from the top level gets its `}` indented twice")
 def test_moved_empty_multi_line_block_lines_up():
     node = rkdl.parse("q {\n}\n").children.pop()
     d = rkdl.parse("a {\n    b\n}\n")
@@ -295,7 +291,6 @@ def test_moved_empty_multi_line_block_lines_up():
     assert str(d) == "a {\n    b\n    q {\n    }\n}\n"
 
 
-@pytest.mark.xfail(strict=True, reason="rkdl bug: the space before `}` stays on the node taken from the end")
 @pytest.mark.parametrize("how", ["pop", "copy"])
 def test_last_node_taken_from_a_one_line_block_has_no_trailing_space(how):
     d = rkdl.parse("a { b; c }\n")
@@ -304,18 +299,14 @@ def test_last_node_taken_from_a_one_line_block_has_no_trailing_space(how):
     assert str(d).endswith("}\nc\n")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="kdl-rs drops whitespace after `}` with the line ending (space_after_node.kdl), and a new block goes in "
-    "front of the node's trailing whitespace",
-)
 def test_block_on_a_node_with_trailing_space_reads_back():
     d = rkdl.parse("c \nd\n")
     d["c"].children = []
+    # Whitespace right after `}` doesn't read back (space_after_node.kdl), so the space goes before `{`.
+    assert str(d) == "c {}\nd\n"
     assert str(rkdl.parse(str(d))) == str(d)
 
 
-@pytest.mark.xfail(strict=True, reason="rkdl bug: a moved node's `\\` continuations keep their line endings")
 def test_moved_line_continuation_takes_crlf():
     node = rkdl.parse("n \\\n    1\n").children.pop()
     d = rkdl.parse("a\r\n")
@@ -323,19 +314,19 @@ def test_moved_line_continuation_takes_crlf():
     assert str(d) == "a\r\nn \\\r\n    1\r\n"
 
 
-@pytest.mark.xfail(strict=True, reason="rkdl bug: an emptied document forgets its line ending style")
 def test_crlf_survives_emptying_the_document():
     d = rkdl.parse("a {\r\n    b\r\n}\r\n")
     node = d.children.pop()
+    assert str(d) == "\r\n"
     d.children.append(node)
     assert str(d) == "a {\r\n    b\r\n}\r\n"
 
 
-@pytest.mark.xfail(strict=True, reason="kdl-rs: whitespace after a node's `}` is dropped (space_after_node.kdl)")
 def test_block_at_the_end_of_a_one_line_block():
     d = rkdl.parse("a { b }\n")
     d["a"]["b"].children = []
-    assert str(d) == "a { b {} }\n"
+    # The space before the parent's `}` can't follow b's `}` (space_after_node.kdl), so a `;` goes in between.
+    assert str(d) == "a { b {}; }\n"
     assert str(rkdl.parse(str(d))) == str(d)
 
 

@@ -259,11 +259,11 @@ def test_current_type_replaced_when_value_does_not_fit(value, current, expected)
 
 
 def test_int_outside_i128_overflows():
-    with pytest.raises(OverflowError):
+    with pytest.raises(OverflowError, match=re.escape("int doesn't fit in a KDL integer (i128)")):
         from_python(2**127)
-    with pytest.raises(OverflowError):
+    with pytest.raises(OverflowError, match=re.escape("(i128)")):
         from_python(-(2**127) - 1)
-    with pytest.raises(OverflowError):
+    with pytest.raises(OverflowError, match=re.escape("(i128)")):
         from_python(2**127, "u128")
 
 
@@ -442,6 +442,9 @@ def test_callbacks_can_read_their_own_document():
 VALUE_WRITES = {
     "args.append": lambda n, v: n.args.append(v),
     "args.insert": lambda n, v: n.args.insert(0, v),
+    # A good value first: nothing is written unless every value converts.
+    "args.extend": lambda n, v: n.args.extend([5, v]),
+    "args +=": lambda n, v: n.args.__iadd__([5, v]),
     "args[i] =": lambda n, v: n.args.__setitem__(0, v),
     "props[new] =": lambda n, v: n.props.__setitem__("new", v),
     "props[old] =": lambda n, v: n.props.__setitem__("k", v),

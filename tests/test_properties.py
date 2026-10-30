@@ -296,13 +296,13 @@ def render_nodes(draw, nodes, indent, level):
             line += draw(st.sampled_from([" {}", "{}", " {\n" + pad + "}"]))
         # Nothing but a terminator right after `}`: kdl-rs drops whitespace (notes/upstream.md) and comments
         # (test_comment_after_a_block_survives) there. A node without a block may get one later, so the same goes for
-        # it, except for a block comment, which the new block goes after.
+        # a line comment after it. Spaces and a block comment are fine: the new block goes after them.
         if node.children is None:
-            end = draw(st.sampled_from(["\n", "\n", ";\n", " /* end */\n", "; // end\n"]))
+            end = draw(st.sampled_from(["\n", "\n", ";\n", " \n", " /* end */\n", "; // end\n"]))
         else:
             end = draw(st.sampled_from(["\n", "\n", ";\n", "; // end\n"]))
         node.one_line = node.children is not None and "\n" not in line
-        node.flat = "\n" not in line and not above and end in ("\n", ";\n")
+        node.flat = "\n" not in line and not above and end in ("\n", ";\n", " \n")
         out.append(line + end)
     return "".join(out)
 
@@ -393,13 +393,6 @@ start_documents = st.one_of(*start_documents)
 
 
 # The state machine
-
-# Whitespace right after a `}`. kdl-rs drops it when parsing, with the line ending if one follows, and what it prints
-# then may not parse at all (notes/upstream.md). rkdl writes it in a few places: a node at the end of a one-line block
-# that gets a block of its own (test_block_at_the_end_of_a_one_line_block), and a block given to a node with trailing
-# whitespace, which a node taken from the end of a one-line block has
-# (test_block_on_a_node_with_trailing_space_reads_back).
-SPACE_AFTER_BLOCK = re.compile(r"\}[ \t]+(?:(?=\})|\r?\n)")
 
 
 class EditSequences(RuleBasedStateMachine):
@@ -533,7 +526,6 @@ class EditSequences(RuleBasedStateMachine):
                 if sibling is m:
                     popped = self.view(data, place).pop(i)
                     siblings.pop(i)
-                    self.emptied(place, siblings)
                     return popped
         raise AssertionError("node not found")
 
@@ -559,20 +551,14 @@ class EditSequences(RuleBasedStateMachine):
 
     # Layout bookkeeping
 
-    def emptied(self, place, siblings):
-        """Notes that a document with no nodes left forgets its line ending style
-        (test_crlf_survives_emptying_the_document)."""
-        if place[0] == "doc" and not siblings:
-            self.crlf[place[1]] = False
-
     def placed(self, place, owner, was_empty, new):
         """Updates the layout flags after `new` model nodes went into owner's block (None for a document).
 
         A block written on one line stays that way unless a node that doesn't fit on a line goes in, or the block was
         empty. Otherwise it spreads over lines, and so does every block around it.
 
-        A node from the corpus can bring line endings rkdl doesn't restyle: `\\` continuations
-        (test_moved_line_continuation_takes_crlf) and multi-line strings. A CRLF document stops being one then.
+        A node from the corpus can bring line endings rkdl doesn't restyle, the ones inside multi-line strings. A CRLF
+        document stops being one then.
         """
         if owner is not None and (was_empty or not all(n.flat for n in new)):
             for m in self.lineage(owner):
@@ -644,7 +630,6 @@ class EditSequences(RuleBasedStateMachine):
             handle = kept
             del view[index]
         siblings.pop(index)
-        self.emptied(place, siblings)
         if kept is not None:
             assert handle is kept
         if handle is not None:
@@ -703,8 +688,7 @@ class EditSequences(RuleBasedStateMachine):
         handle, m = self.node_to_insert(data, owner, name)
         self.view(data, place)[index] = handle
         siblings[index] = m
-        # Replacing the only node in a one-line block spreads it (test_replace_only_child_keeps_one_line_block).
-        self.placed(place, owner, len(siblings) == 1, [m])
+        self.placed(place, owner, False, [m])
         if old_handle is not None:
             self.detach(old_handle, old)
         else:
@@ -950,8 +934,9 @@ class EditSequences(RuleBasedStateMachine):
             text = str(doc)
             again = rkdl.parse(text)
             check_children(again.children, tree, "reparsed")
-            # Text kdl-rs can't print back as it read it still has to mean the same.
-            assert str(again) == text or SPACE_AFTER_BLOCK.search(text), text
+            # Whitespace right after a `}` is the one shape kdl-rs reads back differently (notes/upstream.md), and rkdl
+            # never writes it.
+            assert str(again) == text, text
             check_children(doc.children, tree, "live")
 
     @invariant()
@@ -967,9 +952,6 @@ class EditSequences(RuleBasedStateMachine):
     def line_endings_keep_the_document_style(self):
         for k, doc in enumerate(self.docs):
             text = str(doc)
-            if "\n" not in text:
-                # Nothing left to take the style from.
-                self.crlf[k] = False
             if self.crlf[k]:
                 assert re.search(r"(?<!\r)\n", text) is None, text
 

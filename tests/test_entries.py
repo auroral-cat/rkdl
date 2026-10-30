@@ -168,6 +168,16 @@ def test_args_iadd():
         args += 5
 
 
+def test_args_extend_is_all_or_nothing():
+    d, n = node("n 1 a=1\n")
+    with pytest.raises(TypeError):
+        n.args.extend([5, object()])
+    args = n.args
+    with pytest.raises(OverflowError):
+        args += [5, 2**127]
+    assert str(d) == "n 1 a=1\n"
+
+
 # Arguments and properties interleaved
 
 

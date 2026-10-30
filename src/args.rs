@@ -55,6 +55,36 @@ fn find(snapshot: &Snapshot, value: &Bound<'_, PyAny>) -> PyResult<Option<Item>>
     Ok(None)
 }
 
+/// Inserts `new` as arguments where the current `index`-th one is. Every value is converted before any is written,
+/// so a value that can't be leaves the node unchanged.
+fn insert_values(node: &Node, index: isize, new: &[Bound<'_, PyAny>]) -> PyResult<()> {
+    let Some(first) = new.first() else {
+        return Ok(());
+    };
+    edit(
+        first.py(),
+        node,
+        |snapshot| {
+            let args = args(&snapshot.items);
+            let at = match (args.get(insert_at(args.len(), index)), args.last()) {
+                (Some(&(at, _)), _) => at,
+                (None, Some(&(last, _))) => last + 1,
+                (None, None) => 0,
+            };
+            let converted = new
+                .iter()
+                .map(|v| values::from_python(v, None, snapshot.types()))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok((at, converted))
+        },
+        |mut target, (at, converted)| {
+            for (i, (value, ty)) in converted.into_iter().enumerate() {
+                target.insert(at + i, new_entry(None, value, ty));
+            }
+        },
+    )
+}
+
 /// A live list of a node's arguments, as plain Python values.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Args {
@@ -114,21 +144,7 @@ impl Args {
 
     /// Puts the new argument where the current `index`-th one is, so properties between arguments stay put.
     fn insert(&self, index: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        edit(
-            value.py(),
-            self.node.get(),
-            |snapshot| {
-                let args = args(&snapshot.items);
-                let at = match (args.get(insert_at(args.len(), index)), args.last()) {
-                    (Some(&(at, _)), _) => at,
-                    (None, Some(&(last, _))) => last + 1,
-                    (None, None) => 0,
-                };
-                let (value, ty) = values::from_python(value, None, snapshot.types())?;
-                Ok((at, value, ty))
-            },
-            |mut target, (at, value, ty)| target.insert(at, new_entry(None, value, ty)),
-        )
+        insert_values(self.node.get(), index, std::slice::from_ref(value))
     }
 
     fn append(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -138,7 +154,7 @@ impl Args {
     fn extend(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
         // Collected first, so `args.extend(args)` ends.
         let new: Vec<_> = iterable.try_iter()?.collect::<PyResult<_>>()?;
-        new.iter().try_for_each(|v| self.append(v))
+        insert_values(self.node.get(), isize::MAX, &new)
     }
 
     #[pyo3(signature = (index=-1))]
