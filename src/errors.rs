@@ -2,10 +2,15 @@ use kdl::{KdlDiagnostic, KdlError};
 use std::fmt;
 use std::sync::Arc;
 
-use miette::{GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, Severity, SourceCode};
+use miette::{
+    GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents, NamedSource, Severity,
+    SourceCode, SourceSpan, SpanContents,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+use crate::positions::locate_one;
 
 create_exception!(
     rkdl,
@@ -15,7 +20,8 @@ create_exception!(
         "The text isn't valid KDL.\n",
         "\n",
         "`str(error)` is a report that points at each problem in the text. The attributes give the first problem's\n",
-        "position, counted in characters.\n",
+        "position, counted as `node.line` and `node.column` count: lines break at every KDL newline, and columns count\n",
+        "characters, not bytes, after any byte order mark.\n",
         "\n",
         "Attributes:\n",
         "    line: The first problem's line, starting at 1.\n",
@@ -29,7 +35,8 @@ create_exception!(
 // It can be built and pickled, so a `ParseError` holding some can cross a process boundary.
 /// One problem found while parsing.
 ///
-/// Positions count characters, not bytes. Diagnostics compare equal when all their fields do, and can be pickled.
+/// Positions count characters, not bytes, and lines and columns count as `ParseError`'s do. Diagnostics compare
+/// equal when all their fields do, and can be pickled.
 #[pyclass(module = "rkdl", frozen, get_all, eq, hash)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
@@ -84,22 +91,21 @@ impl Diagnostic {
 }
 
 impl Diagnostic {
+    /// Lines and columns count as `node.line` and `node.column` do.
     fn from_kdl(input: &str, diag: &KdlDiagnostic) -> Self {
         // kdl-rs spans are byte offsets into the UTF-8 input. Rounding them down to a character boundary means a span
         // that lands inside a character gives a slightly-off position instead of a panic.
         let start = input.floor_char_boundary(diag.span.offset());
         let end = input.floor_char_boundary(start.saturating_add(diag.span.len()));
-        let before = input.get(..start).unwrap_or_default();
-        let spanned = input.get(start..end).unwrap_or_default();
-        let last_line = before.rsplit('\n').next().unwrap_or_default();
+        let at = locate_one(input, start);
         Diagnostic {
             message: diag.message.clone().unwrap_or_else(|| "unexpected error".into()),
             label: diag.label.clone(),
             help: diag.help.clone(),
-            offset: before.chars().count(),
-            length: spanned.chars().count(),
-            line: before.matches('\n').count() + 1,
-            column: last_line.chars().count() + 1,
+            offset: input.get(..start).unwrap_or_default().chars().count(),
+            length: input.get(start..end).unwrap_or_default().chars().count(),
+            line: at.line as usize,
+            column: at.column as usize,
         }
     }
 }
@@ -167,24 +173,41 @@ fn render(diagnostic: &dyn miette::Diagnostic) -> String {
 
 /// The parsed text, named after its file if it came from one, so each snippet's header is `[config.kdl:4:9]` as miette
 /// prints named sources.
-enum Source {
-    Named(NamedSource<Arc<String>>),
-    Text(Arc<String>),
+///
+/// miette's own text sources count lines at `\r` and `\n` only, and columns in bytes, a byte order mark included. Snippet
+/// headers count lines and columns as `ParseError.line` and `node.line` do instead, so they agree with the summary.
+struct Source {
+    text: Arc<String>,
+    name: Option<NamedSource<Arc<String>>>,
 }
 
 impl Source {
     fn new(err: &KdlError, path: Option<&str>) -> Self {
-        match path {
-            Some(path) => Source::Named(NamedSource::new(path, Arc::clone(&err.input))),
-            None => Source::Text(Arc::clone(&err.input)),
+        Source {
+            text: Arc::clone(&err.input),
+            name: path.map(|path| NamedSource::new(path, Arc::clone(&err.input))),
         }
     }
+}
 
-    fn code(&self) -> &dyn SourceCode {
-        match self {
-            Source::Named(named) => named,
-            Source::Text(text) => text.as_ref(),
-        }
+impl SourceCode for Source {
+    fn read_span<'a>(
+        &'a self,
+        span: &SourceSpan,
+        context_lines_before: usize,
+        context_lines_after: usize,
+    ) -> Result<Box<dyn SpanContents<'a> + 'a>, MietteError> {
+        let inner = match &self.name {
+            Some(named) => named.read_span(span, context_lines_before, context_lines_after)?,
+            None => self.text.read_span(span, context_lines_before, context_lines_after)?,
+        };
+        let at = locate_one(&self.text, inner.span().offset());
+        let (line, column) = (at.line as usize - 1, at.column as usize - 1);
+        let (data, span, lines) = (inner.data(), *inner.span(), inner.line_count());
+        Ok(Box::new(match inner.name() {
+            Some(name) => MietteSpanContents::new_named(name.to_owned(), data, span, line, column, lines),
+            None => MietteSpanContents::new(data, span, line, column, lines),
+        }))
     }
 }
 
@@ -212,7 +235,7 @@ impl std::error::Error for Located<'_> {}
 // Everything but the source is kdl-rs's.
 impl miette::Diagnostic for Located<'_> {
     fn source_code(&self) -> Option<&dyn SourceCode> {
-        Some(self.source.code())
+        Some(self.source)
     }
 
     fn severity(&self) -> Option<Severity> {
