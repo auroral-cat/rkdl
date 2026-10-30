@@ -97,12 +97,12 @@ pub(crate) fn put_contents(entry: &mut KdlEntry, contents: Contents) {
     values::set_value_repr(entry, contents.repr);
 }
 
-pub(crate) fn new_entry(key: Option<String>, value: KdlValue, ty: Option<String>) -> KdlEntry {
+pub(crate) fn new_entry(key: Option<String>, encoded: Encoded) -> KdlEntry {
     let mut entry = match key {
         Some(key) => KdlEntry::new_prop(values::identifier(key), KdlValue::Null),
         None => KdlEntry::new(KdlValue::Null),
     };
-    store(&mut entry, Encoded { value, ty, repr: None });
+    store(&mut entry, encoded);
     entry
 }
 
@@ -217,8 +217,9 @@ impl Entry {
     ///
     /// Writing a value keeps the annotation, and the value has to fit it: be of the annotation's class, be a plain
     /// value it reads (`"2029-01-01"` over `(date)`), or be a number it converts without loss (`7.0` over `(u8)`). To
-    /// change the annotation, set `type` first. An entry without one gets one picked from the value's class, and an
-    /// annotation rkdl doesn't know (not reserved, no custom Type) isn't checked.
+    /// change the annotation, write a `Value` with the new one, as `Value(300, type="u16")`, or set `type` first. An
+    /// entry without one gets one picked from the value's class. An annotation rkdl doesn't know (not reserved, no
+    /// custom Type) isn't checked: it stays, over the value's KDL text.
     ///
     /// Raises:
     ///     ValueError: The annotation is one the value can't be read as, or the new value doesn't fit it, like 300,

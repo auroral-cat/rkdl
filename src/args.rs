@@ -88,13 +88,13 @@ fn insert_values(node: &Node, index: isize, new: &[Bound<'_, PyAny>]) -> PyResul
             let at = entry_index(&args, insert_at(args.len(), index));
             let converted = new
                 .iter()
-                .map(|v| values::from_python(v, None, snapshot.types()))
+                .map(|v| values::encode(v, None, snapshot.types()))
                 .collect::<PyResult<Vec<_>>>()?;
             Ok((at, converted))
         },
         |mut target, (at, converted)| {
-            for (i, (value, ty)) in converted.into_iter().enumerate() {
-                target.insert(at + i, new_entry(None, value, ty));
+            for (i, encoded) in converted.into_iter().enumerate() {
+                target.insert(at + i, new_entry(None, encoded));
             }
         },
     )
@@ -126,7 +126,7 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
             let added = new
                 .iter()
                 .skip(picked.len())
-                .map(|v| values::from_python(v, None, snapshot.types()))
+                .map(|v| values::encode(v, None, snapshot.types()))
                 .collect::<PyResult<Vec<_>>>()?;
             // A splice either removes arguments or adds them, never both, so this index needs no adjusting.
             let at = entry_index(&args, change.insert_at);
@@ -139,8 +139,8 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
             for id in removed {
                 target.remove(id);
             }
-            for (i, (value, ty)) in added.into_iter().enumerate() {
-                target.insert(at + i, new_entry(None, value, ty));
+            for (i, encoded) in added.into_iter().enumerate() {
+                target.insert(at + i, new_entry(None, encoded));
             }
         },
     )
@@ -149,7 +149,8 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
 /// A node's arguments, as a live list of values.
 ///
 /// It works like a list, and every edit changes the node. Arguments keep their place among the properties. A value
-/// written over an argument keeps its annotation and has to fit it, as with `Entry.value`.
+/// written over an argument keeps its annotation and has to fit it, as with `Entry.value`. A `Value` sets the
+/// annotation too.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Args {
     node: Py<Node>,

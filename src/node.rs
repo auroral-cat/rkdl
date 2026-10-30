@@ -25,6 +25,9 @@ use crate::values::{self, TypeRegistry};
 /// one. A node can be in only one place at a time: take it out first (`pop`, `remove`, `del`, `detach()`), or add a
 /// `copy()`.
 ///
+/// A `Value` among the arguments or properties gives that entry a type annotation: `Node("server", Value(8080,
+/// type="u16"))` is `server (u16)8080`.
+///
 /// Args:
 ///     name: The node's name.
 ///     *args: The arguments.
@@ -35,7 +38,8 @@ use crate::values::{self, TypeRegistry};
 ///
 /// Raises:
 ///     TypeError: A value can't be converted to KDL.
-///     ValueError: A property is given twice, or one of `children` is already in a document.
+///     ValueError: A property is given twice, one of `children` is already in a document, or a `Value` doesn't fit its
+///         annotation.
 #[pyclass(module = "rkdl", frozen, weakref)]
 pub struct Node {
     // Ids are global, so moving the node to another document only repoints `home`.
@@ -91,8 +95,7 @@ pub(crate) fn detached<'py>(
 }
 
 fn entry(value: &Bound<'_, PyAny>, key: Option<String>, types: &TypeRegistry) -> PyResult<KdlEntry> {
-    let (value, ty) = values::from_python(value, None, types)?;
-    Ok(new_entry(key, value, ty))
+    Ok(new_entry(key, values::encode(value, None, types)?))
 }
 
 /// The keyword arguments of `Node(...)`, `parser.node(...)` and `doc.node(...)` other than `**kwargs`. `type` and

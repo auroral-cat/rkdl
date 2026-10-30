@@ -285,9 +285,18 @@ def test_a_value_that_does_not_fit_its_annotation_raises(value, current, message
         from_python(value, current)
 
 
-def test_an_unknown_annotation_gives_way_to_an_inferred_one():
-    # Only a plain value can keep a label rkdl doesn't know: anything else is written as it would be with none.
-    assert from_python(datetime.date(2024, 5, 6), "mine") == ('"2024-05-06"', "date")
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (datetime.date(2024, 5, 6), '"2024-05-06"'),
+        (decimal.Decimal("1.50"), '"1.50"'),
+        (uuid.UUID(int=1), '"00000000-0000-0000-0000-000000000001"'),
+        (b"hi", '"aGk="'),
+    ],
+)
+def test_an_unknown_annotation_stays_over_a_non_plain_value(value, text):
+    # A label rkdl doesn't know isn't checked, so it stays, and the value is written as its KDL text.
+    assert from_python(value, "mine") == (text, "mine")
 
 
 @pytest.mark.parametrize(

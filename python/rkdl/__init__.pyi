@@ -31,6 +31,7 @@ __all__ = [
     "Parser",
     "Props",
     "Type",
+    "Value",
     "__version__",
     "dump",
     "load",
@@ -192,6 +193,37 @@ class Type:
     @property
     def encode(self) -> Callable[[Any], Any]:
         """Turns a Python value into a plain value to write."""
+
+@final
+class Value:
+    """A value to write with the type annotation given here, in place of whatever annotation the entry had.
+
+    Write one anywhere a value goes: `node.args[0] = Value(8080, type="u16")`, `node.props["when"] =
+    Value("2029-01-01", type="date")`, `entry.value = ...`, `append`, `update`, `Node("server", Value(8080, type="u16"))`.
+    The value must fit an annotation rkdl knows, or the write raises `ValueError` and nothing changes. `type=None`
+    writes the value with no annotation at all, so `Value(date(2029, 1, 1))` is the plain string `"2029-01-01"`.
+
+    Reading the entry back gives the plain Python value, not a Value.
+
+    Args:
+        value: The value to write.
+        type: The annotation, without parentheses: `"u16"` for `(u16)8080`. None for no annotation.
+
+    Raises:
+        TypeError: `type` isn't a str or None, or `value` is itself a Value.
+    """
+
+    __match_args__ = ("value", "type")
+
+    def __new__(cls, value: object, type: str | None = None) -> Self: ...
+    @property
+    def value(self) -> Any:
+        """The value to write."""
+    @property
+    def type(self) -> str | None:
+        """The annotation to write, or None for no annotation."""
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
 
 @final
 class Parser:
@@ -356,6 +388,9 @@ class Node:
     one. A node can be in only one place at a time: take it out first (`pop`, `remove`, `del`, `detach()`), or add a
     `copy()`.
 
+    A `Value` among the arguments or properties gives that entry a type annotation: `Node("server", Value(8080,
+    type="u16"))` is `server (u16)8080`.
+
     Args:
         name: The node's name.
         *args: The arguments.
@@ -366,7 +401,8 @@ class Node:
 
     Raises:
         TypeError: A value can't be converted to KDL.
-        ValueError: A property is given twice, or one of `children` is already in a document.
+        ValueError: A property is given twice, one of `children` is already in a document, or a `Value` doesn't fit its
+            annotation.
     """
 
     def __new__(
@@ -486,8 +522,9 @@ class Entry:
 
         Writing a value keeps the annotation, and the value has to fit it: be of the annotation's class, be a plain
         value it reads (`"2029-01-01"` over `(date)`), or be a number it converts without loss (`7.0` over `(u8)`). To
-        change the annotation, set `type` first. An entry without one gets one picked from the value's class, and an
-        annotation rkdl doesn't know (not reserved, no custom Type) isn't checked.
+        change the annotation, write a `Value` with the new one, as `Value(300, type="u16")`, or set `type` first. An
+        entry without one gets one picked from the value's class. An annotation rkdl doesn't know (not reserved, no
+        custom Type) isn't checked: it stays, over the value's KDL text.
 
         Raises:
             ValueError: The annotation is one the value can't be read as, or the new value doesn't fit it, like 300,
@@ -513,7 +550,8 @@ class Args(MutableSequence[Any]):
     """A node's arguments, as a live list of values.
 
     It works like a list, and every edit changes the node. Arguments keep their place among the properties. A value
-    written over an argument keeps its annotation and has to fit it, as with `Entry.value`.
+    written over an argument keeps its annotation and has to fit it, as with `Entry.value`. A `Value` sets the
+    annotation too.
     """
 
     def entry(self, index: SupportsIndex) -> Entry:
@@ -571,7 +609,7 @@ class Props(MutableMapping[str, Any]):
 
     It works like a dict, and every edit changes the node. A new key goes after the last property. If a key appears
     more than once in the text, the last one counts, as in KDL. A value written over a property keeps its annotation
-    and has to fit it, as with `Entry.value`.
+    and has to fit it, as with `Entry.value`. A `Value` sets the annotation too.
     """
 
     def entry(self, key: str) -> Entry:
@@ -595,7 +633,9 @@ class Props(MutableMapping[str, Any]):
             KeyError: There are no properties.
         """
     def setdefault(self, key: str, default: Any = None) -> Any:
-        """Returns the value of property `key`, first adding it with `default` if there's no such property."""
+        """Returns the value of property `key`, first adding it with `default` if there's no such property. A `Value`
+        default returns the value as the property reads, without the wrapper.
+        """
     @overload
     def update(self, other: _SupportsKeysAndGetItem, /, **kwargs: Any) -> None:
         """Sets properties from a mapping or an iterable of pairs, and from keyword arguments.
