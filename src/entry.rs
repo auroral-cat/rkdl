@@ -12,6 +12,7 @@ use crate::edit::{Item, chosen, read};
 use crate::handles::{self, Fail, Home, removed};
 use crate::index::{Index, not_in, pick_one, pick_slice, search_range};
 use crate::node::Node;
+use crate::positions::Pos;
 use crate::spelling;
 use crate::tree::{EntryId, node_at_mut};
 use crate::values::{self, Encoded};
@@ -159,6 +160,18 @@ impl Entry {
         })
     }
 
+    /// Where the entry was in the text its document was parsed from, if the parse made it.
+    fn pos(&self, py: Python<'_>) -> PyResult<Option<Pos>> {
+        handles::on_home(py, &self.home, |doc| {
+            doc.get().with_state(py, |s| {
+                if s.ids.entry_position(self.id).is_none() {
+                    return Err(Fail::Missing(removed()));
+                }
+                Ok(s.ids.pos(self.id.key()))
+            })
+        })
+    }
+
     fn item(&self, py: Python<'_>) -> PyResult<(Item, Py<Document>)> {
         handles::on_home(py, &self.home, |doc| {
             let item = doc
@@ -250,6 +263,23 @@ impl Entry {
         })?;
         handles::edited();
         Ok(())
+    }
+
+    /// The line the entry was on in the file, starting at 1, or None if it didn't come from parsing.
+    ///
+    /// It's where the entry was when its document was parsed: edits don't change it, writing a new value included,
+    /// as they don't change the file until it's written. The position is the entry's first character: a property's
+    /// key, or an argument's type annotation or value. An entry added after parsing has None, and so does every entry
+    /// of a node that has None.
+    #[getter]
+    fn line(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        Ok(self.pos(py)?.map(|p| p.line))
+    }
+
+    /// The column the entry started at, counted in characters from 1, or None. See `line`.
+    #[getter]
+    fn column(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        Ok(self.pos(py)?.map(|p| p.column))
     }
 
     /// The type annotation, or None. Setting None removes it.

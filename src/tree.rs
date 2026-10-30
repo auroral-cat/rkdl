@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use kdl::{KdlDocument, KdlNode};
 
+use crate::positions::{self, Origin, Pos};
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct NodeId(NonZeroU64);
 
@@ -50,6 +52,9 @@ pub(crate) struct Subtree {
     root: NodeId,
     nodes: HashMap<NodeId, NodeSlot>,
     entries: HashMap<EntryId, NodeId>,
+    /// The parse the positions came from, if any.
+    origin: Option<Origin>,
+    positions: HashMap<u64, Pos>,
 }
 
 impl Subtree {
@@ -72,6 +77,10 @@ pub(crate) struct IdTree {
     top: Vec<NodeId>,
     nodes: HashMap<NodeId, NodeSlot>,
     entries: HashMap<EntryId, NodeId>,
+    /// The parse this tree's positions come from. None for a document that wasn't parsed, which has none.
+    origin: Option<Origin>,
+    /// Where each parsed node and entry was in the text, by id key. Nodes and entries the parse didn't make have none.
+    positions: HashMap<u64, Pos>,
 }
 
 impl IdTree {
@@ -80,24 +89,42 @@ impl IdTree {
             top: Vec::new(),
             nodes: HashMap::new(),
             entries: HashMap::new(),
+            origin: None,
+            positions: HashMap::new(),
         }
     }
 
+    /// A tree without positions, for a document that wasn't parsed from text.
     pub(crate) fn from_document(doc: &KdlDocument) -> Self {
+        IdTree::build(doc, None)
+    }
+
+    /// A tree for a document just parsed from `text`, with every node's and entry's position in it.
+    pub(crate) fn from_parse(doc: &KdlDocument, text: &str) -> Self {
+        let mut spans = Vec::new();
+        let mut tree = IdTree::build(doc, Some(&mut spans));
+        tree.origin = Some(Origin::fresh());
+        tree.positions = positions::locate(text, spans);
+        tree
+    }
+
+    /// `spans` gets each node's and entry's start offset, by id key, if given.
+    fn build(doc: &KdlDocument, mut spans: Option<&mut Vec<(usize, u64)>>) -> Self {
         let mut tree = IdTree::empty();
         // A work list rather than recursion: documents built through the API can nest deeper than the stack goes.
         let mut pending = Vec::new();
-        tree.top = tree.add_level(None, doc, &mut pending);
+        tree.top = tree.add_level(None, doc, &mut pending, spans.as_deref_mut());
         while let Some((id, block)) = pending.pop() {
-            let children = tree.add_level(Some(id), block, &mut pending);
+            let children = tree.add_level(Some(id), block, &mut pending, spans.as_deref_mut());
             tree.slot_mut(id).children = Some(children);
         }
         tree
     }
 
-    /// One top-level node: a detached node's home.
+    /// One top-level node: a detached node's home. It keeps the positions of the document the node came from.
     pub(crate) fn from_subtree(subtree: Subtree) -> Self {
         let mut tree = IdTree::empty();
+        tree.origin = subtree.origin;
         tree.put_subtree(None, 0, subtree);
         tree
     }
@@ -108,6 +135,7 @@ impl IdTree {
         parent: Option<NodeId>,
         block: &'a KdlDocument,
         pending: &mut Vec<(NodeId, &'a KdlDocument)>,
+        mut spans: Option<&mut Vec<(usize, u64)>>,
     ) -> Vec<NodeId> {
         let mut ids = Vec::with_capacity(block.nodes().len());
         for node in block.nodes() {
@@ -115,6 +143,12 @@ impl IdTree {
             let entries: Vec<EntryId> = node.entries().iter().map(|_| EntryId::fresh()).collect();
             for &e in &entries {
                 self.entries.insert(e, id);
+            }
+            if let Some(spans) = spans.as_deref_mut() {
+                // A node's span starts at its type annotation's `(`, or its name; an entry's at its first character.
+                spans.push((node.span().offset(), id.key()));
+                let entry_spans = node.entries().iter().map(|e| e.span().offset());
+                spans.extend(entry_spans.zip(entries.iter().map(|e| e.key())));
             }
             if let Some(children) = node.children() {
                 pending.push((id, children));
@@ -198,6 +232,11 @@ impl IdTree {
         Some(path)
     }
 
+    /// Where the node or entry with this id key was in the text the document was parsed from, if the parse made it.
+    pub(crate) fn pos(&self, key: u64) -> Option<Pos> {
+        self.positions.get(&key).copied()
+    }
+
     pub(crate) fn entry_position(&self, entry: EntryId) -> Option<(NodeId, usize)> {
         let &node = self.entries.get(&entry)?;
         let index = self
@@ -221,6 +260,8 @@ impl IdTree {
             root: node,
             nodes: HashMap::new(),
             entries: HashMap::new(),
+            origin: self.origin,
+            positions: HashMap::new(),
         };
         let mut stack = vec![node];
         while let Some(id) = stack.pop() {
@@ -231,6 +272,12 @@ impl IdTree {
             for e in &slot.entries {
                 self.entries.remove(e);
                 subtree.entries.insert(*e, id);
+                if let Some(pos) = self.positions.remove(&e.key()) {
+                    subtree.positions.insert(e.key(), pos);
+                }
+            }
+            if let Some(pos) = self.positions.remove(&id.key()) {
+                subtree.positions.insert(id.key(), pos);
             }
             stack.extend(slot.children.iter().flatten());
             subtree.nodes.insert(id, slot);
@@ -238,11 +285,16 @@ impl IdTree {
         subtree
     }
 
+    /// The subtree keeps its positions only if it came from this tree's parse: a position in another file means
+    /// nothing here.
     pub(crate) fn put_subtree(&mut self, parent: Option<NodeId>, index: usize, subtree: Subtree) {
         let root = subtree.root;
         self.siblings_mut(parent).insert(index, root);
         self.nodes.extend(subtree.nodes);
         self.entries.extend(subtree.entries);
+        if subtree.origin.is_some() && subtree.origin == self.origin {
+            self.positions.extend(subtree.positions);
+        }
         self.slot_mut(root).parent = parent;
     }
 
@@ -274,6 +326,7 @@ impl IdTree {
         let (node, index) = self.entry_position(entry).expect("entry is not in this tree");
         self.slot_mut(node).entries.remove(index);
         self.entries.remove(&entry);
+        self.positions.remove(&entry.key());
     }
 
     /// Panics with a description of the first difference. Called after every edit in debug builds.
@@ -560,6 +613,47 @@ mod tests {
         assert_eq!(tree.entry_position(old[0]), None);
         assert_eq!(tree.entry_position(new), Some((a, 0)));
         assert_eq!(tree.entry_position(old[2]), Some((a, 2)));
+    }
+
+    #[test]
+    fn positions_follow_their_ids_within_one_parse() {
+        let text = "a 1\np {\n    q x=1\n}\n";
+        let doc = parse(text);
+        let mut tree = IdTree::from_parse(&doc, text);
+        let pos = |tree: &IdTree, key: u64| tree.pos(key).map(|p| (p.line, p.column));
+        let (a, p) = (tree.top()[0], tree.top()[1]);
+        let q = tree.children(p).unwrap()[0];
+        let x = tree.entries(q)[0];
+        assert_eq!(pos(&tree, a.key()), Some((1, 1)));
+        assert_eq!(pos(&tree, tree.entries(a)[0].key()), Some((1, 3)));
+        assert_eq!(pos(&tree, x.key()), Some((3, 7)));
+
+        // Detached and back: kept.
+        let home = IdTree::from_subtree(tree.take_subtree(p));
+        assert_eq!(pos(&tree, q.key()), None);
+        assert_eq!(pos(&home, q.key()), Some((3, 5)));
+        let mut home = home;
+        tree.put_subtree(None, 0, home.take_subtree(p));
+        assert_eq!(pos(&tree, p.key()), Some((2, 1)));
+        assert_eq!(pos(&tree, x.key()), Some((3, 7)));
+
+        // Into a tree from another parse, or none: dropped.
+        let mut other = IdTree::from_parse(&parse(text), text);
+        other.put_subtree(None, 0, tree.take_subtree(p));
+        assert_eq!(pos(&other, p.key()), None);
+        assert_eq!(pos(&other, x.key()), None);
+        let mut built = IdTree::from_document(&doc);
+        assert_eq!(pos(&built, built.top()[0].key()), None);
+        built.put_subtree(None, 0, tree.take_subtree(a));
+        assert_eq!(pos(&built, a.key()), None);
+
+        // A removed entry's position goes with it.
+        let mut tree = IdTree::from_parse(&doc, text);
+        let a = tree.top()[0];
+        let one = tree.entries(a)[0];
+        tree.remove_entry(one);
+        assert_eq!(pos(&tree, one.key()), None);
+        assert_eq!(tree.positions.len(), 4);
     }
 
     #[test]
