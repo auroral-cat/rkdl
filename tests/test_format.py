@@ -128,9 +128,9 @@ def test_fmt_leaves_no_blank_line_after_a_trailing_comment(text):
 
 def test_defaults_and_repr():
     f = rkdl.Formatter()
-    assert (f.indent, f.indent_level, f.no_comments, f.entry_autoformat_keep) == ("    ", 0, False, False)
+    assert (f.indent, f.no_comments, f.entry_autoformat_keep) == ("    ", False, False)
     assert repr(rkdl.Formatter(indent="\t", no_comments=True)) == (
-        "Formatter(indent='\\t', indent_level=0, no_comments=True, entry_autoformat_keep=False)"
+        "Formatter(indent='\\t', no_comments=True, entry_autoformat_keep=False)"
     )
 
 
@@ -146,33 +146,9 @@ def test_indent_must_be_kdl_space(indent):
         rkdl.Formatter(indent=indent)
 
 
-def test_indent_level_is_bounded():
-    assert rkdl.Formatter(indent_level=1000).indent_level == 1000
-    # Far past that, kdl-rs's autoformat would loop until allocation fails and abort the process.
-    with pytest.raises(ValueError, match="indent_level must be at most 1000"):
-        rkdl.Formatter(indent_level=2**40)
-
-
-def test_indent_level_indents_every_node_after_the_first():
-    level_2 = rkdl.Formatter(indent_level=2)
-    assert formatted("a\nb {\nc\n}\n", level_2).endswith("\n        b {\n            c\n        }\n")
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="kdl-rs: KdlDocument::autoformat_config indents the document's leading text and then each node's, so the "
-    "first top-level node gets the indent twice",
-)
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("a {\n  b 1 { c 2 }\n}", "        a {\n            b 1 {\n                c 2\n            }\n        }\n"),
-        ("a\nb\n", "        a\n        b\n"),
-        ("// hi\na\n", "        // hi\n        a\n"),
-    ],
-)
-def test_indent_level_indents_the_first_node_once(text, expected):
-    assert formatted(text, rkdl.Formatter(indent_level=2)) == expected
+def test_indent_level_is_not_a_parameter():
+    with pytest.raises(TypeError, match="unexpected keyword argument 'indent_level'"):
+        rkdl.Formatter(indent_level=2)
 
 
 @pytest.mark.parametrize("eol", ["\r\n", "\r", "\u2028"])

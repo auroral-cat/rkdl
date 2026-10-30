@@ -132,30 +132,23 @@ class Formatter:
 
     Args:
         indent: The text for one level of indentation. Only KDL whitespace, such as spaces or tabs.
-        indent_level: How many levels of `indent` to put in front of every top-level node, with each block's
-            contents one level deeper. Today the first top-level node, or a comment in front of it, gets twice that,
-            a kdl-rs bug.
         no_comments: Remove comments.
         entry_autoformat_keep: Leave each argument and property as written, with the space in front of it, and only
             reformat the nodes around them.
 
     Raises:
-        ValueError: `indent` holds something other than whitespace, or `indent_level` is over 1000.
+        ValueError: `indent` holds something other than whitespace.
     """
 
     def __new__(
         cls,
         indent: str = "    ",
-        indent_level: int = 0,
         no_comments: bool = False,
         entry_autoformat_keep: bool = False,
     ) -> Self: ...
     @property
     def indent(self) -> str:
         """The text for one level of indentation."""
-    @property
-    def indent_level(self) -> int:
-        """How many levels to indent the top-level nodes by."""
     @property
     def no_comments(self) -> bool:
         """Whether comments are removed."""

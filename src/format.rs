@@ -7,30 +7,23 @@ use crate::layout;
 use crate::parser::prescan::KDL_SPACES;
 use crate::values;
 
-/// Far deeper than any real file. A huge level makes kdl-rs loop until allocation fails, which aborts the process.
-const MAX_INDENT_LEVEL: usize = 1000;
-
 /// Settings for `Document.fmt`, which mirror kdl-rs's `FormatConfig`.
 ///
 /// Args:
 ///     indent: The text for one level of indentation. Only KDL whitespace, such as spaces or tabs.
-///     indent_level: How many levels of `indent` to put in front of every top-level node, with each block's
-///         contents one level deeper. Today the first top-level node, or a comment in front of it, gets twice that,
-///         a kdl-rs bug.
 ///     no_comments: Remove comments.
 ///     entry_autoformat_keep: Leave each argument and property as written, with the space in front of it, and only
 ///         reformat the nodes around them.
 ///
 /// Raises:
-///     ValueError: `indent` holds something other than whitespace, or `indent_level` is over 1000.
+///     ValueError: `indent` holds something other than whitespace.
+// No `indent_level`, though FormatConfig has one: it indents the whole output, and `Document.fmt` always formats a
+// whole file, where indented top-level nodes have no use. kdl-rs 6.7.1 also indents the first top-level node twice.
 #[pyclass(module = "rkdl", frozen)]
 pub struct Formatter {
     /// The text for one level of indentation.
     #[pyo3(get)]
     indent: String,
-    /// How many levels to indent the top-level nodes by.
-    #[pyo3(get)]
-    indent_level: usize,
     /// Whether comments are removed.
     #[pyo3(get)]
     no_comments: bool,
@@ -43,24 +36,18 @@ pub struct Formatter {
 impl Formatter {
     #[new]
     #[pyo3(
-        signature = (indent="    ".to_string(), indent_level=0, no_comments=false, entry_autoformat_keep=false),
-        text_signature = "(indent='    ', indent_level=0, no_comments=False, entry_autoformat_keep=False)"
+        signature = (indent="    ".to_string(), no_comments=false, entry_autoformat_keep=false),
+        text_signature = "(indent='    ', no_comments=False, entry_autoformat_keep=False)"
     )]
-    fn new(indent: String, indent_level: usize, no_comments: bool, entry_autoformat_keep: bool) -> PyResult<Self> {
+    fn new(indent: String, no_comments: bool, entry_autoformat_keep: bool) -> PyResult<Self> {
         // autoformat writes the indent as is, so anything but spaces would change what the document says.
         if let Some(c) = indent.chars().find(|c| !KDL_SPACES.contains(c)) {
             return Err(PyValueError::new_err(format!(
                 "indent must be KDL whitespace, such as spaces or tabs, not {c:?}"
             )));
         }
-        if indent_level > MAX_INDENT_LEVEL {
-            return Err(PyValueError::new_err(format!(
-                "indent_level must be at most {MAX_INDENT_LEVEL}, not {indent_level}"
-            )));
-        }
         Ok(Formatter {
             indent,
-            indent_level,
             no_comments,
             entry_autoformat_keep,
         })
@@ -70,8 +57,7 @@ impl Formatter {
         // Python's repr of the indent, so the quoting and escapes match what a user would type.
         let indent = PyString::new(py, &self.indent).repr()?;
         Ok(format!(
-            "Formatter(indent={indent}, indent_level={}, no_comments={}, entry_autoformat_keep={})",
-            self.indent_level,
+            "Formatter(indent={indent}, no_comments={}, entry_autoformat_keep={})",
             py_bool(self.no_comments),
             py_bool(self.entry_autoformat_keep),
         ))
@@ -88,7 +74,6 @@ impl Formatter {
     pub(crate) fn apply(&self, doc: &mut KdlDocument, eol: &str) {
         let mut config = FormatConfig::builder()
             .indent(&self.indent)
-            .indent_level(self.indent_level)
             .no_comments(self.no_comments)
             .build();
         // The builder has no setter for this flag, and FormatConfig is non_exhaustive so `..` can't build one from

@@ -391,9 +391,9 @@ def test_value_formatting():
 
 
 def test_fmt_builder():
-    # fmt.rs: builder. Formatter's keyword arguments stand in for FormatConfig's builder.
-    f = rkdl.Formatter(indent_level=12, indent=" \t", no_comments=True)
-    assert (f.indent_level, f.indent, f.no_comments, f.entry_autoformat_keep) == (12, " \t", True, False)
+    # fmt.rs: builder. Formatter's keyword arguments stand in for FormatConfig's builder, minus indent_level.
+    f = rkdl.Formatter(indent=" \t", no_comments=True)
+    assert (f.indent, f.no_comments, f.entry_autoformat_keep) == (" \t", True, False)
 
 
 # v2_parser.rs
