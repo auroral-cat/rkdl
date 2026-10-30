@@ -14,20 +14,22 @@ use crate::index::{Index, not_in, pick_one, pick_slice};
 use crate::node::Node;
 use crate::spelling;
 use crate::tree::{EntryId, node_at_mut};
-use crate::values;
+use crate::values::{self, Encoded};
 
 // Reading and writing a KdlEntry.
 
-/// Writes a value and the annotation `values::from_python` chose for it. Writing what's already there changes
-/// nothing. Otherwise only `value_repr` is rewritten, in the style of the old text where it can be: the rest of the
-/// format holds the entry's whitespace and any `/-` comment in front of it.
-pub(crate) fn store(entry: &mut KdlEntry, value: KdlValue, ty: Option<String>) {
-    if values::same_value(entry.value(), &value) && entry.ty().map(KdlIdentifier::value) == ty.as_deref() {
+/// Writes a value and the annotation `values::encode` chose for it. Writing what's already there changes nothing.
+/// Otherwise only `value_repr` is rewritten: to the text the value came with, or in the style of the old text where
+/// it can be. The rest of the format holds the entry's whitespace and any `/-` comment in front of it.
+pub(crate) fn store(entry: &mut KdlEntry, new: Encoded) {
+    let Encoded { value, ty, repr } = new;
+    let old = entry.format().map(|f| f.value_repr.as_str());
+    let same_text = repr.is_none() || repr.as_deref() == old;
+    if same_text && values::same_value(entry.value(), &value) && entry.ty().map(KdlIdentifier::value) == ty.as_deref() {
         return;
     }
-    let old = entry.format().map(|f| f.value_repr.as_str());
-    let repr = old
-        .and_then(|old| spelling::value(old, &value))
+    let repr = repr
+        .or_else(|| old.and_then(|old| spelling::value(old, &value)))
         .unwrap_or_else(|| values::canonical_repr(&value));
     entry.set_value(value);
     set_ty(entry, ty);
@@ -100,18 +102,24 @@ pub(crate) fn new_entry(key: Option<String>, value: KdlValue, ty: Option<String>
         Some(key) => KdlEntry::new_prop(values::identifier(key), KdlValue::Null),
         None => KdlEntry::new(KdlValue::Null),
     };
-    store(&mut entry, value, ty);
+    store(&mut entry, Encoded { value, ty, repr: None });
     entry
 }
 
 /// Finds the entry under its document's lock. If it isn't there and the handle didn't move meanwhile, it was
 /// removed.
 fn entry_mut(s: &mut DocState, id: EntryId) -> Result<&mut KdlEntry, Fail> {
+    let (entries, index) = siblings_mut(s, id)?;
+    Ok(&mut entries[index])
+}
+
+/// The entry's node's entries, and where the entry is among them, as `entry_mut` finds it.
+fn siblings_mut(s: &mut DocState, id: EntryId) -> Result<(&mut Vec<KdlEntry>, usize), Fail> {
     let Some((node, index)) = s.ids.entry_position(id) else {
         return Err(Fail::Missing(removed()));
     };
     let path = s.ids.path(node).expect("an entry's node is in the tree");
-    Ok(&mut node_at_mut(&mut s.kdl, &path).entries_mut()[index])
+    Ok((node_at_mut(&mut s.kdl, &path).entries_mut(), index))
 }
 
 // The handle.
@@ -166,24 +174,35 @@ impl Entry {
     }
 
     /// Renames a property, keeping its place and its value's text. An argument can't gain a name, nor a property
-    /// lose one.
+    /// lose one, and a property can't take the key of another one: that would hide one of them from `node.props`.
     #[setter]
     fn set_name(&self, py: Python<'_>, name: Option<String>) -> PyResult<()> {
         let name = name.ok_or_else(|| {
             PyValueError::new_err("a property can't become an argument; remove it and add its value to node.args")
         })?;
-        self.with_entry(py, |e| {
-            let Some(old) = e.name() else {
-                return Err(PyValueError::new_err(
-                    "an argument can't be given a name; remove it and add it to node.props",
-                ));
-            };
-            if old.value() != name {
-                let new = spelling::identifier(Some(old), name);
-                e.set_name(Some(new));
-            }
-            Ok(())
-        })??;
+        handles::on_home(py, &self.home, |doc| {
+            doc.get().with_state(py, |s| {
+                let (entries, index) = siblings_mut(s, self.id)?;
+                let taken = entries.iter().any(|e| e.name().is_some_and(|k| k.value() == name));
+                let entry = entries.get_mut(index).ok_or_else(|| Fail::Missing(removed()))?;
+                let Some(old) = entry.name() else {
+                    return Err(Fail::Err(PyValueError::new_err(
+                        "an argument can't be given a name; remove it and add it to node.props",
+                    )));
+                };
+                if old.value() == name {
+                    return Ok(());
+                }
+                if taken {
+                    return Err(Fail::Err(PyValueError::new_err(format!(
+                        "the node already has a property {name:?}; remove it first, or set its value instead"
+                    ))));
+                }
+                let new = spelling::identifier(Some(old), name.clone());
+                entry.set_name(Some(new));
+                Ok(())
+            })
+        })?;
         handles::edited();
         Ok(())
     }
@@ -200,15 +219,15 @@ impl Entry {
         handles::on_home(py, &self.home, |doc| {
             let before = doc
                 .get()
-                .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e).ty))?;
+                .with_state(py, |s| entry_mut(s, self.id).map(|e| Item::new(self.id, e)))?;
             // Converting may call Python, so it happens between two locks.
-            let (value, ty) = values::from_python(value, before.as_deref(), doc.get().types.get())?;
+            let encoded = before.encode_over(value, doc.get().types.get())?;
             doc.get().with_state(py, |s| {
                 let entry = entry_mut(s, self.id)?;
-                if entry.ty().map(KdlIdentifier::value) != before.as_deref() {
+                if entry.ty().map(KdlIdentifier::value) != before.ty.as_deref() {
                     return Err(Fail::Changed);
                 }
-                store(entry, value, ty);
+                store(entry, encoded);
                 Ok(())
             })
         })?;
@@ -260,20 +279,15 @@ impl Entry {
         self.with_entry(py, |e| e.to_string().trim().to_owned())
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let Ok((item, doc)) = self.item(py) else {
-            return "<Entry (removed)>".to_owned();
+            return Ok("<Entry (removed)>".to_owned());
         };
-        let value = item.repr(py, doc.get().types.get());
-        let ty = item
-            .ty
-            .as_deref()
-            .map(|t| format!("({})", values::identifier(t)))
-            .unwrap_or_default();
-        match item.key() {
-            Some(key) => format!("<Entry {}={ty}{value}>", values::identifier(key)),
-            None => format!("<Entry {ty}{value}>"),
-        }
+        let value = item.repr(py, doc.get().types.get(), true)?;
+        Ok(match item.key() {
+            Some(key) => format!("<Entry {}={value}>", values::identifier(key)),
+            None => format!("<Entry {value}>"),
+        })
     }
 
     #[expect(clippy::needless_pass_by_value, reason = "PyO3 extracts arguments as PyRef by value")]

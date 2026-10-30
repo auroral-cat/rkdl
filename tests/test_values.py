@@ -406,6 +406,92 @@ def test_type_attributes():
     assert CELSIUS.cls is Celsius
 
 
+def test_type_is_immutable():
+    ty = rkdl.Type("x", int, decode=int, encode=int)
+    for attr in ("name", "cls", "decode", "encode", "other"):
+        with pytest.raises(AttributeError):
+            setattr(ty, attr, str)
+    # Like int's, a second __init__ has nothing to change.
+    ty.__init__("y", str, decode=str, encode=str)
+    assert (ty.name, ty.cls, ty.decode) == ("x", int, int)
+
+
+# Values valid KDL holds that Python's types refuse.
+
+
+@pytest.mark.parametrize(
+    ("text", "shown", "cls"),
+    [
+        ('(regex)#"\\p{L}+"#', '(regex)#"\\p{L}+"#', "str"),
+        ('(base64)"aGk"', '(base64)"aGk"', "str"),
+        ('(date)"2020-1-1"', '(date)"2020-1-1"', "str"),
+        ('(ipv4)"001.2.3.4"', '(ipv4)"001.2.3.4"', "str"),
+        ("(u8)0x1_00", "(u8)0x1_00", "int"),
+        ("(date)1.5", "(date)1.5", "float"),
+    ],
+)
+def test_a_value_python_cant_read_says_how_to_read_it(text, shown, cls):
+    doc = rkdl.parse(f"n {text}")
+    ty = text[1 : text.index(")")]
+    with pytest.raises(ValueError) as info:
+        list(doc["n"].args)
+    message = str(info.value)
+    assert message.startswith(f"{shown} can't be read as {ty}: ")
+    assert f'A Type named "{ty}" overrides the built-in one' in message
+    assert f'Parser(types=[Type("{ty}", {cls}, {cls}, {cls})]) reads it as a plain {cls}' in message
+
+
+def test_the_suggested_type_reads_the_value():
+    plain = rkdl.Type("regex", str, str, str)
+    doc = rkdl.Parser(types=[plain]).parse('n (regex)#"\\p{L}+"#')
+    assert doc["n"].args[0] == "\\p{L}+"
+
+
+def test_a_value_that_cant_be_read_shows_as_kdl_in_reprs():
+    doc = rkdl.parse('n 1 (regex)#"\\p{L}+"# k=(u8)300')
+    n = doc["n"]
+    assert repr(n.args) == 'Args([1, <kdl: (regex)#"\\p{L}+"#>])'
+    assert repr(n.props) == "Props({'k': <kdl: (u8)300>})"
+    assert repr(n.props.entry("k")) == "<Entry k=<kdl: (u8)300>>"
+
+
+# decimal64 and decimal128 keep a Decimal's digits, which the f64 kdl-rs keeps can't.
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (decimal.Decimal("1.00000000000000000000001"), "(decimal64)1.00000000000000000000001"),
+        (decimal.Decimal("0.10"), "(decimal64)0.10"),
+        (decimal.Decimal("1E+5"), "(decimal64)1E+5"),
+        (decimal.Decimal(100), "(decimal64)100"),
+        (decimal.Decimal("-0"), "(decimal64)-0.0"),
+        (decimal.Decimal("NaN"), "(decimal64)#nan"),
+        (decimal.Decimal("-Infinity"), "(decimal64)#-inf"),
+    ],
+)
+def test_decimal64_writes_a_decimals_own_digits(value, expected):
+    doc = rkdl.parse("n (decimal64)1.0")
+    n = doc["n"]
+    n.args[0] = value
+    assert str(doc) == f"n {expected}"
+    for read in (n.args[0], rkdl.parse(str(doc))["n"].args[0]):
+        assert read == value or (read.is_nan() and value.is_nan())
+        assert str(read) == str(value) or value.is_zero()
+
+
+def test_decimal64_reads_digits_from_the_text():
+    digits = "3.14159265358979323846264338327950288"
+    assert to_python(f"(decimal128){digits}") == decimal.Decimal(digits)
+    assert to_python("(decimal64)1_000.000_1") == decimal.Decimal("1000.0001")
+    assert to_python("(decimal64)0x10") == decimal.Decimal(16)
+
+
+def test_decimal64_out_of_the_f64_range_doesnt_fit():
+    # Decimal("1e400") is no f64, so it gets the inferred `decimal` annotation, a string.
+    assert from_python(decimal.Decimal("1e400"), "decimal64") == ('"1E+400"', "decimal")
+
+
 def test_parser_accepts_types():
     assert rkdl.Parser(types=[CELSIUS]).parse("a (celsius)1")["a"].args[0] == Celsius(1)
 

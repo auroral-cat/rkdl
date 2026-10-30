@@ -7,7 +7,10 @@ use pyo3::prelude::*;
 create_exception!(rkdl, ParseError, PyValueError);
 
 /// One problem found while parsing. Offsets count code points, not bytes.
-#[pyclass(module = "rkdl", frozen, get_all)]
+///
+/// It can be built and pickled, so a `ParseError` holding some can cross a process boundary.
+#[pyclass(module = "rkdl", frozen, get_all, eq, hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
     message: String,
     label: Option<String>,
@@ -20,6 +23,33 @@ pub struct Diagnostic {
 
 #[pymethods]
 impl Diagnostic {
+    #[new]
+    #[pyo3(signature = (message, label, help, offset, length, line, column))]
+    fn new(
+        message: String,
+        label: Option<String>,
+        help: Option<String>,
+        offset: usize,
+        length: usize,
+        line: usize,
+        column: usize,
+    ) -> Self {
+        Diagnostic {
+            message,
+            label,
+            help,
+            offset,
+            length,
+            line,
+            column,
+        }
+    }
+
+    fn __getnewargs__(&self) -> (String, Option<String>, Option<String>, usize, usize, usize, usize) {
+        let d = self.clone();
+        (d.message, d.label, d.help, d.offset, d.length, d.line, d.column)
+    }
+
     fn __repr__(&self) -> String {
         format!("<Diagnostic {}:{} {:?}>", self.line, self.column, self.message)
     }

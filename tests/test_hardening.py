@@ -55,11 +55,12 @@ def test_set_whose_encode_always_appends():
 def test_entry_value_whose_encode_always_changes_the_type():
     holder = {"calls": 0}
 
-    def toggle():
+    # A new annotation every time, so however many times an attempt encodes, the type has changed by the end of it.
+    def retype():
         holder["calls"] += 1
-        holder["entry"].type = "x" if holder["calls"] % 2 else "box"
+        holder["entry"].type = f"t{holder['calls']}"
 
-    doc = box_parser(encode=toggle).parse("n (box)0")
+    doc = box_parser(encode=retype).parse("n (box)0")
     holder["entry"] = doc["n"].args.entry(0)
     with pytest.raises(RuntimeError, match=KEPT_CHANGING):
         holder["entry"].value = Box(5)

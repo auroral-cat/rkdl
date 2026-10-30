@@ -307,8 +307,8 @@ def test_a_value_that_does_not_fit_its_type_still_has_a_repr():
         _ = e.value
     with pytest.raises(ValueError):
         n.args[0]
-    assert "(date)5" in repr(e)
-    assert repr(n.args) == "Args([5])"
+    assert repr(e) == "<Entry <kdl: (date)5>>"
+    assert repr(n.args) == "Args([<kdl: (date)5>])"
 
 
 def test_known_type_that_does_not_fit_raises_on_read():

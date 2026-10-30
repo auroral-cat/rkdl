@@ -92,9 +92,11 @@ fn write(node: &Node, py: Python<'_>, pairs: &[(String, Bound<'_, PyAny>)], repl
                 .iter()
                 .map(|(key, value)| {
                     let found = last(&snapshot.items, key);
-                    let (value, ty) =
-                        values::from_python(value, found.and_then(|i| i.ty.as_deref()), snapshot.types())?;
-                    Ok((found.map(|i| i.id), key.clone(), value, ty))
+                    let encoded = match found {
+                        Some(item) => item.encode_over(value, snapshot.types())?,
+                        None => values::encode(value, None, snapshot.types())?,
+                    };
+                    Ok((found.map(|i| i.id), key.clone(), encoded))
                 })
                 .collect::<PyResult<Vec<_>>>()?;
             let kept: Vec<EntryId> = written.iter().filter_map(|w| w.0).collect();
@@ -107,12 +109,12 @@ fn write(node: &Node, py: Python<'_>, pairs: &[(String, Bound<'_, PyAny>)], repl
             Ok((written, removed))
         },
         |mut target, (written, removed)| {
-            for (found, key, value, ty) in written {
+            for (found, key, encoded) in written {
                 if let Some(id) = found {
-                    store(target.entry_mut(id), value, ty);
+                    store(target.entry_mut(id), encoded);
                 } else {
                     let end = target.len();
-                    target.insert(end, new_entry(Some(key), value, ty));
+                    target.insert(end, new_entry(Some(key), encoded.value, encoded.ty));
                 }
             }
             for id in removed {
@@ -389,19 +391,23 @@ impl Props {
         Ok(found.pop().expect("chose one entry"))
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let Ok(snapshot) = read(py, self.node.get()) else {
-            return "Props(<unreadable>)".to_owned();
+            return Ok("Props(<unreadable>)".to_owned());
         };
-        let found: Vec<_> = keys(&snapshot.items)
+        let found = keys(&snapshot.items)
             .into_iter()
             .filter_map(|key| last(&snapshot.items, key).map(|item| (key, item)))
             .map(|(key, item)| {
                 let key = PyString::new(py, key).repr().map(|k| k.to_string());
-                format!("{}: {}", key.unwrap_or_default(), item.repr(py, snapshot.types()))
+                Ok(format!(
+                    "{}: {}",
+                    key.unwrap_or_default(),
+                    item.repr(py, snapshot.types(), false)?
+                ))
             })
-            .collect();
-        format!("Props({{{}}})", found.join(", "))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(format!("Props({{{}}})", found.join(", ")))
     }
 
     // No `__clear__`: a cycle through the node passes a Type, which clears.

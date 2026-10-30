@@ -1,6 +1,7 @@
 //! Reading and editing a node's entries, shared by the `args`, `props` and `entries` views.
 
 use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
 use crate::document::{DocState, Document};
@@ -8,7 +9,7 @@ use crate::entry::Entry;
 use crate::handles::{self, Fail, Garbage, stale};
 use crate::node::Node;
 use crate::tree::{EntryId, IdTree, NodeId, node_at, node_at_mut};
-use crate::values::{self, TypeRegistry};
+use crate::values::{self, Encoded, TypeRegistry};
 
 /// One entry as read under the lock, to work on once it's released.
 #[derive(Clone)]
@@ -17,6 +18,9 @@ pub(crate) struct Item {
     pub(crate) name: Option<KdlIdentifier>,
     pub(crate) value: KdlValue,
     pub(crate) ty: Option<String>,
+    /// The value's text in the file, kept only for annotated values, which are the ones whose text can matter to
+    /// reading them (`decimal64`) or to the error saying they can't be read.
+    text: Option<String>,
 }
 
 impl Item {
@@ -26,6 +30,7 @@ impl Item {
             name: entry.name().cloned(),
             value: entry.value().clone(),
             ty: entry.ty().map(|t| t.value().to_owned()),
+            text: entry.ty().and(entry.format()).map(|f| f.value_repr.clone()),
         }
     }
 
@@ -34,7 +39,39 @@ impl Item {
     }
 
     pub(crate) fn to_python(&self, py: Python<'_>, types: &TypeRegistry) -> PyResult<Py<PyAny>> {
-        values::to_python(py, &self.value, self.ty.as_deref(), types)
+        values::to_python_spelled(py, &self.value, self.text.as_deref(), self.ty.as_deref(), types)
+    }
+
+    /// What writing `value` over this entry stores. A value that's the one the entry already reads as is a no-op,
+    /// even where converting it would spell it differently (`(date-time)"…Z"` would come back as `+00:00`): if the
+    /// annotation stays and the old value, read and written back, gives the same KDL as the new one, the old value
+    /// is what's stored, which `store` sees is already there.
+    pub(crate) fn encode_over(&self, value: &Bound<'_, PyAny>, types: &TypeRegistry) -> PyResult<Encoded> {
+        let new = values::encode(value, self.ty.as_deref(), types)?;
+        if new.ty.is_some() && new.ty == self.ty && self.rewrites_as(value.py(), &new, types)? {
+            return Ok(Encoded {
+                value: self.value.clone(),
+                ty: new.ty,
+                repr: None,
+            });
+        }
+        Ok(new)
+    }
+
+    /// Whether reading this entry and writing the result back would store `new`. A value that can't be read or
+    /// written back (an `Exception` from a conversion) isn't `new`; anything else, such as `KeyboardInterrupt`,
+    /// propagates.
+    fn rewrites_as(&self, py: Python<'_>, new: &Encoded, types: &TypeRegistry) -> PyResult<bool> {
+        let again = self
+            .to_python(py, types)
+            .and_then(|old| values::encode(old.bind(py), self.ty.as_deref(), types));
+        match again {
+            Ok(again) => {
+                Ok(again.ty == new.ty && values::same_value(&again.value, &new.value) && again.repr == new.repr)
+            }
+            Err(err) if err.is_instance_of::<PyException>(py) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     // Values may change between planning an edit and applying it, unless the plan read them. Which entries there are,
@@ -48,12 +85,25 @@ impl Item {
         values::same_value(&self.value, &other.value)
     }
 
-    /// The value's Python repr, for the views' reprs, which never raise. A value that doesn't fit its type, or whose
-    /// Python repr raises, shows as KDL.
-    pub(crate) fn repr(&self, py: Python<'_>, types: &TypeRegistry) -> String {
-        self.to_python(py, types)
-            .and_then(|value| Ok(value.bind(py).repr()?.to_string()))
-            .unwrap_or_else(|_| values::canonical_repr(&self.value))
+    /// The value's Python repr, for the reprs of entries and views, which don't raise an `Exception`. A value that
+    /// doesn't fit its type, or whose Python repr raises one, shows as its KDL text, marked as such: `<kdl: (u8)300>`.
+    /// Anything else a decode hook raises, such as `KeyboardInterrupt`, propagates.
+    ///
+    /// With `ty`, a value that reads shows its annotation in front, as `(u8)7`.
+    pub(crate) fn repr(&self, py: Python<'_>, types: &TypeRegistry, ty: bool) -> PyResult<String> {
+        let annotation = self.ty.as_deref().map(|t| format!("({})", values::identifier(t)));
+        let shown = self
+            .to_python(py, types)
+            .and_then(|value| Ok(value.bind(py).repr()?.to_string()));
+        match shown {
+            Ok(shown) if ty => Ok(format!("{}{shown}", annotation.unwrap_or_default())),
+            Ok(shown) => Ok(shown),
+            Err(err) if err.is_instance_of::<PyException>(py) => {
+                let text = self.text.clone().unwrap_or_else(|| values::canonical_repr(&self.value));
+                Ok(format!("<kdl: {}{text}>", annotation.unwrap_or_default()))
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 

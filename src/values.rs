@@ -253,6 +253,18 @@ pub(crate) fn to_python(
     ty: Option<&str>,
     types: &TypeRegistry,
 ) -> PyResult<Py<PyAny>> {
+    to_python_spelled(py, value, None, ty, types)
+}
+
+/// `to_python`, given the value's text in the file too, if there is one. `decimal64` and `decimal128` read their
+/// digits from it, since the parsed value is only an f64.
+pub(crate) fn to_python_spelled(
+    py: Python<'_>,
+    value: &KdlValue,
+    text: Option<&str>,
+    ty: Option<&str>,
+    types: &TypeRegistry,
+) -> PyResult<Py<PyAny>> {
     let Some(ty) = ty else {
         return plain_to_python(py, value);
     };
@@ -263,56 +275,105 @@ pub(crate) fn to_python(
             let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
             Ok(decode.call1((plain,))?.unbind())
         }
-        Some(Converter::Builtin(b)) => decode_builtin(py, b, value).map_err(|reason| {
-            PyValueError::new_err(format!("({ty}){} is not a valid {ty}: {reason}", canonical_repr(value)))
-        }),
+        Some(Converter::Builtin(b)) => {
+            decode_builtin(py, b, value, text).map_err(|reason| unreadable(ty, value, text, &reason))
+        }
     }
 }
 
-/// Python object -> KDL value plus the annotation to write, applying the "keep the current annotation if the value
-/// fits it" rule from plan.md.
+/// The error for a value a built-in type can't read. Valid KDL can hold values Python's own types refuse, such as
+/// `(regex)#"\p{L}+"#`, so it says how to read the value anyway.
+fn unreadable(ty: &str, value: &KdlValue, text: Option<&str>, reason: &str) -> PyErr {
+    let text = text.map_or_else(|| canonical_repr(value), str::to_owned);
+    let plain = match value {
+        KdlValue::String(_) => Some("str"),
+        KdlValue::Integer(_) => Some("int"),
+        KdlValue::Float(_) => Some("float"),
+        KdlValue::Bool(_) => Some("bool"),
+        KdlValue::Null => None,
+    };
+    let example = plain.map_or_else(String::new, |cls| {
+        format!(": Parser(types=[Type({ty:?}, {cls}, {cls}, {cls})]) reads it as a plain {cls}")
+    });
+    PyValueError::new_err(format!(
+        "({}){text} can't be read as {ty}: {reason}. A Type named {ty:?} overrides the built-in one{example}",
+        identifier(ty)
+    ))
+}
+
+/// What writing a Python value stores: the KDL value, its annotation, and the text to print it as when the value
+/// alone doesn't say (a `decimal64`'s digits, which an f64 can't hold).
+pub(crate) struct Encoded {
+    pub(crate) value: KdlValue,
+    pub(crate) ty: Option<String>,
+    pub(crate) repr: Option<String>,
+}
+
+impl Encoded {
+    fn new(value: KdlValue, ty: Option<String>) -> Self {
+        Encoded { value, ty, repr: None }
+    }
+}
+
+/// `encode` without the text. Only a kept `decimal64` or `decimal128` annotation brings text of its own, so nothing
+/// is lost without a current annotation.
 pub(crate) fn from_python(
     value: &Bound<'_, PyAny>,
     current_ty: Option<&str>,
     types: &TypeRegistry,
 ) -> PyResult<(KdlValue, Option<String>)> {
+    let encoded = encode(value, current_ty, types)?;
+    Ok((encoded.value, encoded.ty))
+}
+
+/// Python object -> what to write, applying the "keep the current annotation if the value fits it" rule from
+/// plan.md.
+pub(crate) fn encode(value: &Bound<'_, PyAny>, current_ty: Option<&str>, types: &TypeRegistry) -> PyResult<Encoded> {
     if let Some(ty) = current_ty {
         let kept = match types.get(ty) {
             // An unknown annotation is the user's own label, so any plain value keeps it.
-            None => plain_to_kdl(value)?,
+            None => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
             Some(Converter::Builtin(b)) => encode_builtin(b, value)?,
             Some(Converter::User(user)) => match encode_user(user, value)? {
-                Some(kdl) => Some(kdl),
+                Some(kdl) => Some((kdl, None)),
                 // A plain value keeps a custom annotation if the type reads it, as `(celsius)22.0` would be read.
-                None if is_exact_plain(value) && decodes(user, value)? => plain_to_kdl(value)?,
+                None if is_exact_plain(value) && decodes(user, value)? => plain_to_kdl(value)?.map(|kdl| (kdl, None)),
                 None => None,
             },
         };
-        if let Some(kdl) = kept {
-            return Ok((kdl, Some(ty.to_owned())));
+        if let Some((kdl, repr)) = kept {
+            return Ok(Encoded {
+                value: kdl,
+                ty: Some(ty.to_owned()),
+                repr,
+            });
         }
     }
 
     if is_exact_plain(value) {
         let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
-        return Ok((kdl, None));
+        return Ok(Encoded::new(kdl, None));
     }
     for user in types.active_user_types() {
         if let Some(kdl) = encode_user(user, value)? {
-            return Ok((kdl, Some(user.name.clone())));
+            return Ok(Encoded::new(kdl, Some(user.name.clone())));
         }
     }
     for &(name, b) in INFERRED {
         if !matches!(types.get(name), Some(Converter::Builtin(_))) {
             continue;
         }
-        if let Some(kdl) = encode_builtin(b, value)? {
-            return Ok((kdl, Some(name.to_owned())));
+        if let Some((kdl, repr)) = encode_builtin(b, value)? {
+            return Ok(Encoded {
+                value: kdl,
+                ty: Some(name.to_owned()),
+                repr,
+            });
         }
     }
     // Subclasses of the plain types, such as an IntEnum no Type claimed.
     if let Some(kdl) = plain_to_kdl(value)? {
-        return Ok((kdl, None));
+        return Ok(Encoded::new(kdl, None));
     }
     Err(PyTypeError::new_err(format!(
         "can't convert {} to a KDL value",
@@ -538,7 +599,7 @@ fn is_instance(value: &Bound<'_, PyAny>, module: &str, attr: &str) -> PyResult<b
     clippy::wildcard_enum_match_arm,
     reason = "each type accepts one or two kinds of value and rejects the rest"
 )]
-fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue) -> Result<Py<PyAny>, String> {
+fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&str>) -> Result<Py<PyAny>, String> {
     let string = || match value {
         KdlValue::String(s) => Ok(s.as_str()),
         _ => Err("expected a string".to_owned()),
@@ -566,17 +627,18 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue) -> Result<Py<PyA
             f.into_bound_py_any(py)
         }
         Builtin::DecimalNumber => {
-            // The literal's own text isn't available here, only the parsed value. The shortest text that
-            // round-trips is the next best thing: 0.1 becomes Decimal("0.1"), not the binary expansion.
-            let text = match value {
+            // The parsed value is only an f64, so the digits come from the literal's text. Without one (an entry
+            // kdl-rs prints itself), the shortest text that round-trips is the next best thing: 0.1 becomes
+            // Decimal("0.1"), not the binary expansion.
+            let digits = match value {
                 KdlValue::Integer(i) => i.to_string(),
                 KdlValue::Float(f) if f.is_nan() => "NaN".to_owned(),
                 KdlValue::Float(f) if *f == f64::INFINITY => "Infinity".to_owned(),
                 KdlValue::Float(f) if *f == f64::NEG_INFINITY => "-Infinity".to_owned(),
-                KdlValue::Float(f) => format!("{f:?}"),
+                KdlValue::Float(f) => text.and_then(decimal_digits).unwrap_or_else(|| format!("{f:?}")),
                 _ => return Err("expected a number".to_owned()),
             };
-            call(py, "decimal", "Decimal", text)
+            call(py, "decimal", "Decimal", digits)
         }
         Builtin::DecimalString => call(py, "decimal", "Decimal", string()?),
         Builtin::DateTime => from_iso(py, "datetime", string()?),
@@ -592,6 +654,16 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue) -> Result<Py<PyA
     decoded.map(Bound::unbind).map_err(|e| e.value(py).to_string())
 }
 
+/// A decimal float literal's digits as `Decimal` reads them, without the `_` separators. KDL's decimal syntax is a
+/// subset of `Decimal`'s.
+fn decimal_digits(text: &str) -> Option<String> {
+    let digits = text.replace('_', "");
+    digits
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))
+        .then_some(digits)
+}
+
 fn from_iso<'py>(py: Python<'py>, class: &str, text: &str) -> PyResult<Bound<'py, PyAny>> {
     py.import("datetime")?
         .getattr(class)?
@@ -605,13 +677,16 @@ fn b64decode<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
     py.import("base64")?.getattr("b64decode")?.call((text,), Some(&kwargs))
 }
 
-/// None if the value doesn't fit the type: the wrong class, or an integer out of range.
-fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
+/// The KDL value, and the text to print it as if the value alone doesn't say. None if the value doesn't fit the
+/// type: the wrong class, or a number out of range.
+fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlValue, Option<String>)>> {
     let is_int = value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>();
-    let string = |v: Bound<'_, PyAny>| -> PyResult<Option<KdlValue>> { Ok(Some(KdlValue::String(v.extract()?))) };
+    let string = |v: Bound<'_, PyAny>| -> PyResult<Option<(KdlValue, Option<String>)>> {
+        Ok(Some((KdlValue::String(v.extract()?), None)))
+    };
     match b {
         Builtin::Int { min, max } => Ok(match is_int.then(|| value.extract::<i128>()) {
-            Some(Ok(i)) if (min..=max).contains(&i) => Some(KdlValue::Integer(i)),
+            Some(Ok(i)) if (min..=max).contains(&i) => Some((KdlValue::Integer(i), None)),
             _ => None,
         }),
         Builtin::F32 | Builtin::F64 => {
@@ -625,11 +700,9 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlVa
             if matches!(b, Builtin::F32) && !fits_f32(f) {
                 return Ok(None);
             }
-            Ok(Some(KdlValue::Float(f)))
+            Ok(Some((KdlValue::Float(f), None)))
         }
-        Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => {
-            Ok(Some(KdlValue::Float(value.call_method0("__float__")?.extract()?)))
-        }
+        Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => decimal_number(value),
         Builtin::DecimalString if is_instance(value, "decimal", "Decimal")? => string(value.str()?.into_any()),
         Builtin::DateTime if is_instance(value, "datetime", "datetime")? => string(value.call_method0("isoformat")?),
         Builtin::Date if is_instance(value, "datetime", "date")? && !is_instance(value, "datetime", "datetime")? => {
@@ -678,6 +751,40 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<KdlVa
     }
 }
 
+/// A `Decimal` as a `decimal64` or `decimal128`, written with its own digits so none are lost to the f64 kdl-rs
+/// keeps. Only the range is checked, against that f64. None if it's out of range.
+fn decimal_number(value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlValue, Option<String>)>> {
+    let f: f64 = value.call_method0("__float__")?.extract()?;
+    if !value.call_method0("is_finite")?.is_truthy()? {
+        return Ok(Some((KdlValue::Float(f), None)));
+    }
+    if !f.is_finite() {
+        return Ok(None);
+    }
+    // `str` gives the Decimal's own digits, which are a KDL number unless they're an integer too large for i128, or
+    // `-0`, which would read back as `0`. Those get the float's text.
+    let digits: String = value.str()?.extract()?;
+    let parsed = KdlEntry::parse(&digits)
+        .ok()
+        .filter(|e| e.name().is_none() && e.ty().is_none());
+    let spelled = parsed.and_then(|e| {
+        let read = match *e.value() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "compared with the f64 Python rounds the Decimal to"
+            )]
+            KdlValue::Integer(i) => i as f64,
+            KdlValue::Float(g) => g,
+            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => return None,
+        };
+        (read.to_bits() == f.to_bits()).then(|| e.value().clone())
+    });
+    Ok(Some(match spelled {
+        Some(kdl) => (kdl, Some(digits)),
+        None => (KdlValue::Float(f), None),
+    }))
+}
+
 fn registry(py: Python<'_>, types: Option<Vec<Py<Type>>>) -> TypeRegistry {
     types.map_or_else(TypeRegistry::builtin, |types| TypeRegistry::with_user_types(py, types))
 }
@@ -709,10 +816,11 @@ pub(crate) fn _debug_to_python(
 ) -> PyResult<Py<PyAny>> {
     let entry = KdlEntry::parse(kdl_entry_text).map_err(|e| parse_error(py, &e))?;
     let types = registry(py, types);
-    to_python(py, entry.value(), entry.ty().map(KdlIdentifier::value), &types)
+    let text = entry.format().map(|f| f.value_repr.as_str());
+    to_python_spelled(py, entry.value(), text, entry.ty().map(KdlIdentifier::value), &types)
 }
 
-/// Direct conversion hook for `test_values.py`: returns `(canonical_repr, annotation)`.
+/// Direct conversion hook for `test_values.py`: returns `(text, annotation)`, the text a new entry would print.
 #[pyfunction]
 #[pyo3(signature = (value, current_type=None, types=None))]
 pub(crate) fn _debug_from_python(
@@ -721,6 +829,9 @@ pub(crate) fn _debug_from_python(
     types: Option<Vec<Py<Type>>>,
 ) -> PyResult<(String, Option<String>)> {
     let types = registry(value.py(), types);
-    let (kdl, ty) = from_python(value, current_type, &types)?;
-    Ok((canonical_repr(&kdl), ty))
+    let encoded = encode(value, current_type, &types)?;
+    Ok((
+        encoded.repr.unwrap_or_else(|| canonical_repr(&encoded.value)),
+        encoded.ty,
+    ))
 }

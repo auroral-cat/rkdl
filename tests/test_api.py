@@ -53,6 +53,195 @@ def test_self_assignment_changes_no_file_in_the_corpus():
     assert changed == []
 
 
+# Typed values in valid spellings that converting them would change: Python reads `(date-time)"...Z"` and writes it
+# back as `+00:00`, a `Decimal` writes `1e5` as `1E+5`, and so on. Writing back the value an entry reads as must
+# leave its text alone, whatever the type.
+
+
+def int_spellings(low, high):
+    for value in (0, 7, 127):
+        yield from [f"{value}", f"+{value}", f"0x{value:X}", f"0x{value:x}", f"0o{value:o}", f"0b{value:b}"]
+    yield "1_000" if high >= 1000 else "1_0"
+    if low < 0:
+        yield from ["-0x7F", "-1_0", "-0b1", "-0"]
+
+
+FLOAT_SPELLINGS = ["1", "+1", "0x10", "1.0", "1.50", "1e3", "1.5E+3", "+2.5e-3", "1_000.5", "-0.0", "#inf", "#nan"]
+
+STRING_SPELLINGS = {
+    "decimal": ["1e5", "1.50", "-0", "Infinity", "0.10"],
+    "date-time": [
+        "2026-01-01T09:00:00Z",
+        "2026-01-01 09:00:00",
+        "2026-01-01T09:00:00.500Z",
+        "2026-01-01T09:00:00.5+01:00",
+        "2026-01-01T09:00",
+        "20260101T090000Z",
+    ],
+    "date": ["2020-01-01", "20200101", "2020-W01-1"],
+    "time": ["10:00:00Z", "10:00", "10:00:00.500", "10:00:00+01:00", "T10:00"],
+    "ipv4": ["10.0.0.1"],
+    "ipv6": ["0:0::1", "ABCD::1", "::ffff:10.0.0.1", "2001:db8:0:0:0:0:0:1"],
+    "uuid": [
+        "ABCDEF00-0000-0000-0000-000000000000",
+        "{abcdef00-0000-0000-0000-000000000000}",
+        "urn:uuid:abcdef00-0000-0000-0000-000000000000",
+        "abcdef00000000000000000000000000",
+    ],
+    "regex": ["a\\d+", "(?i)x"],
+    "base64": ["aGk=", ""],
+}
+
+
+def typed_spellings():
+    """`(type)value` texts for every built-in reserved type. Spellings the running Python can't read are left out,
+    since `fromisoformat` takes more forms in newer versions."""
+    from rkdl._rkdl import _debug_reserved_types
+    from rkdl._rkdl import _debug_to_python as to_python
+
+    ranges = {
+        **{f"i{bits}": (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) for bits in (8, 16, 32, 64, 128)},
+        **{f"u{bits}": (0, 2**bits - 1) for bits in (8, 16, 32, 64, 128)},
+        "isize": (-(2**63), 2**63 - 1),
+        "usize": (0, 2**64 - 1),
+    }
+    texts = []
+    for name, plain in _debug_reserved_types():
+        if name in ranges:
+            texts += [f"({name}){s}" for s in int_spellings(*ranges[name])]
+        elif name in ("f32", "f64", "decimal64", "decimal128"):
+            texts += [f"({name}){s}" for s in FLOAT_SPELLINGS]
+            if name.startswith("decimal"):
+                texts += [f"({name})1.000000000000000000001", f"({name})0.10"]
+        else:
+            strings = STRING_SPELLINGS[name] if not plain else ["P1D"]
+            texts += [f'({name})"{s}"' for s in strings] + [f'({name})#"{s}"#' for s in strings]
+            if plain:
+                texts.append(f"({name})P1D")
+
+    def readable(text):
+        try:
+            to_python(text)
+        except ValueError:
+            return False
+        return True
+
+    return [t for t in texts if readable(t)]
+
+
+TYPED_SPELLINGS = typed_spellings()
+
+
+def test_typed_spellings_cover_every_reserved_type():
+    from rkdl._rkdl import _debug_reserved_types
+
+    covered = {text[1 : text.index(")")] for text in TYPED_SPELLINGS}
+    assert covered == {name for name, _ in _debug_reserved_types()}
+    assert len(TYPED_SPELLINGS) > 300
+
+
+def self_assign_arg(n):
+    n.args[0] = n.args[0]
+
+
+def self_assign_prop(n):
+    n.props["k"] = n.props["k"]
+
+
+def self_assign_entries(n):
+    for e in n.entries:
+        e.value = e.value
+
+
+def bulk_props(n):
+    n.props = {**n.props, "new": 1}
+
+
+def bulk_args(n):
+    n.args = [*n.args, 2]
+
+
+@pytest.mark.parametrize(
+    ("write", "added"),
+    [
+        (self_assign_arg, ""),
+        (self_assign_prop, ""),
+        (self_assign_entries, ""),
+        (bulk_props, " new=1"),
+        (bulk_args, None),
+    ],
+)
+def test_writing_back_a_typed_value_keeps_its_spelling(write, added):
+    changed = []
+    for text in TYPED_SPELLINGS:
+        source = f"n {text} k={text}"
+        expected = f"n {text} 2 k={text}" if added is None else source + added
+        doc = rkdl.parse(source)
+        write(doc["n"])
+        if str(doc) != expected:
+            changed.append((text, str(doc)))
+    assert changed == []
+
+
+def test_an_equal_value_built_anew_keeps_the_spelling():
+    import datetime
+    import uuid
+
+    doc, n = node('n (date-time)"2026-01-01T09:00:00Z" (uuid)"ABCDEF00-0000-0000-0000-000000000000"')
+    n.args[0] = datetime.datetime(2026, 1, 1, 9, tzinfo=datetime.timezone.utc)
+    n.args[1] = uuid.UUID("abcdef00-0000-0000-0000-000000000000")
+    assert str(doc) == 'n (date-time)"2026-01-01T09:00:00Z" (uuid)"ABCDEF00-0000-0000-0000-000000000000"'
+
+
+def test_an_equal_value_that_writes_differently_is_a_write():
+    import datetime
+    import decimal
+
+    # The same instant in another time zone is equal by ==, but it's another value to write.
+    doc, n = node('n (date-time)"2026-01-01T09:00:00Z" (decimal)"1e5"')
+    plus_one = datetime.timezone(datetime.timedelta(hours=1))
+    n.args[0] = datetime.datetime(2026, 1, 1, 10, tzinfo=plus_one)
+    # Decimal("100000") == Decimal("1e5"), but it has other digits.
+    n.args[1] = decimal.Decimal(100000)
+    assert str(doc) == 'n (date-time)"2026-01-01T10:00:00+01:00" (decimal)"100000"'
+
+
+class Hex:
+    def __init__(self, number):
+        self.number = number
+
+
+HEX = rkdl.Type("hex", Hex, decode=lambda s: Hex(int(s, 16)), encode=lambda h: format(h.number, "x"))
+
+
+def test_a_custom_value_that_writes_back_the_same_keeps_its_spelling():
+    doc = rkdl.Parser(types=[HEX]).parse('n (hex)"FF" (hex)"0a"')
+    n = doc["n"]
+    n.args = [Hex(255), Hex(11)]
+    assert str(doc) == 'n (hex)"FF" (hex)"b"'
+
+
+def raising_hex(error):
+    def decode(value):
+        raise error
+
+    return rkdl.Parser(types=[rkdl.Type("hex", Hex, decode=decode, encode=lambda h: h.number)])
+
+
+def test_an_old_value_that_cant_be_read_is_simply_overwritten():
+    # Checking whether the write is a no-op reads the old value, and here that raises.
+    doc = raising_hex(ValueError("no")).parse("n (hex)1")
+    doc["n"].args[0] = Hex(2)
+    assert str(doc) == "n (hex)2"
+
+
+def test_a_base_exception_while_reading_the_old_value_propagates():
+    doc = raising_hex(KeyboardInterrupt).parse("n (hex)1")
+    with pytest.raises(KeyboardInterrupt):
+        doc["n"].args[0] = Hex(2)
+    assert str(doc) == "n (hex)1"
+
+
 @pytest.mark.parametrize(
     "text",
     ["n 0x10", "n #nan", "n (u8)7", 'n #"r"#', "n 1_000", "n 1.5e10", 'n """\n  a\n  b\n  """', "n (celsius)2.5"],
@@ -606,7 +795,23 @@ def test_renaming_a_property_keeps_its_place_and_text():
     assert str(doc) == 'n "two words"=0x10 1 b=2\n'
 
 
-# reprs never raise
+def test_renaming_a_property_onto_another_key_raises():
+    doc, n = node("n k=1 j=2 j=3\n")
+    with pytest.raises(ValueError, match='already has a property "j"'):
+        n.props.entry("k").name = "j"
+    assert str(doc) == "n k=1 j=2 j=3\n"
+    assert n.props == {"k": 1, "j": 3}
+
+
+def test_renaming_a_property_to_its_own_name_changes_nothing():
+    # Even where the key is a duplicate: the rename doesn't add one.
+    doc, n = node('n "j"=2 j=3\n')
+    n.entries[0].name = "j"
+    n.entries[1].name = "j"
+    assert str(doc) == 'n "j"=2 j=3\n'
+
+
+# reprs don't raise an Exception
 
 
 def test_reprs_of_removed_and_blockless_things():
@@ -628,6 +833,18 @@ def test_reprs_survive_a_raising_repr():
     loud = rkdl.Type("loud", Loud, decode=lambda v: Loud(), encode=lambda v: 1)
     doc = rkdl.Parser(types=[loud]).parse("n (loud)1 k=(loud)2\n")
     n = doc["n"]
-    assert repr(n.args) == "Args([1])"
-    assert repr(n.props) == "Props({'k': 2})"
-    assert repr(n.args.entry(0)) == "<Entry (loud)1>"
+    assert repr(n.args) == "Args([<kdl: (loud)1>])"
+    assert repr(n.props) == "Props({'k': <kdl: (loud)2>})"
+    assert repr(n.args.entry(0)) == "<Entry <kdl: (loud)1>>"
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_reprs_let_a_base_exception_from_decode_through(error):
+    def decode(value):
+        raise error
+
+    doc = rkdl.Parser(types=[rkdl.Type("stop", int, decode=decode, encode=int)]).parse("n (stop)1 k=(stop)2\n")
+    n = doc["n"]
+    for shown in (n.args, n.props, n.args.entry(0), n.props.entry("k")):
+        with pytest.raises(error):
+            repr(shown)

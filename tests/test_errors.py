@@ -1,3 +1,5 @@
+import pickle
+
 import pytest
 import rkdl
 from conftest import parse_error
@@ -80,3 +82,22 @@ def test_a_long_document_after_an_error_reports_the_first_error():
     assert err.diagnostics[0].message == "Invalid escape in a string"
     assert "rkdl stopped at the first error" in str(err)
     assert "rkdl stopped" not in str(parse_error('a "\\q"' + rest[:100]))
+
+
+def test_parse_error_pickles_with_its_diagnostics():
+    # So it can come back from a ProcessPoolExecutor worker.
+    err = parse_error("a {\nb }}\n")
+    again = pickle.loads(pickle.dumps(err))
+    assert type(again) is rkdl.ParseError
+    assert str(again) == str(err)
+    assert (again.line, again.column, again.offset) == (err.line, err.column, err.offset)
+    assert again.diagnostics == err.diagnostics
+    assert [d.message for d in again.diagnostics] == [d.message for d in err.diagnostics]
+
+
+def test_diagnostics_compare_by_value():
+    first = parse_error("a {").diagnostics[0]
+    same = rkdl.Diagnostic(first.message, first.label, first.help, first.offset, first.length, first.line, first.column)
+    assert same == first
+    assert hash(same) == hash(first)
+    assert pickle.loads(pickle.dumps(first)) == first

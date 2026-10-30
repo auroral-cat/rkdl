@@ -120,10 +120,7 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
             let written = picked
                 .iter()
                 .zip(&new)
-                .map(|(item, value)| {
-                    let (value, ty) = values::from_python(value, item.ty.as_deref(), snapshot.types())?;
-                    Ok((item.id, value, ty))
-                })
+                .map(|(item, value)| Ok((item.id, item.encode_over(value, snapshot.types())?)))
                 .collect::<PyResult<Vec<_>>>()?;
             let removed: Vec<EntryId> = picked.iter().skip(new.len()).map(|item| item.id).collect();
             let added = new
@@ -136,8 +133,8 @@ pub(crate) fn assign(node: &Node, slice: Option<&Bound<'_, PySlice>>, new: &Boun
             Ok((written, removed, at, added))
         },
         |mut target, (written, removed, at, added)| {
-            for (id, value, ty) in written {
-                store(target.entry_mut(id), value, ty);
+            for (id, encoded) in written {
+                store(target.entry_mut(id), encoded);
             }
             for id in removed {
                 target.remove(id);
@@ -194,10 +191,9 @@ impl Args {
             Reads::Shape,
             |snapshot| {
                 let item = arg(&snapshot.items, index)?;
-                let (value, ty) = values::from_python(value, item.ty.as_deref(), snapshot.types())?;
-                Ok((item.id, value, ty))
+                Ok((item.id, item.encode_over(value, snapshot.types())?))
             },
-            |mut target, (id, value, ty)| store(target.entry_mut(id), value, ty),
+            |mut target, (id, encoded)| store(target.entry_mut(id), encoded),
         )
     }
 
@@ -336,15 +332,15 @@ impl Args {
         Ok(found.pop().expect("chose one entry"))
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let Ok(snapshot) = read(py, self.node.get()) else {
-            return "Args(<unreadable>)".to_owned();
+            return Ok("Args(<unreadable>)".to_owned());
         };
-        let found: Vec<_> = args(&snapshot.items)
+        let found = args(&snapshot.items)
             .into_iter()
-            .map(|(_, item)| item.repr(py, snapshot.types()))
-            .collect();
-        format!("Args([{}])", found.join(", "))
+            .map(|(_, item)| item.repr(py, snapshot.types(), false))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(format!("Args([{}])", found.join(", ")))
     }
 
     // No `__clear__`: a cycle through the node passes a Type, which clears.
