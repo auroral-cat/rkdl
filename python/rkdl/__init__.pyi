@@ -425,7 +425,10 @@ class Node:
         Afterwards the node is detached, ready to be added somewhere else. A detached node stays as it is.
         """
     def copy(self) -> Node:
-        """Returns a detached copy of the node and everything in it."""
+        """Returns a detached copy of the node and everything in it.
+
+        The comments right above the node come too, but not the ones a blank line separates from it.
+        """
     def iter(self, key: _Key | None = None) -> Iterator[Node]:
         """Iterates over every node below this one, at any depth, depth first in file order.
 
@@ -662,6 +665,11 @@ class Children(MutableSequence[Node]):
     It works like a list, and every edit changes the document. Only detached nodes can go in. A node taken out
     (`pop`, `remove`, `del`, `clear`) becomes detached. An edit that would add several nodes adds all of them or
     none.
+
+    A node goes and comes with the comments right above it. Comments a blank line separates from it stay where they
+    are, with the blank line: a file's header comment stays at the top when the first node is taken out, and a node
+    inserted before the first goes below it. Reordering, with `reverse` or `children[:] = sorted(...)`, leaves them in
+    place too.
     """
 
     def insert(self, index: SupportsIndex, node: Node) -> None:

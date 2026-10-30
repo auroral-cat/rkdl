@@ -9,6 +9,12 @@
 //! Replacing a node and reversing a block keep the layout by position instead: each place keeps the whitespace before
 //! it and the end of its line, and the nodes move with their own comments.
 //!
+//! Comments above a node are its own only up to the last blank line above it. What's above that line, the line
+//! included, is the gap: it belongs to the block and stays where it is. Taking a node out leaves its gap in front of
+//! whatever followed it, a new node goes below the gap of the node it goes in front of, and reordering keeps gaps by
+//! position. So a file's header comment, if a blank line follows it, stays at the top. Slashdashed nodes in the
+//! leading text count as comments.
+//!
 //! Every line ending rkdl adds is in the block's own style, its first line ending, or else the document's, which is
 //! the first line ending in the text it was parsed from (`\n` if there was none). A moved node takes the style and the
 //! indentation of where it lands, unit and character included, except inside strings.
@@ -84,6 +90,40 @@ fn blank_rest(text: &str) -> Option<&str> {
     let spaces = text.len() - text.trim_start_matches(is_space).len();
     let (_, rest) = text.split_at_checked(spaces)?;
     text.get(..spaces + eol_at(rest)?.len())
+}
+
+/// The blank lines in `text`, as the byte ranges they take, line endings included. `line_start` says whether the text
+/// starts a line. If it doesn't, its first line is the rest of another one, and never counts.
+fn blank_lines(text: &str, line_start: bool) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (i, (line, ending)) in lines(text).into_iter().enumerate() {
+        let end = at + line.len() + ending.len();
+        if !ending.is_empty() && (i > 0 || line_start) && line.chars().all(is_space) {
+            out.push(at..end);
+        }
+        at = end;
+    }
+    out
+}
+
+/// The length of the gap at the start of a node's leading text: everything up to the end of its last blank line. The
+/// gap belongs to the block, where it stays; the rest, the comments right above the node and its indent, is the node's
+/// own and goes where the node goes.
+fn gap_len(leading: &str, line_start: bool) -> usize {
+    blank_lines(leading, line_start).last().map_or(0, |r| r.end)
+}
+
+/// `gap` without the blank lines it ends with.
+fn without_closing_blanks(gap: &str, line_start: bool) -> &str {
+    let mut start = gap.len();
+    for r in blank_lines(gap, line_start).iter().rev() {
+        if r.end != start {
+            break;
+        }
+        start = r.start;
+    }
+    gap.get(..start).unwrap_or(gap)
 }
 
 /// Whether `text` ends in a `\` line continuation that still needs its line ending.
@@ -443,6 +483,56 @@ fn after_mut<'a>(block: &'a mut KdlDocument, index: usize, eol: &str) -> &'a mut
     }
 }
 
+/// Takes the gap off the leading of the node at `index`, if there's one there, and returns it.
+fn split_gap(block: &mut KdlDocument, index: usize, nested: bool) -> String {
+    let start = line_start_at(block, index, nested);
+    let Some(f) = block.nodes_mut().get_mut(index).and_then(KdlNode::format_mut) else {
+        return String::new();
+    };
+    let own = f.leading.split_off(gap_len(&f.leading, start));
+    std::mem::replace(&mut f.leading, own)
+}
+
+/// Puts back the gap of a node taken out at `index`, in front of what followed it: the next node's leading, or the end
+/// of the block. If what follows starts with a blank line, or is the end of the block with nothing else in it, the
+/// blank lines at the end of the gap go. So removing a node between two blank lines leaves one, and removing the last
+/// node leaves no blank line at the end. In a block left empty, the gap goes at the start, so new nodes go below it.
+fn rejoin_gap(block: &mut KdlDocument, index: usize, gap: &str, line_start: bool, eol: &str) {
+    if gap.is_empty() {
+        return;
+    }
+    let after = match block.nodes().get(index) {
+        Some(next) => leading(next),
+        None => block.format().map_or("", |f| &f.trailing),
+    };
+    let at_end = index == block.nodes().len();
+    let gap = if blank_rest(after).is_some() || at_end && is_blank(after) {
+        without_closing_blanks(gap, line_start)
+    } else {
+        gap
+    };
+    if block.nodes().is_empty() {
+        block_fmt_mut(block).leading.push_str(gap);
+    } else {
+        after_mut(block, index, eol).insert_str(0, gap);
+    }
+}
+
+/// Takes the gap off `copy`, a copy of the node at `path` in `doc`: only the node's own comments go with it.
+pub fn drop_gap(doc: &KdlDocument, path: &[usize], copy: &mut KdlNode) {
+    let (&index, parent) = path.split_last().expect("a node's path isn't empty");
+    let block = if parent.is_empty() {
+        doc
+    } else {
+        node_at(doc, parent).children().expect("a parent has a block")
+    };
+    let start = line_start_at(block, index, !parent.is_empty());
+    if let Some(f) = copy.format_mut() {
+        let gap = gap_len(&f.leading, start);
+        f.leading.replace_range(..gap, "");
+    }
+}
+
 /// Whether a children block is written on one line, like `a { b; c }`.
 fn is_single_line(block: &KdlDocument) -> bool {
     !block.nodes().is_empty() && !block_breaks(block)
@@ -690,13 +780,22 @@ fn end_line(block: &mut KdlDocument, index: usize, rest: Option<String>, style: 
     }
 }
 
-/// Puts `node` into `block` at `index`, laid out like its neighbours.
+/// Puts `node` into `block` at `index`, laid out like its neighbours. It goes below the gap of the node at `index`
+/// and above that node's own comments.
 pub fn place(block: &mut KdlDocument, index: usize, node: KdlNode, style: &Style) {
-    place_at(block, index, node, style, None);
+    place_at(block, index, node, style, None, None);
 }
 
-/// `place`, for a node that takes the place of one indented `replacing` if that's Some.
-fn place_at(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: &Style, replacing: Option<String>) {
+/// `place`, for a node that takes the place of one indented `replacing` if that's Some. `gap` is the gap to put above
+/// the node, if it's Some, instead of the one of the node at `index`.
+fn place_at(
+    block: &mut KdlDocument,
+    index: usize,
+    mut node: KdlNode,
+    style: &Style,
+    replacing: Option<String>,
+    gap: Option<String>,
+) {
     let eol = style.eol;
     if let Some(parent) = &style.parent
         && is_single_line(block)
@@ -726,8 +825,10 @@ fn place_at(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: &St
     if let Some(prev) = index.checked_sub(1).and_then(|i| block.nodes_mut().get_mut(i)) {
         close_escline(prev, eol);
     }
+    // Below the gap, which ends a line.
+    let gap = gap.unwrap_or_else(|| split_gap(block, index, style.parent.is_some()));
     let mut start = String::new();
-    if !line_start_at(block, index, style.parent.is_some()) {
+    if gap.is_empty() && !line_start_at(block, index, style.parent.is_some()) {
         let after = after_mut(block, index, eol);
         let rest = blank_rest(after).map(str::to_owned);
         if let Some(rest) = &rest {
@@ -745,7 +846,7 @@ fn place_at(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: &St
     let f = fmt_mut(&mut node, eol);
     // Keep the node's own comments, but not the whitespace it had where it came from.
     let own = shift.apply(f.leading.trim_start(), false);
-    f.leading = format!("{start}{indent}{own}");
+    f.leading = format!("{gap}{start}{indent}{own}");
     if is_blank(&f.trailing) {
         f.trailing.clear();
     }
@@ -782,14 +883,24 @@ pub fn unplace(block: &mut KdlDocument, index: usize, style: &Style) -> KdlNode 
     node
 }
 
-/// Takes the node at `index` out of `block`, with its own line ending. Whatever followed it keeps starting a line if
-/// it did.
+/// Takes the node at `index` out of `block`, with its own line ending and its own comments. Whatever followed it keeps
+/// starting a line if it did, and the node's gap stays in front of it.
 fn take(block: &mut KdlDocument, index: usize, style: &Style) -> KdlNode {
+    let (node, gap, line_start) = take_own(block, index, style);
+    rejoin_gap(block, index, &gap, line_start, style.eol);
+    node
+}
+
+/// `take`, but the gap is left out of the block: returns it, and whether it starts a line.
+fn take_own(block: &mut KdlDocument, index: usize, style: &Style) -> (KdlNode, String, bool) {
     let nested = style.parent.is_some();
     if nested && is_single_line(block) {
-        return unplace_inline(block, index);
+        return (unplace_inline(block, index), String::new(), false);
     }
-    let started = line_start_at(block, index, nested);
+    let line_start = line_start_at(block, index, nested);
+    let gap = split_gap(block, index, nested);
+    // The node's own text starts a line after a gap, which ends one.
+    let started = line_start || !gap.is_empty();
     let node = block.nodes_mut().remove(index);
     let lead = leading(&node);
     let ends = ends_own_line(&node);
@@ -827,7 +938,7 @@ fn take(block: &mut KdlDocument, index: usize, style: &Style) -> KdlNode {
             }
         }
     }
-    node
+    (node, gap, line_start)
 }
 
 /// Puts `node` in place of the node at `index`, and returns that one. The new node takes the old one's place: in a
@@ -846,16 +957,19 @@ pub fn replace(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: 
         let (_, mut own) = slot_and_own(&node, true);
         own.lead = shift.apply(&own.lead, false);
         put_in_slot(&mut node, slot, own);
+        // The gap is in the slot. The old node keeps only its own comments.
+        split_gap(block, index, nested);
         let old = block.nodes_mut().get_mut(index).expect("replace checks the index");
         return std::mem::replace(old, node);
     }
     let indent = starts.then(|| indent_of(leading(old)).to_owned());
-    let old = take(block, index, style);
-    place_at(block, index, node, style, indent);
+    // The new node goes below the old one's gap, not the next one's.
+    let (old, gap, _) = take_own(block, index, style);
+    place_at(block, index, node, style, indent, Some(gap));
     old
 }
 
-/// A node's place in its block: the whitespace before it, and how its line goes on after it.
+/// A node's place in its block: the whitespace and the gap before it, and how its line goes on after it.
 struct Slot {
     lead: String,
     /// Spaces before the terminator.
@@ -867,8 +981,8 @@ struct Slot {
     trailing: String,
 }
 
-/// What belongs to a node apart from its text: the comments before it, with the indent of its line after them, and the
-/// comments after it on its line.
+/// What belongs to a node apart from its text: the comments right above it, below its gap, with the indent of its line
+/// after them, and the comments after it on its line.
 struct Own {
     lead: String,
     tail: String,
@@ -886,7 +1000,10 @@ fn slot_and_own(node: &KdlNode, last: bool) -> (Slot, Own) {
             f.trailing.as_str(),
         )
     });
-    let comments = lead.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    // Whether the leading starts a line only changes whether its first line counts as blank. It's whitespace either way,
+    // so it's the slot's.
+    let rest = lead.get(gap_len(lead, true)..).unwrap_or_default();
+    let comments = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     let space = lead.strip_suffix(comments).unwrap_or_default();
     let (tail, closing, comment, terminator) = if terminator.starts_with("//") {
         let comment = terminator.split(NEWLINES).next().unwrap_or_default();
@@ -1297,5 +1414,95 @@ mod tests {
         place(&mut doc, 0, taken, &style);
         assert_eq!(doc.to_string(), "a {\r\n    b\r\n}\r\n");
         assert_eq!(unplaced("a\n", None, 0), "");
+    }
+
+    #[test]
+    fn gaps() {
+        assert_eq!(gap_len("// h\n\n// own\n", true), 6);
+        assert_eq!(gap_len("// own\n  ", true), 0);
+        // The rest of the `{` line isn't a blank line of its own.
+        assert_eq!(gap_len("\n    // own\n    ", false), 0);
+        assert_eq!(gap_len("\n\n    ", false), 2);
+        assert_eq!(gap_len("  \r\n\r\nx", true), 6);
+        assert_eq!(without_closing_blanks("// h\n\n \n", true), "// h\n");
+        assert_eq!(without_closing_blanks("\n\n", false), "\n");
+    }
+
+    const HEADED: &str = "// header\n\n// about a\na\n\nb\n";
+
+    #[test]
+    fn the_gap_stays_when_a_node_leaves() {
+        assert_eq!(unplaced(HEADED, None, 0), "// header\n\nb\n");
+        assert_eq!(unplaced(HEADED, None, 1), "// header\n\n// about a\na\n");
+        assert_eq!(unplaced("// header\n\na\n", None, 0), "// header\n");
+        assert_eq!(unplaced("a\n\n// note\n\nb\n", None, 1), "a\n\n// note\n");
+        assert_eq!(unplaced("a\n\nb\n\n// end\n", None, 1), "a\n\n// end\n");
+        assert_eq!(unplaced("// header\n\na; b\n", None, 0), "// header\n\nb\n");
+        // Slashdashed nodes count as comments.
+        assert_eq!(unplaced("/- x\n\na\nb\n", None, 0), "/- x\n\nb\n");
+        assert_eq!(unplaced("/- x\na\nb\n", None, 0), "b\n");
+        assert_eq!(
+            unplaced("a {\n\n    b\n\n    c\n}\n", Some(&[0]), 0),
+            "a {\n\n    c\n}\n"
+        );
+        assert_eq!(
+            unplaced("a {\n    b\n\n    // c\n    c\n}\n", Some(&[0]), 1),
+            "a {\n    b\n}\n"
+        );
+        assert_eq!(
+            unplaced("a {\n    // x\n\n    b\n}\n", Some(&[0]), 0),
+            "a {\n    // x\n}\n"
+        );
+        assert_eq!(unplaced("a {\n\n    b\n}\n", Some(&[0]), 0), "a {}\n");
+        assert_eq!(
+            unplaced("// h\r\n\r\n// a\r\na\r\n\r\nb\r\n", None, 0),
+            "// h\r\n\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn a_new_node_goes_below_the_gap() {
+        assert_eq!(placed(HEADED, None, 0, "x"), "// header\n\nx\n// about a\na\n\nb\n");
+        assert_eq!(placed(HEADED, None, 1, "x"), "// header\n\n// about a\na\n\nx\nb\n");
+        assert_eq!(
+            placed("// header\n\na\n", None, 0, "// x\nx"),
+            "// header\n\n// x\nx\na\n"
+        );
+        assert_eq!(
+            placed("a {\n\n    // c\n    b\n}\n", Some(&[0]), 0, "x"),
+            "a {\n\n    x\n    // c\n    b\n}\n"
+        );
+        assert_eq!(placed("// h\r\n\r\na\r\n", None, 0, "x"), "// h\r\n\r\nx\r\na\r\n");
+        // An emptied block keeps its gap at the top.
+        let mut doc = parse("// header\n\na\n");
+        let style = Style::of(&doc, None, "\n");
+        unplace(&mut doc, 0, &style);
+        place(&mut doc, 0, node("x"), &style);
+        assert_eq!(doc.to_string(), "// header\nx\n");
+    }
+
+    #[test]
+    fn a_replacement_goes_below_the_gap() {
+        assert_eq!(
+            replaced(HEADED, None, 0, "x"),
+            ("// header\n\nx\n\nb\n".into(), "// about a\na\n".into())
+        );
+        // A node with an open `\` can't take the slot, and still goes below the gap.
+        assert_eq!(replaced("// h\n\na\nb\n", None, 0, "x \\").0, "// h\n\nx \\\n;\nb\n");
+    }
+
+    #[test]
+    fn reordering_keeps_gaps_by_position() {
+        let mut doc = parse("// header\n\n// about a\na\n\nb\n");
+        assert!(permute(&mut doc, &[0, 1], &[1, 0]));
+        assert_eq!(doc.to_string(), "// header\n\nb\n\n// about a\na\n");
+    }
+
+    #[test]
+    fn a_copy_leaves_the_gap() {
+        let doc = parse(HEADED);
+        let mut copy = doc.nodes()[0].clone();
+        drop_gap(&doc, &[0], &mut copy);
+        assert_eq!(leading(&copy), "// about a\n");
     }
 }

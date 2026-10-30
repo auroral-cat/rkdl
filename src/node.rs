@@ -12,6 +12,7 @@ use crate::children::{self, At, Children, Owner};
 use crate::document::Document;
 use crate::entry::{Entries, new_entry};
 use crate::handles::{self, Fail, Home, stale};
+use crate::layout;
 use crate::parser;
 use crate::props::{self, Props};
 use crate::spelling;
@@ -333,13 +334,17 @@ impl Node {
     }
 
     /// Returns a detached copy of the node and everything in it.
+    ///
+    /// The comments right above the node come too, but not the ones a blank line separates from it.
     fn copy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, Node>> {
         let ((node, eol), types) = handles::on_home(py, &self.home, |doc| {
             let node = doc.get().with_state(py, |s| {
                 let path = s.ids.path(self.id).ok_or_else(|| Fail::Missing(stale()))?;
                 let node = node_at(&s.kdl, &path);
                 let deep = parser::too_deep_for_the_stack(std::slice::from_ref(node));
-                Ok::<_, Fail>((parser::recursing(deep, || node.clone())?, s.eol))
+                let mut copy = parser::recursing(deep, || node.clone())?;
+                layout::drop_gap(&s.kdl, &path, &mut copy);
+                Ok::<_, Fail>((copy, s.eol))
             })?;
             Ok((node, doc.get().types.clone_ref(py)))
         })?;
