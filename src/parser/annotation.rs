@@ -158,5 +158,7 @@ mod tests {
         assert_eq!(unpadded(" n", " ", ""), Some("n"));
         // An identifier whose whole text is the padding wasn't folded: stripping it would blank the identifier.
         assert_eq!(unpadded("/*c*/", "/*c*/", ""), None);
+        // No padding: nothing was folded either.
+        assert_eq!(unpadded("n", "", ""), None);
     }
 }

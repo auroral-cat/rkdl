@@ -40,11 +40,9 @@ fn restore_node(text: &str, node: &mut KdlNode, closes: Option<&[usize]>) {
     }
     let span = node.span();
     let (start, end) = (span.offset(), span.offset() + span.len());
-    // unreachable-start: every node kdl-rs parses has a format, and restore runs only on a freshly parsed document
     let Some(f) = node.format_mut() else {
         return;
     };
-    // unreachable-end
     if !f.terminator.is_empty() {
         return;
     }
@@ -168,6 +166,20 @@ mod tests {
             assert_eq!(out, without_closes(text));
             assert!(out.parse::<KdlDocument>().is_ok(), "{out:?}");
         }
+    }
+
+    /// A node without a format has nowhere to keep the text, so it's left as it is. No current caller gets here:
+    /// `restore` runs right after kdl-rs's parse, and every parsed node has a format.
+    #[test]
+    fn a_node_without_a_format_is_left_alone() {
+        let text = "a {}  \nb";
+        let mut doc: KdlDocument = text.parse().expect("test documents parse");
+        doc.nodes_mut()[0].clear_format();
+        let before = doc.to_string();
+        let scan = prescan::scan(text);
+        restore(text, &mut doc, Some(&scan.closes));
+        assert_eq!(doc.to_string(), before);
+        assert!(doc.nodes()[0].format().is_none());
     }
 
     #[test]
