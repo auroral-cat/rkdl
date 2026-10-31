@@ -109,7 +109,7 @@ impl Type {
             visit.call(&hooks.cls)?;
             visit.call(&hooks.decode)?;
             visit.call(&hooks.encode)?;
-            // unreachable: a cleared Type, as above
+            // unreachable: the `if let`'s implicit else: a cleared Type, as above
         }
         Ok(())
     }
@@ -975,8 +975,6 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
                 Ok(own) => own.getattr("flags")?.extract()?,
                 // A VERBOSE comment can hold what doesn't compile without the flag, like `# (optional`. The flag
                 // isn't inline then, or the pattern would compile alone.
-                // unreachable: `flags & verbose` false: it compiled with `flags`, and only VERBOSE changes what parses
-                // (re/_parser.py), so the flagless compile can only fail when they hold it.
                 Err(err) if err.is_instance_of::<py_re::error>(value.py()) && flags & verbose != 0 => {
                     let own: u32 = re
                         .getattr("compile")?

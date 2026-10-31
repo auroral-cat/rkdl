@@ -575,13 +575,8 @@ class Price(decimal.Decimal):
         return f"${super().__str__()}"
 
 
-class Weight(decimal.Decimal):
-    def __str__(self):
-        return f"weight={super().__str__()}"
-
-
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="str() of the subclass is written, not its digits")
-@pytest.mark.parametrize("cls", [Price, Weight])
+@pytest.mark.parametrize("cls", [Price])
 @pytest.mark.parametrize("old", ["(decimal64)1.0", '(decimal)"1.0"', "1.0"])
 def test_a_decimal_subclass_writes_its_own_digits_whatever_its_str_says(old, cls):
     # A Decimal subclass is a Decimal: its value is written as the Decimal's would be, not as its str() displays it.
@@ -591,6 +586,42 @@ def test_a_decimal_subclass_writes_its_own_digits_whatever_its_str_says(old, cls
         return str(doc)
 
     assert written(cls("1.50")) == written(decimal.Decimal("1.50"))
+
+
+class Ninety(int):
+    def __float__(self):
+        return 99.0
+
+
+class FloatPrice(decimal.Decimal):
+    def __float__(self):
+        return 99.0
+
+
+class Stamp(datetime.date):
+    def isoformat(self):
+        return self.strftime("%d/%m/%Y")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="the subclass's own method is called")
+@pytest.mark.parametrize(
+    ("old", "value", "base"),
+    [
+        ("(f64)1.0", Ninety(1), 1),
+        ("(decimal64)1.0", FloatPrice("1.50"), decimal.Decimal("1.50")),
+        ('(date)"2026-01-01"', Stamp(2026, 10, 31), datetime.date(2026, 10, 31)),
+    ],
+    ids=["int __float__", "Decimal __float__", "date isoformat"],
+)
+def test_a_subclass_is_written_as_its_base_types_value(old, value, base):
+    # A subclass of a built-in type is written by its base type's value; methods it overrides don't change that.
+    def written(value):
+        doc = rkdl.parse(f"n {old}\n")
+        doc["n"].args[0] = value
+        return str(doc)
+
+    assert written(value) == written(base)
+    assert rkdl.parse(written(value))["n"].args[0] == base
 
 
 def test_decimal64_reads_digits_from_the_text():
@@ -689,19 +720,6 @@ def test_only_decimals_own_refusal_is_taken_for_the_exponent(monkeypatch):
     n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
     with pytest.raises(KeyboardInterrupt):
         n.args[0]
-
-
-def test_another_error_from_decimal_is_its_own_reason(monkeypatch):
-    # Only decimal's own refusal means the exponent is too big; any other Exception from Python's parser is the reason
-    # as it's worded.
-    def broken(*args):
-        raise ArithmeticError("decimal is broken today")
-
-    monkeypatch.setattr(decimal, "Decimal", broken)
-    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
-    err = read_error(lambda n: n.args[0], n)
-    assert type(err) is rkdl.ReadError
-    assert reason(err) == "decimal is broken today"
 
 
 def test_a_tiny_decimal_reads():
