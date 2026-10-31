@@ -14,6 +14,12 @@ use crate::errors::{ReadError, parse_error};
 use crate::iso::{self, Iso};
 use crate::positions::Pos;
 
+pyo3::import_exception!(decimal, InvalidOperation);
+// The macro names the type after the class, so `re.error` gets a module to keep `error` from reading as anything else.
+mod py_re {
+    pyo3::import_exception!(re, error);
+}
+
 // Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
 // reference cycle.
 /// A custom type annotation: how to read and write the values annotated with it.
@@ -345,7 +351,7 @@ pub(crate) fn to_python_spelled(
                 Err(err) => Err(err),
             }
         }
-        Some(Converter::Builtin(b)) => match decode_builtin(py, b, value, text) {
+        Some(Converter::Builtin(b)) => match decode_builtin(py, b, value, text)? {
             Ok(decoded) => Ok(decoded),
             Err(reason) => {
                 let refused = unreadable(py, ty, value, text, &reason, place)?;
@@ -721,8 +727,8 @@ fn encode_with(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<KdlValue> 
     match plain_to_kdl(&plain)? {
         Some(kdl) => Ok(kdl),
         None => Err(PyTypeError::new_err(format!(
-            "encode for type {:?} returned {}, not str, int, float, bool or None",
-            user.name,
+            "encode for type {} returned {}, not str, int, float, bool or None",
+            PyString::new(value.py(), &user.name).repr()?,
             plain.get_type().qualname()?
         ))),
     }
@@ -748,17 +754,41 @@ fn is_instance(value: &Bound<'_, PyAny>, module: &str, attr: &str) -> PyResult<b
     value.is_instance(&value.py().import(module)?.getattr(attr)?)
 }
 
-/// The Err is the reason the value doesn't fit, for the caller's message.
+/// The inner Err is the reason the value doesn't fit, for the caller's message. An `Exception` from Python's parser
+/// is a reason too; anything else, such as `KeyboardInterrupt`, propagates.
+fn decode_builtin(
+    py: Python<'_>,
+    b: Builtin,
+    value: &KdlValue,
+    text: Option<&str>,
+) -> PyResult<Result<Py<PyAny>, String>> {
+    match parse_builtin(py, b, value, text) {
+        Ok(Ok(decoded)) => Ok(Ok(decoded.unbind())),
+        Ok(Err(err)) if err.is_instance_of::<PyException>(py) => {
+            Ok(Err(own_reason(b, value).unwrap_or_else(|| err.value(py).to_string())))
+        }
+        Ok(Err(err)) => Err(err),
+        Err(reason) => Ok(Err(reason)),
+    }
+}
+
+/// `decode_builtin`'s work: the Err is a reason rkdl gives itself, and the inner result is what Python's parser made
+/// of the value.
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "each type accepts one or two kinds of value and rejects the rest"
 )]
-fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&str>) -> Result<Py<PyAny>, String> {
+fn parse_builtin<'py>(
+    py: Python<'py>,
+    b: Builtin,
+    value: &KdlValue,
+    text: Option<&str>,
+) -> Result<PyResult<Bound<'py, PyAny>>, String> {
     let string = || match value {
         KdlValue::String(s) => Ok(s.as_str()),
         _ => Err(expected(b).to_owned()),
     };
-    let decoded = match b {
+    Ok(match b {
         Builtin::Int { min, max } => {
             let KdlValue::Integer(i) = value else {
                 return Err(expected(b).to_owned());
@@ -786,13 +816,25 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
             // Decimal("0.1"), not the binary expansion.
             let digits = match value {
                 KdlValue::Integer(i) => i.to_string(),
+                // A literal past the f64 range, which kdl-rs reads as infinite, has the bound writing a Decimal has.
+                KdlValue::Float(f) if f.is_infinite() && text.and_then(decimal_digits).is_some() => {
+                    return Err(F64_RANGE.to_owned());
+                }
                 KdlValue::Float(f) if f.is_nan() => "NaN".to_owned(),
                 KdlValue::Float(f) if *f == f64::INFINITY => "Infinity".to_owned(),
                 KdlValue::Float(f) if *f == f64::NEG_INFINITY => "-Infinity".to_owned(),
                 KdlValue::Float(f) => text.and_then(decimal_digits).unwrap_or_else(|| format!("{f:?}")),
                 _ => return Err(expected(b).to_owned()),
             };
-            call(py, "decimal", "Decimal", digits)
+            // The only literal `decimal` refuses is one whose exponent is past about ±10^18, which kdl-rs reads.
+            // Zero fits whatever its exponent.
+            match call(py, "decimal", "Decimal", &digits) {
+                Err(err) if err.is_instance_of::<InvalidOperation>(py) => match zero_sign(&digits) {
+                    Some(sign) => call(py, "decimal", "Decimal", format!("{sign}0")),
+                    None => return Err(DECIMAL_EXPONENT.to_owned()),
+                },
+                decimal => decimal,
+            }
         }
         Builtin::DecimalString => call(py, "decimal", "Decimal", string()?),
         Builtin::DateTime => from_iso(py, Iso::DateTime, string()?),
@@ -804,10 +846,7 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
         Builtin::Regex => call(py, "re", "compile", string()?),
         Builtin::Base64 => b64decode(py, string()?),
         Builtin::PlainString => string()?.into_bound_py_any(py),
-    };
-    decoded
-        .map(Bound::unbind)
-        .map_err(|e| own_reason(b, value).unwrap_or_else(|| e.value(py).to_string()))
+    })
 }
 
 /// rkdl's own reason a string doesn't fit `b`, where Python's message would change with the Python version or isn't
@@ -840,6 +879,15 @@ fn decimal_digits(text: &str) -> Option<String> {
         .chars()
         .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))
         .then_some(digits)
+}
+
+/// The sign of a decimal literal whose value is zero, as `Decimal` spells it: `-` or nothing. None if it isn't zero.
+fn zero_sign(digits: &str) -> Option<&'static str> {
+    let mantissa = digits.split(['e', 'E']).next().unwrap_or_default();
+    mantissa
+        .chars()
+        .all(|c| !c.is_ascii_digit() || c == '0')
+        .then_some(if mantissa.starts_with('-') { "-" } else { "" })
 }
 
 /// `fromisoformat`, except for hour 24, which Python 3.14 reads and earlier Pythons don't. `own_reason` words the
@@ -917,9 +965,22 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
             // Only the pattern is written, so flags passed to compile() would be lost. Inline ones like `(?i)` are
             // part of the pattern, and compiling the pattern alone gives them back.
             let flags: u32 = value.getattr("flags")?.extract()?;
-            let own: u32 = call(value.py(), "re", "compile", &pattern)?
-                .getattr("flags")?
-                .extract()?;
+            let re = value.py().import("re")?;
+            let verbose: u32 = re.getattr("VERBOSE")?.extract()?;
+            let own: u32 = match re.getattr("compile")?.call1((&pattern,)) {
+                Ok(own) => own.getattr("flags")?.extract()?,
+                // A VERBOSE comment can hold what doesn't compile without the flag, like `# (optional`. The flag
+                // isn't inline then, or the pattern would compile alone.
+                Err(err) if err.is_instance_of::<py_re::error>(value.py()) && flags & verbose != 0 => {
+                    let own: u32 = re
+                        .getattr("compile")?
+                        .call1((&pattern, verbose))?
+                        .getattr("flags")?
+                        .extract()?;
+                    own & !verbose
+                }
+                Err(err) => return Err(err),
+            };
             let extra = flags & !own;
             if extra != 0 {
                 let names = call(value.py(), "re", "RegexFlag", extra)?.str()?;
@@ -969,7 +1030,7 @@ fn encode_kept_builtin(
     } else if is_exact_plain(value) {
         // A plain value fits if the annotation reads it, and if it doesn't, the reason is the one reading it gives.
         let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
-        match decode_builtin(value.py(), b, &kdl, None) {
+        match decode_builtin(value.py(), b, &kdl, None)? {
             Ok(_) => return Ok((kdl, None)),
             Err(reason) => reason,
         }
@@ -1038,6 +1099,12 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
             }
         }
         Builtin::Int { .. } | Builtin::F32 | Builtin::F64 if is_int || is_float => range_of(b),
+        // Writing `#nan` would quietly drop the signal.
+        Builtin::DecimalNumber
+            if is_instance(value, "decimal", "Decimal")? && value.call_method0("is_snan")?.is_truthy()? =>
+        {
+            Some("KDL has no signaling NaN".to_owned())
+        }
         // A Decimal too big for the f64 kdl-rs keeps.
         Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => range_of(Builtin::F64),
         _ => None,
@@ -1095,6 +1162,7 @@ fn int_range(min: i128, max: i128) -> String {
 
 const F32_RANGE: &str = "out of range ±3.4028234663852886e+38";
 const F64_RANGE: &str = "out of range ±1.7976931348623157e+308";
+const DECIMAL_EXPONENT: &str = "exponent past what Python's decimal takes";
 
 /// An annotation spelled the way a file does: `(u8)`, or `("my type")`.
 fn annotation(ty: &str) -> String {
@@ -1112,8 +1180,11 @@ fn whole_float(f: f64) -> Option<i128> {
 }
 
 /// A `Decimal` as a `decimal64` or `decimal128`, written with its own digits so none are lost to the f64 kdl-rs
-/// keeps. Only the range is checked, against that f64. None if it's out of range.
+/// keeps. Only the range is checked, against that f64. None if it's out of range, or a signaling NaN.
 fn decimal_number(value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlValue, Option<String>)>> {
+    if value.call_method0("is_snan")?.is_truthy()? {
+        return Ok(None);
+    }
     let f: f64 = value.call_method0("__float__")?.extract()?;
     if !value.call_method0("is_finite")?.is_truthy()? {
         return Ok(Some((KdlValue::Float(f), None)));

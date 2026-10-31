@@ -422,8 +422,9 @@ def test_plain_subclass_without_user_type_stays_plain():
 
 def test_user_encode_must_return_plain():
     bad = rkdl.Type("bad", Celsius, decode=Celsius, encode=lambda c: c)
-    with pytest.raises(TypeError, match="bad"):
+    with pytest.raises(TypeError) as info:
         from_python(Celsius(1), None, [bad])
+    assert str(info.value) == "encode for type 'bad' returned Celsius, not str, int, float, bool or None"
 
 
 def test_user_encode_returning_an_int_outside_i128_overflows():
@@ -542,70 +543,106 @@ def test_decimal64_reads_digits_from_the_text():
     assert to_python("(decimal64)0x10") == decimal.Decimal(16)
 
 
-# Task 66: errors in Python's or the decimal module's words, or a value that should be refused and isn't.
-
-TASK_66 = "task 66: "
+# A VERBOSE comment can hold what doesn't compile without the flag, and the refusal is the same either way.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=re.error,
-    reason=TASK_66 + "the flagless recompile fails on a VERBOSE comment, and re.error isn't a ValueError",
+@pytest.mark.parametrize(
+    ("pattern", "flags", "named"),
+    [
+        (r"\d+  # digits (optional", re.VERBOSE, "re.VERBOSE"),
+        (r"[a-z ]  # chars [", re.VERBOSE, "re.VERBOSE"),
+        (r"\d+  # digits", re.VERBOSE, "re.VERBOSE"),
+        (r"\d+  # digits (optional", re.VERBOSE | re.IGNORECASE, "re.IGNORECASE|re.VERBOSE"),
+    ],
 )
-def test_a_verbose_regex_whose_comment_doesnt_compile_without_the_flag_is_refused():
-    pattern = re.compile(r"\d+  # digits (optional", re.VERBOSE)
-    with pytest.raises(ValueError, match=re.escape("can't write a regex compiled with re.VERBOSE")):
-        from_python(pattern)
+def test_a_verbose_regex_is_refused_whatever_its_comment(pattern, flags, named):
+    message = f"can't write a regex compiled with {named}: KDL keeps only the pattern"
+    compiled = re.compile(pattern, flags)
+    for ty in (None, "regex"):
+        with pytest.raises(ValueError) as info:
+            from_python(compiled, ty)
+        assert type(info.value) is ValueError
+        assert str(info.value) == message
+        assert info.value.__notes__ == ["Put the flags inline instead, like (?i)"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=TASK_66 + "the ValueError has Python's words, 'cannot convert signaling NaN to float'",
-)
+def test_an_inline_verbose_flag_is_part_of_the_pattern():
+    pattern = r"(?x)\d+  # digits (optional"
+    doc = rkdl.parse('n (regex)"x"\n')
+    doc["n"].args[0] = re.compile(pattern, re.VERBOSE)
+    assert rkdl.parse(str(doc))["n"].args[0] == re.compile(pattern)
+
+
+def test_only_a_regex_error_is_taken_for_a_verbose_comment(monkeypatch):
+    compiled = re.compile(r"\d+  # digits (optional", re.VERBOSE)
+    calls = []
+
+    def interrupted_once(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return compile_(*args)
+
+    compile_ = re.compile
+    monkeypatch.setattr(re, "compile", interrupted_once)
+    with pytest.raises(KeyboardInterrupt):
+        from_python(compiled)
+
+
+# KDL has no signaling NaN, and writing #nan would change the value without a word.
+
+
+@pytest.mark.parametrize("ty", ["decimal64", "decimal128"])
 @pytest.mark.parametrize("snan", ["sNaN", "-sNaN"])
-def test_a_signaling_nan_doesnt_fit_decimal64(snan):
-    with pytest.raises(ValueError, match=re.escape(f"Decimal('{snan}') doesn't fit (decimal64): ")):
-        from_python(decimal.Decimal(snan), "decimal64")
+def test_a_signaling_nan_doesnt_fit_a_decimal_number(snan, ty):
+    with pytest.raises(ValueError) as info:
+        from_python(decimal.Decimal(snan), ty)
+    assert str(info.value) == f"Decimal('{snan}') doesn't fit ({ty}): KDL has no signaling NaN"
 
 
 # The reason the write side gives for a decimal64 or decimal128 past the f64 range; a read gives the same one.
 DECIMAL_RANGE = "out of range ±1.7976931348623157e+308"
 
 
-@pytest.mark.xfail(
-    strict=True, raises=rkdl.ReadError, reason=TASK_66 + "decimal refuses the exponent, though the value is zero"
-)
+@pytest.mark.parametrize("ty", ["decimal64", "decimal128"])
 @pytest.mark.parametrize(
     ("text", "signed"),
     [("0.0e99999999999999999999", False), ("-0.0e99999999999999999999", True), ("0e1000000000000000000", False)],
 )
-def test_a_decimal64_zero_with_an_exponent_past_what_decimal_takes_reads_as_zero(text, signed):
-    read = rkdl.parse(f"n (decimal64){text}\n")["n"].args[0]
+def test_a_decimal_zero_with_an_exponent_past_what_decimal_takes_reads_as_zero(text, signed, ty):
+    read = rkdl.parse(f"n ({ty}){text}\n")["n"].args[0]
     assert read == decimal.Decimal(0)
     assert read.is_signed() == signed
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason=TASK_66 + "the reason is decimal's [<class 'decimal.InvalidOperation'>]"
-)
-def test_a_decimal64_exponent_past_what_decimal_takes_is_refused_for_it():
-    # Tiny, not past the f64 range: the reason is the exponent, in words task 66 picks.
-    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
+@pytest.mark.parametrize("ty", ["decimal64", "decimal128"])
+def test_a_decimal_exponent_past_what_decimal_takes_is_refused_for_it(ty):
+    # Tiny, not past the f64 range.
+    n = rkdl.parse(f"n ({ty})1e-99999999999999999999\n")["n"]
     err = read_error(lambda n: n.args[0], n)
     assert type(err) is rkdl.ReadError
-    assert "exponent" in reason(err)
+    assert reason(err) == "exponent past what Python's decimal takes"
 
 
-@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=TASK_66 + "it reads as Decimal('Infinity')")
+def test_only_decimals_own_refusal_is_taken_for_the_exponent(monkeypatch):
+    def interrupted(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(decimal, "Decimal", interrupted)
+    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
+    with pytest.raises(KeyboardInterrupt):
+        n.args[0]
+
+
+def test_a_tiny_decimal_reads():
+    assert to_python("(decimal64)1e-400") == decimal.Decimal("1e-400")
+
+
 @pytest.mark.parametrize("ty", ["decimal64", "decimal128"])
-def test_a_decimal_number_literal_past_the_f64_range_doesnt_fit(ty):
-    n = rkdl.parse(f"n ({ty})1e400\n")["n"]
+@pytest.mark.parametrize("text", ["1e99999999999999999999", "-1e99999999999999999999"])
+def test_a_decimal_literal_past_both_limits_gets_the_range_reason(text, ty):
+    n = rkdl.parse(f"n ({ty}){text}\n")["n"]
     assert reason(read_error(lambda n: n.args[0], n)) == DECIMAL_RANGE
-    # The same reason as the write side's.
-    with pytest.raises(ValueError) as info:
-        from_python(decimal.Decimal("1e400"), ty)
-    assert reason(info.value) == DECIMAL_RANGE
 
 
 def test_decimal64_out_of_the_f64_range_doesnt_fit():
@@ -1100,6 +1137,8 @@ MISFITS = {
     "over f32's range": ("f32", "1e39", 1e39, "out of range ±3.4028234663852886e+38"),
     "bool over f64": ("f64", "#true", True, "expected a number"),
     "string over decimal64": ("decimal64", '"2"', "2", "expected a number"),
+    "over decimal64's range": ("decimal64", "1e400", decimal.Decimal("1e400"), DECIMAL_RANGE),
+    "past decimal128's range": ("decimal128", "-1e400", decimal.Decimal("-1e400"), DECIMAL_RANGE),
     "number over decimal": ("decimal", "1", 1, "expected a decimal"),
     "number over date-time": ("date-time", "5", 5, "expected a date-time"),
     "number over date": ("date", "5", 5, "expected a date"),
