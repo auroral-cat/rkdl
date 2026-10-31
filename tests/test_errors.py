@@ -1,4 +1,5 @@
 import io
+import os
 import pickle
 
 import pytest
@@ -160,12 +161,51 @@ def test_a_parse_error_from_text_has_no_path(load):
     assert load_error(io.BytesIO(BAD.encode()), load).path is None
 
 
+def stdin_with(text):
+    # A pipe read the way Python reads sys.stdin: a FileIO named "<stdin>", buffered and decoded.
+    read, write = os.pipe()
+    os.write(write, text.encode())
+    os.close(write)
+    raw = io.FileIO(read, "r")
+    raw.name = "<stdin>"
+    return io.TextIOWrapper(io.BufferedReader(raw), encoding="utf-8")
+
+
+# Parser.load reads through the same `_read` as rkdl.load, so one loader is enough here.
+def test_stdin_is_not_a_path():
+    with stdin_with(BAD) as stdin:
+        err = load_error(stdin)
+    assert err.path is None
+    assert str(err).startswith("2:3: ")
+    with stdin_with("a 1\n") as stdin:
+        assert rkdl.load(stdin).path is None
+
+
 def test_diagnostics_compare_by_value():
     first = parse_error("a {").diagnostics[0]
     same = rkdl.Diagnostic(first.message, first.label, first.help, first.offset, first.length, first.line, first.column)
     assert same == first
     assert hash(same) == hash(first)
     assert pickle.loads(pickle.dumps(first)) == first
+
+
+def test_diagnostic_repr_shows_where_and_what():
+    # A diagnostic a program builds for its own check: its position, then its message, not the label.
+    shown = repr(rkdl.Diagnostic("unknown setting", "not a setting", None, 14, 7, 2, 5))
+    assert shown.startswith("<Diagnostic 2:5 ")
+    assert shown.endswith(">")
+    assert "unknown setting" in shown
+    assert "not a setting" not in shown
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 64: Diagnostic repr uses Python's quoting")
+def test_diagnostic_repr_quotes_the_message_as_python_does():
+    # The message is a Python str, so it's shown with Python's repr, as `<Entry 'web'>` shows its value. Double
+    # quotes in it are where that differs from Rust's quoting, and both kinds where it differs from wrapping in '...'.
+    diagnostic = rkdl.Diagnostic('mode is "on" or "off"', None, None, 30, 4, 3, 10)
+    assert repr(diagnostic) == """<Diagnostic 3:10 'mode is "on" or "off"'>"""
+    both = rkdl.Diagnostic('mode can\'t be "auto"', None, None, 30, 4, 3, 10)
+    assert repr(both) == """<Diagnostic 3:10 'mode can\\'t be "auto"'>"""
 
 
 def lines(eol, last):
@@ -269,10 +309,19 @@ def test_a_long_or_multiline_raw_string_gets_the_rule_instead_of_the_v2_form():
     assert multiline.help.splitlines()[0] == long.help.splitlines()[0]
 
 
+# A file cut off inside a string has no v2 form to show.
+@pytest.mark.parametrize("text", ['out "build\\/', 'out "build\\/\\'], ids=["inside", "after a backslash"])
+def test_an_unfinished_string_gets_the_rule_instead_of_the_v2_form(text):
+    first = parse_error(text).diagnostics[0]
+    assert first.help.splitlines()[0] == "this looks like KDL v1: in KDL v2 / isn't escaped: write \\/ as /"
+
+
 @pytest.mark.parametrize(
     "text",
     [
         "true 1",  # a node name: v1 didn't allow it either
+        "term true-color#true",  # an identifier starting with true-, with a missing space after it
+        "retries 3) true",  # after a stray ): kdl-rs reads true as a node name, which #true isn't either
         "node true=1",  # a property key
         "node (true)1",  # a type annotation
         "node { null; }",
