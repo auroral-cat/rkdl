@@ -5,7 +5,7 @@ use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PySlice};
+use pyo3::types::{PyList, PySlice, PyString};
 
 use crate::document::{DocState, Document, lock_all};
 use crate::handles::{self, DocRef, Fail, Garbage, Home, stale};
@@ -788,13 +788,22 @@ fn slice_ids(ids: &[NodeId], slice: &Bound<'_, PySlice>) -> PyResult<Vec<NodeId>
     Ok(pick_slice(ids, slice)?.into_iter().copied().collect())
 }
 
-/// An int index into the view. A wrong type gets a message pointing at lookup by name, which a string usually means.
+/// An int index into the view. A wrong type gets a message naming it, and a string, which usually means a lookup by
+/// name, gets a pointer to that.
 fn int_index(index: &Bound<'_, PyAny>) -> PyResult<isize> {
     match index.extract::<Index>() {
         Ok(Index(index)) => Ok(index),
-        Err(err) if err.is_instance_of::<PyTypeError>(index.py()) => Err(PyTypeError::new_err(
-            "a children index is an int or a slice; doc[name] and node[name] look a node up by name",
-        )),
+        Err(err) if err.is_instance_of::<PyTypeError>(index.py()) => {
+            let ty = index.get_type().qualname()?;
+            let hint = if index.is_instance_of::<PyString>() {
+                "; doc[name] and node[name] look a node up by name"
+            } else {
+                ""
+            };
+            Err(PyTypeError::new_err(format!(
+                "a children index is an int or a slice, not {ty}{hint}"
+            )))
+        }
         Err(err) => Err(err),
     }
 }

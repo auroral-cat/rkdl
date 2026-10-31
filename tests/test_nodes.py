@@ -543,8 +543,9 @@ def test_view_follows_node_and_block():
 
 
 # Every read or edit through a view of a removed block raises, even where a list would answer (`in`) or do nothing
-# (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.) That holds whatever the argument or the
-# other side of `==` is: a view of a dead block is a bug wherever it's touched. (Task 54.)
+# (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.) Reads, lookups and comparisons raise
+# ValueError whatever node, value or other side of `==` they're given (task 54). An argument of the wrong type, such as
+# `v["a"]` or `v.append("x")`, is a TypeError, checked before the block is looked at.
 REMOVED_BLOCK_USES = {
     "list": lambda v, stray: list(v),
     "reversed": lambda v, stray: list(reversed(v)),
@@ -668,7 +669,7 @@ def test_children_take_int_indexes_and_nodes():
     d = doc()
     before = str(d)
     # By name is doc["a"], not doc.children["a"].
-    by_name = r"a children index is an int or a slice; doc\[name\] and node\[name\] look a node up by name"
+    by_name = r"^a children index is an int or a slice, not str; doc\[name\] and node\[name\] look a node up by name$"
     with pytest.raises(TypeError, match=by_name):
         d.children["a"]
     with pytest.raises(TypeError, match=by_name):
@@ -677,6 +678,11 @@ def test_children_take_int_indexes_and_nodes():
         del d.children["a"]
     with pytest.raises(TypeError, match=by_name):
         d["b"].children["c"]
+    # Only a string gets the hint: a float or None isn't a name.
+    with pytest.raises(TypeError, match=r"^a children index is an int or a slice, not float$"):
+        d.children[1.5]
+    with pytest.raises(TypeError, match=r"^a children index is an int or a slice, not NoneType$"):
+        d.children[None] = rkdl.Node("x")
     with pytest.raises(TypeError, match="item assignment to children takes a Node"):
         d.children[0] = "x"
     # A string is an iterable, of strings.
