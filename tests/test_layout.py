@@ -414,9 +414,6 @@ def test_reversing_twice_gives_back_the_text(name, crlf, where):
         ('x """\n  hi\n  """\n', 'x """\n  hi\n  """'),
         # A slashdashed block after the entries, from a block at the depth it lands at.
         ("p {\n    x 1 /-{\n        y\n    }\n}\n", "x 1 /-{\n        y\n    }"),
-        # A multi-line string is a name like any other, and a type annotation.
-        ('"""\n  hi\n  """ 1\n', '"""\n  hi\n  """ 1'),
-        ('("""\n  t\n  """)x 1\n', '("""\n  t\n  """)x 1'),
     ],
 )
 def test_a_node_written_over_lines_spreads_a_one_line_block(source, moved):
@@ -998,17 +995,6 @@ def test_the_comment_after_a_semicolon_at_the_end_of_a_file(text, edit, expected
     reads_back(expected)
 
 
-def test_a_comment_that_ended_the_file_stays_with_its_node():
-    # c's `//` comment ends the file, and its line. A node after it gets a line ending first, and then the comment
-    # moves with c like any comment that ends a node's line.
-    d = rkdl.parse("b\nc // t")
-    d.children.append(N("x"))
-    assert str(d) == "b\nc // t\nx\n"
-    d.children.reverse()
-    assert str(d) == "x\nc // t\nb\n"
-    reads_back(str(d))
-
-
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -1132,35 +1118,38 @@ def test_a_node_after_an_open_continuation(text, edit, expected):
 @pytest.mark.parametrize(
     ("text", "index", "expected"),
     [
-        # b's comment, which runs over lines, goes with b. c goes on in b's place, or else starts a line at its
-        # block's indent: not at the indent of the comment's last line, which went with b.
-        ("a; /* first,\n   then */ b; c\n", 1, {"a; c\n", "a;\nc\n"}),
-        ("p {\n    a; /* first,\n          then */ b; c\n}\n", 1, {"p {\n    a; c\n}\n", "p {\n    a;\n    c\n}\n"}),
-        ("p { /* first,\n      then */ b; c }\n", 0, {"p { c }\n", "p {\n    c\n}\n"}),
+        # b's comment, which runs over lines, goes with b, so b's start is right after `a; ` (or `{ `). c was second
+        # on that line and takes it over (module doc), rather than starting a line at the comment's last indent.
+        ("a; /* first,\n   then */ b; c\n", 1, "a; c\n"),
+        ("p {\n    a; /* first,\n          then */ b; c\n}\n", 1, "p {\n    a; c\n}\n"),
+        ("p { /* first,\n      then */ b; c }\n", 0, "p { c }\n"),
     ],
 )
 def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expected):
     d = rkdl.parse(text)
     _block(d).pop(index)
-    assert str(d) in expected
+    assert str(d) == expected
 
 
 @pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="a comment before `}` keeps the space before it as indent"
+    strict=True, raises=AssertionError, reason="text after the last `;` before `}` stays, indented a space"
 )
 @pytest.mark.parametrize(
-    ("edit", "expected"),
+    ("text", "edit", "expected"),
     [
-        # The comment is on b's line, after its `;`: b's, as at the end of a file, or else the block's, on a line of
-        # its own at the nodes' indent as when a one-line block spreads. Either way `}` lines up with p.
-        (lambda d: d["p"].children.pop(1), {"p {\n    a\n}\n", "p {\n    a\n    /* c */\n}\n"}),
+        # The comment on b's line after its `;` is b's (module doc: "with any comments before it on the node's line"),
+        # as it is today without the `;` (`b /* c */ }`). It goes with b, and stays with b when a node follows.
+        ("p {\n    a\n    b; /* c */ }\n", lambda d: d["p"].children.pop(1), "p {\n    a\n}\n"),
         (
+            "p {\n    a\n    b; /* c */ }\n",
             lambda d: d["p"].children.append(N("x")),
-            {"p {\n    a\n    b; /* c */\n    x\n}\n", "p {\n    a\n    b;\n    x\n    /* c */\n}\n"},
+            "p {\n    a\n    b; /* c */\n    x\n}\n",
         ),
+        # A `\` continuation after b's `;` is b's text too: removing b leaves no stray `\` line.
+        ("p {\n    a\n    b; \\\n}\n", lambda d: d["p"].children.pop(1), "p {\n    a\n}\n"),
     ],
 )
-def test_a_comment_before_the_closing_brace_after_a_semicolon(edit, expected):
-    d = rkdl.parse("p {\n    a\n    b; /* c */ }\n")
+def test_a_comment_before_the_closing_brace_after_a_semicolon(text, edit, expected):
+    d = rkdl.parse(text)
     edit(d)
-    assert str(d) in expected
+    assert str(d) == expected

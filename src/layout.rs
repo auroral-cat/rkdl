@@ -84,7 +84,6 @@ fn lines(text: &str) -> Vec<(&str, &str)> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some((line, tail)) = rest.find(NEWLINES).and_then(|i| rest.split_at_checked(i))
-        // unreachable: `find` stops at a character `eol_at` knows (the two list the same seven), so this can't fail
         && let Some((ending, next)) = eol_at(tail).and_then(|e| tail.split_at_checked(e.len()))
     {
         out.push((line, ending));
@@ -1075,11 +1074,9 @@ fn fit_inline(node: &mut KdlNode, space: &str, closing: &str, terminator: String
 /// would sit right after its own `}`, which kdl-rs drops when it reads the text back. After the
 /// `;`, the space belongs to the block.
 fn semicolon_after_block(block: &mut KdlDocument, index: usize) {
-    // unreachable-start: every caller passes the index of a node it just put there, or of the node a path leads to
     let Some(node) = block.nodes_mut().get_mut(index) else {
         return;
     };
-    // unreachable-end
     if node.children().is_none() || !ends_open(node) {
         return;
     }
@@ -1175,10 +1172,12 @@ fn sibling_indent(block: &KdlDocument, index: usize) -> Option<String> {
 fn close_on_own_line(block: &mut KdlDocument, style: &Style) {
     if let Some(parent) = &style.parent {
         let f = block_fmt_mut(block);
-        // unreachable: the trailing text here never holds a line ending.
-        // Blank with a line ending, it's the rest of the last node's line, which every caller takes first. kdl-rs
-        // puts the line ending after a node with no terminator in the node.
-        if is_blank(&f.trailing) && !f.trailing.contains(NEWLINES) {
+        if is_blank(&f.trailing)
+            // unreachable: the trailing text here never holds a line ending.
+            // Blank with a line ending, it's the rest of the last node's line, which every caller takes first.
+            // kdl-rs puts the line ending after a node with no terminator in the node.
+            && !f.trailing.contains(NEWLINES)
+        {
             parent.clone_into(&mut f.trailing);
         }
     }
@@ -1318,7 +1317,10 @@ fn place_at(
             // A comment at the end of the file ends the node too, and keeps it.
             f.terminator.push_str(eol);
         // unreachable: the trailing text is empty here, cleared above unless it held the comments after a `;`
-        } else if f.trailing.is_empty() && !ends_line(&f.before_terminator) {
+        } else if f.trailing.is_empty()
+            // Its own line, so the marker above leaves this half counted.
+            && !ends_line(&f.before_terminator)
+        {
             // Spaces that came before a `}` or a `;` would now end the line.
             split_closing(&mut node);
             fmt_mut(&mut node, eol).terminator = eol.into();
@@ -1650,16 +1652,12 @@ fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bo
             owns.get(from).and_then(Option::as_ref),
             block.nodes().get(from),
         );
-        // unreachable-start: `places` and `from` are places in this block.
-        // `reverse` makes them from its length, `children::reorder` from the block's own nodes.
         let (Some(slot), Some(own), Some(node)) = fits else {
             return false;
         };
-        // unreachable-end
         if to != from && !fits_slot(own, slot, node.children().is_some()) {
             return false;
         }
-        // unreachable: `to` is a place in this block, as above
         if let Some(s) = source.get_mut(to) {
             *s = from;
         }
