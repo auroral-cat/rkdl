@@ -717,7 +717,18 @@ def test_a_decimal_misfit_is_refused_whatever_the_threads_context(text, why):
 )
 def test_a_decimal_reads_the_same_whatever_the_threads_context(text, value):
     # A tiny precision and exponent range, with every trap set.
-    with decimal.localcontext(decimal.Context(prec=2, Emax=10, Emin=-10, traps=list(decimal.Context().flags))):
+    traps = [
+        decimal.Clamped,
+        decimal.DivisionByZero,
+        decimal.FloatOperation,
+        decimal.Inexact,
+        decimal.InvalidOperation,
+        decimal.Overflow,
+        decimal.Rounded,
+        decimal.Subnormal,
+        decimal.Underflow,
+    ]
+    with decimal.localcontext(decimal.Context(prec=2, Emax=10, Emin=-10, traps=traps)):
         read = to_python(text)
     assert type(read) is decimal.Decimal
     assert str(read) == str(value)
