@@ -262,12 +262,9 @@ struct Located<'a> {
 }
 
 impl fmt::Debug for Located<'_> {
-    // unreachable-start: std::error::Error (which miette::Diagnostic needs) requires Debug, but nothing calls it:
-    // miette's graphical handler renders through Display and the Diagnostic methods
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.diagnostic, f)
     }
-    // unreachable-end
 }
 
 impl fmt::Display for Located<'_> {

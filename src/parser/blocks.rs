@@ -48,12 +48,9 @@ fn restore_node(text: &str, node: &mut KdlNode, closes: Option<&[usize]>) {
     if !f.terminator.is_empty() {
         return;
     }
-    // unreachable-start: the span is kdl-rs's, into exactly this text (BOM included), so it ends inside it on a
-    // character boundary
     let Some(rest) = text.get(end..) else {
         return;
     };
-    // unreachable-end
     f.terminator = terminator(rest).into();
     // The node's last `}`: its block's, or that of a slashdashed block after it, which ends `before_terminator`.
     let Some(&close) = closes.and_then(|closes| closes.get(closes.partition_point(|&c| c < end).wrapping_sub(1)))
@@ -160,7 +157,8 @@ mod tests {
         for (text, closes, printed) in [
             // The scan missed `b`'s block, so the last `}` it knows is `a`'s, before `b` starts.
             ("a {}\nb {}  \nc", &[3][..], "a {}\nb {}\nc"),
-            // A `}` right before the node, as if `}b` were one block's end and the next node.
+            // A close recorded one byte before the node starts (at the line ending): `close >= start` fails while
+            // `start..after` is still a valid range.
             ("a {}\nb {}  \nc", &[4][..], "a {}\nb {}\nc"),
             // The scan missed the slashdashed block, so the `}` it has isn't the one `before_terminator` ends at.
             ("a {} /-{}  \nb", &[3][..], "a {} /-{}\nb"),

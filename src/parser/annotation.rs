@@ -49,12 +49,9 @@ fn fold(node: &mut KdlNode) {
     let Some((before, after, after_ty)) = padding(node) else {
         return;
     };
-    // unreachable-start: padding is only on a node with an annotation: kdl-rs fills it only from a `(...)` it parsed,
-    // and every way rkdl drops an annotation (`node.type = None`, `fmt()`) clears it as well
     let Some(ty) = node.ty_mut() else {
         return;
     };
-    // unreachable-end
     let inside = !before.is_empty() || !after.is_empty();
     if inside && !folded(ty, &before, &after) {
         let text = ty.to_string();
@@ -71,7 +68,6 @@ fn unfold(node: &mut KdlNode) {
     let Some((before, after, after_ty)) = padding(node) else {
         return;
     };
-    // unreachable: (the None side) padding is only on a node with an annotation, as in fold
     if let Some(ty) = node.ty_mut() {
         strip(ty, &before, &after);
     }
@@ -86,7 +82,6 @@ fn folded(ident: &KdlIdentifier, before: &str, after: &str) -> bool {
 fn unpadded<'a>(repr: &'a str, before: &str, after: &str) -> Option<&'a str> {
     let inner = repr.strip_prefix(before)?.strip_suffix(after)?;
     // An empty inner text is what was there, not padding: nothing was folded.
-    // unreachable: (the empty side) a spelling is never empty or padding alone, so `inner` never comes out empty
     (!inner.is_empty() && (!before.is_empty() || !after.is_empty())).then_some(inner)
 }
 
@@ -141,5 +136,25 @@ mod tests {
         fold(node);
         fold(node);
         assert_eq!(doc.to_string(), "( u )  \"n\" 1");
+    }
+
+    #[test]
+    fn an_annotation_dropped_without_unfolding_leaves_the_name_plain() {
+        // The padding stays on the node, but folding only touches a node with an annotation, and unfolding strips the
+        // name's padding all the same. `(t)  n` without its annotation is `n` (node.rs, `set_type`).
+        let mut doc: KdlDocument = "( t )  n 1".parse().expect("parses");
+        restore(&mut doc);
+        *doc.nodes_mut()[0].ty_mut() = None;
+        editing(&mut doc.nodes_mut()[0], |_| ());
+        assert_eq!(doc.to_string(), "n 1");
+        fold(&mut doc.nodes_mut()[0]);
+        assert_eq!(doc.to_string(), "n 1");
+    }
+
+    #[test]
+    fn text_that_is_all_padding_is_not_folded() {
+        assert_eq!(unpadded(" n", " ", ""), Some("n"));
+        // An identifier whose whole text is the padding wasn't folded: stripping it would blank the identifier.
+        assert_eq!(unpadded("/*c*/", "/*c*/", ""), None);
     }
 }
