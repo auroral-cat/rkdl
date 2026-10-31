@@ -21,9 +21,13 @@ dev = [
 [tool.maturin]
 python-source = "python"
 module-name = "rkdl._rkdl"
+# The kdl-org/kdl submodule is CC BY-SA 4.0, and the sdist doesn't ship it. The spec tests skip without it.
+exclude = [{ path = "tests/kdl-spec/**/*", format = "sdist" }]
 
 [tool.ruff]
 line-length = 120
+# The kdl-org/kdl submodule: not ours to lint.
+extend-exclude = ["tests/kdl-spec"]
 
 [tool.uv]
 # The development install is a debug build, so the Python tests run with the debug-only checks on (the id-tree shape

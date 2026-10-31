@@ -1,4 +1,4 @@
-"""Paths into the kdl-rs checkout, and helpers more than one test file uses."""
+"""Paths into the KDL spec's test cases, and helpers more than one test file uses."""
 
 import os
 import threading
@@ -8,30 +8,40 @@ from pathlib import Path
 import pytest
 import rkdl
 
-# Everything the tests read from kdl-rs comes from this one checkout: the KDL spec suite and the examples.
-KDL_RS = Path(os.environ.get("RKDL_KDL_RS", Path(__file__).resolve().parent.parent / "refs" / "kdl-rs"))
-SPEC_INPUT = KDL_RS / "tests" / "test_cases" / "input"
-SPEC_EXPECTED = KDL_RS / "tests" / "test_cases" / "expected_kdl"
-EXAMPLES = KDL_RS / "examples"
+# The spec's test cases come from kdl-org/kdl, checked out at tests/kdl-spec as a submodule. RKDL_SPEC points the
+# tests at another checkout of that repo instead.
+SPEC = Path(os.environ.get("RKDL_SPEC", Path(__file__).resolve().parent / "kdl-spec"))
+SPEC_INPUT = SPEC / "tests" / "test_cases" / "input"
+SPEC_EXPECTED = SPEC / "tests" / "test_cases" / "expected_kdl"
 
-MISSING_KDL_RS = f"kdl-rs checkout not found at {KDL_RS}: clone it there or point RKDL_KDL_RS at one"
+MISSING_SPEC = (
+    f"KDL spec test cases not found under {SPEC}: run `git submodule update --init`, "
+    "or point RKDL_SPEC at a kdl-org/kdl checkout"
+)
 
 
-def have_kdl_rs():
-    return SPEC_INPUT.is_dir() and SPEC_EXPECTED.is_dir() and EXAMPLES.is_dir()
+def have_spec():
+    return SPEC_INPUT.is_dir() and SPEC_EXPECTED.is_dir() and any(SPEC_INPUT.glob("*.kdl"))
 
 
 def pytest_report_header():
-    return f"kdl-rs: {KDL_RS}" + ("" if have_kdl_rs() else " (MISSING, spec tests will skip)")
+    return f"KDL spec: {SPEC}" + ("" if have_spec() else " (MISSING, spec tests will skip)")
 
 
-def skip_module_without_kdl_rs():
-    if not have_kdl_rs():
-        pytest.skip(MISSING_KDL_RS, allow_module_level=True)
+def pytest_terminal_summary(terminalreporter):
+    # Repeated at the end, where it can't scroll away: a run without the spec cases skips most of the suite.
+    if not have_spec():
+        terminalreporter.write_sep("=", "spec tests skipped", yellow=True, bold=True)
+        terminalreporter.write_line(MISSING_SPEC, yellow=True)
+
+
+def skip_module_without_spec():
+    if not have_spec():
+        pytest.skip(MISSING_SPEC, allow_module_level=True)
 
 
 def spec_inputs():
-    return sorted(SPEC_INPUT.glob("*.kdl")) if have_kdl_rs() else []
+    return sorted(SPEC_INPUT.glob("*.kdl")) if have_spec() else []
 
 
 def is_valid_case(path):

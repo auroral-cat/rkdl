@@ -9,9 +9,9 @@ import math
 
 import pytest
 import rkdl
-from conftest import SPEC_INPUT, is_valid_case, read_case, skip_module_without_kdl_rs, spec_inputs, walk
+from conftest import SPEC_INPUT, is_valid_case, read_case, skip_module_without_spec, spec_inputs, walk
 
-skip_module_without_kdl_rs()
+skip_module_without_spec()
 
 
 # A small KDL scanner, independent of rkdl, that finds where each node's text starts and ends. A node's text runs

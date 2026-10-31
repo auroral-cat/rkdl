@@ -12,7 +12,7 @@ import re
 
 import pytest
 import rkdl
-from conftest import MISSING_KDL_RS, has_duplicate_props, have_kdl_rs, read_case, spec_inputs
+from conftest import MISSING_SPEC, has_duplicate_props, have_spec, read_case, spec_inputs
 from hypothesis import note, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
@@ -460,8 +460,8 @@ CORPUS = load_corpus()
 
 
 def test_corpus_is_loaded():
-    if not have_kdl_rs():
-        pytest.skip(MISSING_KDL_RS)
+    if not have_spec():
+        pytest.skip(MISSING_SPEC)
     assert CORPUS
 
 
