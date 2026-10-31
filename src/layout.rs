@@ -8,12 +8,16 @@
 //! before it. A node's line ending is in its own text. The one after a block's `{` is at the start of the block's first
 //! node, which is where kdl-rs puts it. kdl-rs also puts the one after a `;` at the start of what follows, but it's the
 //! node's all the same, with any comments before it on the node's line. So is a `//` comment that ends the node's line,
-//! even at the end of the file. A new node goes at the first line start at or after its place: if the node before it
-//! doesn't end its line, it gets a line ending first. If that node ends in a `\` continuation, which would carry it
-//! onto the new node, it ends with `;` on the next line instead, at its indent. Taking a node out takes its own line
-//! ending with it, and whatever followed it keeps starting a line if it did: a node that was second on a line takes
-//! over its start. Replacing a node and reversing a block keep the layout by position instead: each place keeps the
-//! whitespace before it and the end of its line, and the nodes move with their own comments.
+//! and at the end of the file, where the end of the text ends the line, so are `/* */` comments. A copy of a node has
+//! them too. A new node goes at the first line start at or after its place: if the node before it doesn't end its line,
+//! it gets a line ending first, and a node that went on after the place on that line starts the line after the new
+//! one, at its indent. If the node before ends in a `\` continuation, which would carry it onto the new node, it ends
+//! with `;` on the next line instead, at its indent. A line ending rkdl adds after `{` and the comments on its line
+//! comes right after them, without spaces. Taking a node out takes its own line ending with it, and whatever followed
+//! it keeps starting a line if it did: a node that was second on a line takes over its start. Replacing a node and
+//! reversing a block keep the layout by position instead: each place keeps the whitespace before it and the end of its
+//! line, its `;` and line ending included, and the nodes move with their own comments, the ones at the end of their
+//! line too. A `//` comment that lands at the end of a line takes the place of the spaces there.
 //!
 //! Comments above a node are its own only up to the last blank line above it. What's above that line, the line
 //! included, is the gap: it belongs to the block and stays where it is. Taking a node out leaves its gap in front of
@@ -102,10 +106,10 @@ fn blank_rest(text: &str) -> Option<&str> {
 }
 
 /// The rest of a line at the start of `text`, if it holds only spaces and comments: up to and including the line
-/// ending.
+/// ending. A `//` comment with nothing after it is at the end of the file, which ends its line too.
 fn line_rest(text: &str) -> Option<&str> {
     let line = text.split(NEWLINES).next().unwrap_or_default();
-    let ending = eol_at(text.get(line.len()..)?)?;
+    let ending = text.get(line.len()..).and_then(eol_at);
     let mut rest = line.trim_start_matches(is_space);
     while rest.starts_with("/*") {
         let mut scan = Scan { text: rest, pos: 0 };
@@ -115,7 +119,68 @@ fn line_rest(text: &str) -> Option<&str> {
         }
         rest = scan.text_at().trim_start_matches(is_space);
     }
-    (rest.is_empty() || rest.starts_with("//")).then(|| text.get(..line.len() + ending.len()))?
+    match ending {
+        Some(ending) => (rest.is_empty() || rest.starts_with("//")).then(|| text.get(..line.len() + ending.len()))?,
+        None => rest.starts_with("//").then_some(text),
+    }
+}
+
+/// `line_rest`, where `file_end` says whether the end of the text is the end of the file, which ends the line too.
+fn line_rest_in(text: &str, file_end: bool) -> Option<&str> {
+    let comments = file_end && !is_blank(text) && !text.contains(NEWLINES) && closing_comments_at(text) == 0;
+    line_rest(text).or(comments.then_some(text))
+}
+
+/// The comments in the rest of a line, as `line_rest` gives it, with the spaces before them. Spaces after them are
+/// the line's, but for a `//` comment's, which are part of it.
+fn comments_in(rest: &str) -> &str {
+    let line = rest.split(NEWLINES).next().unwrap_or_default();
+    if line_comment_at(line) < line.len() {
+        line
+    } else {
+        line.trim_end_matches(is_space)
+    }
+}
+
+/// Where the comments that end `text` start: spaces and `/* */` comments on one line, up to the end.
+fn closing_comments_at(text: &str) -> usize {
+    let mut scan = Scan { text, pos: 0 };
+    let mut at = 0;
+    while let Some(c) = scan.peek() {
+        let start = scan.pos;
+        if is_space(c) {
+            scan.bump();
+            continue;
+        } else if scan.text_at().starts_with("/*") {
+            scan.block_comment();
+            if !text.get(start..scan.pos).unwrap_or_default().contains(NEWLINES) {
+                continue;
+            }
+        } else if scan.eat("//") {
+            scan.line_comment();
+        } else if matches!(c, '"' | '#') {
+            scan.string();
+        } else {
+            scan.bump();
+        }
+        at = scan.pos;
+    }
+    at
+}
+
+/// Where the `//` comment in a line of comments starts, if it has one, else its length.
+fn line_comment_at(comments: &str) -> usize {
+    let mut scan = Scan { text: comments, pos: 0 };
+    while let Some(c) = scan.peek() {
+        if scan.text_at().starts_with("//") {
+            break;
+        } else if scan.text_at().starts_with("/*") {
+            scan.block_comment();
+        } else {
+            scan.pos += c.len_utf8();
+        }
+    }
+    scan.pos
 }
 
 /// The byte ranges of the pieces of a node's leading text that can hold line endings of their own: `/* */` comments
@@ -776,6 +841,26 @@ fn line_start_at(block: &KdlDocument, index: usize, nested: bool) -> bool {
     ends_line(leading) || !nested && leading.chars().all(|c| is_space(c) || c == '\u{feff}')
 }
 
+/// The text after the node at `index`: the next node's leading, or the block's trailing.
+fn after(block: &KdlDocument, index: usize) -> &str {
+    match block.nodes().get(index + 1) {
+        Some(next) => leading(next),
+        None => block.format().map_or("", |f| &f.trailing),
+    }
+}
+
+/// The rest of the line after the node at `index`, if the node ends in a `;` and only spaces and comments follow it
+/// there. It's the node's, though kdl-rs keeps it in the text after it. `top` says whether the block is the
+/// document's.
+fn semicolon_rest(block: &KdlDocument, index: usize, top: bool) -> Option<&str> {
+    let node = block.nodes().get(index)?;
+    let semicolon = node.format().is_some_and(|f| f.terminator == ";");
+    if !semicolon || ends_own_line(node) {
+        return None;
+    }
+    line_rest_in(after(block, index), top && index + 1 == block.nodes().len())
+}
+
 /// The text after index `index` of `block`: the next node's leading, or the block's trailing.
 fn after_mut<'a>(block: &'a mut KdlDocument, index: usize, eol: &str) -> &'a mut String {
     if index < block.nodes().len() {
@@ -821,7 +906,8 @@ fn rejoin_gap(block: &mut KdlDocument, index: usize, gap: &str, line_start: bool
     }
 }
 
-/// Takes the gap off `copy`, a copy of the node at `path` in `doc`: only the node's own comments go with it.
+/// Takes the gap off `copy`, a copy of the node at `path` in `doc`: only the node's own comments go with it, the ones
+/// after its `;` included.
 pub fn drop_gap(doc: &KdlDocument, path: &[usize], copy: &mut KdlNode) {
     let (&index, parent) = path.split_last().expect("a node's path isn't empty");
     let block = if parent.is_empty() {
@@ -833,6 +919,10 @@ pub fn drop_gap(doc: &KdlDocument, path: &[usize], copy: &mut KdlNode) {
     if let Some(f) = copy.format_mut() {
         let gap = gap_len(&f.leading, start);
         f.leading.replace_range(..gap, "");
+        // Where `take` puts them, so they go back after the `;` when the copy is placed.
+        if let Some(rest) = semicolon_rest(block, index, parent.is_empty()).filter(|rest| !is_blank(rest)) {
+            f.trailing.push_str(rest);
+        }
     }
 }
 
@@ -1136,16 +1226,37 @@ fn place_at(
     let gap = gap.unwrap_or_else(|| split_gap(block, index, style.parent.is_some()));
     let mut start = String::new();
     if gap.is_empty() && !line_start_at(block, index, style.parent.is_some()) {
+        let next = index < block.nodes().len();
+        let file_end = !next && style.parent.is_none();
         let after = after_mut(block, index, eol);
-        let rest = line_rest(after).map(str::to_owned);
-        if let Some(rest) = &rest {
-            after.replace_range(..rest.len(), "");
+        let mut rest = line_rest_in(after, file_end).map(str::to_owned);
+        match &rest {
+            Some(rest) => after.replace_range(..rest.len(), ""),
+            None if !next => close_on_own_line(block, style),
+            // A node that went on on the old line starts the line after the new node. Text before it that reaches
+            // over a line ending, a `\` or a comment, stays as it is.
+            None if !after.contains(NEWLINES) => {
+                *after = format!("{indent}{}", after.trim_start_matches(is_space));
+            }
+            None => {}
+        }
+        if let Some(rest) = &mut rest
+            && !ends_line(rest)
+        {
+            // The end of the file.
+            rest.push_str(eol);
         }
         match index.checked_sub(1) {
             Some(prev) if rest.as_deref().is_none_or(is_blank) => end_line(block, prev, rest, style),
             // The line break after `{` is the first node's, as kdl-rs reads it. So is one after a `;` with comments
             // before it: kdl-rs's autoformat loses comments anywhere else.
-            _ => start = rest.unwrap_or_else(|| eol.to_owned()),
+            _ => {
+                start = rest.unwrap_or_else(|| eol.to_owned());
+                if index == 0 {
+                    let f = block_fmt_mut(block);
+                    f.leading.truncate(f.leading.trim_end_matches(is_space).len());
+                }
+            }
         }
     }
 
@@ -1161,7 +1272,11 @@ fn place_at(
     if is_blank(&f.trailing) {
         f.trailing.clear();
     }
-    if let Some(rest) = rest {
+    if let Some(mut rest) = rest {
+        if !ends_line(&rest) {
+            // It was at the end of a file.
+            rest.push_str(eol);
+        }
         after_mut(block, index, eol).insert_str(0, &rest);
     } else if escline {
         close_escline(&mut node, eol, &indent);
@@ -1216,19 +1331,19 @@ fn take_own(block: &mut KdlDocument, index: usize, style: &Style) -> (KdlNode, S
     let gap = split_gap(block, index, nested);
     // The node's own text starts a line after a gap, which ends one.
     let started = line_start || !gap.is_empty();
+    let rest = semicolon_rest(block, index, !nested).map(str::to_owned);
     let mut node = block.nodes_mut().remove(index);
     let next = index < block.nodes().len();
     let mut ends = ends_own_line(&node);
-    if !ends && node.format().is_some_and(|f| f.terminator == ";") {
-        // kdl-rs keeps the rest of the line after a `;` in the text after the node, but it's the node's.
-        let after = after_mut(block, index, style.eol);
-        if let Some(rest) = line_rest(after).map(str::to_owned) {
-            after.replace_range(..rest.len(), "");
-            if !is_blank(&rest) {
-                fmt_mut(&mut node, style.eol).trailing.push_str(&rest);
-            }
-            ends = true;
+    // At the end of the file, nothing follows to keep starting a line.
+    let mut at_end = false;
+    if let Some(rest) = rest {
+        after_mut(block, index, style.eol).replace_range(..rest.len(), "");
+        at_end = !ends_line(&rest);
+        if !is_blank(&rest) {
+            fmt_mut(&mut node, style.eol).trailing.push_str(&rest);
         }
+        ends = true;
     }
     let lead = leading(&node);
     if !ends && next && (started || lead.contains(NEWLINES)) {
@@ -1249,7 +1364,7 @@ fn take_own(block: &mut KdlDocument, index: usize, style: &Style) -> (KdlNode, S
         );
     } else if !ends && !next && started && !block.nodes().is_empty() {
         close_on_own_line(block, style);
-    } else if ends && !started {
+    } else if ends && !started && !at_end {
         // What followed the node started a line, and still does. The line break goes to what came before.
         if let Some(prev) = index.checked_sub(1) {
             end_line(block, prev, None, style);
@@ -1270,18 +1385,27 @@ pub fn replace(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: 
     }
     let old = block.nodes().get(index).expect("replace checks the index");
     let starts = line_start_at(block, index, nested) || leading(old).contains(NEWLINES);
-    let (slot, _) = slot_and_own(old, index + 1 == block.nodes().len());
+    let (slot, old_own) = slot_and_own(block, index, !nested);
     // A node carrying the comments from the end of its old line goes through `place`, which puts them after it.
     let carries_comments = node.format().is_some_and(|f| !is_blank(&f.trailing));
-    if starts && !carries_comments && fits_slot(&slot_and_own(&node, true).1, &slot, node.children().is_some()) {
+    if starts && !carries_comments && fits_slot(&own_of(&node), &slot, node.children().is_some()) {
         let shift = Shift::of(&node, indent_of(leading(old)), style);
         shift.move_node(&mut node);
-        let (_, mut own) = slot_and_own(&node, true);
+        let mut own = own_of(&node);
         own.lead = shift.apply(&own.lead, false);
-        put_in_slot(&mut node, slot, own);
+        let open_end = slot.open_end;
+        let after = put_in_slot(&mut node, slot, own);
+        if open_end {
+            // The comments after the old node's `;` are its own, and go with it.
+            let text = after_mut(block, index + 1, style.eol);
+            *text = join_comments(&after, text.get(old_own.after.len()..).unwrap_or_default());
+        }
         // The gap is in the slot. The old node keeps only its own comments.
         split_gap(block, index, nested);
         let old = block.nodes_mut().get_mut(index).expect("replace checks the index");
+        if open_end {
+            fmt_mut(old, style.eol).trailing.push_str(&old_own.after);
+        }
         return std::mem::replace(old, node);
     }
     let indent = starts.then(|| indent_of(leading(old)).to_owned());
@@ -1293,6 +1417,8 @@ pub fn replace(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: 
 
 /// A node's place in its block: the whitespace and the gap before it, and how its line goes on after it.
 struct Slot {
+    /// The comments after the `;` of the node before, which kdl-rs keeps at the start of this node's leading.
+    before: String,
     lead: String,
     /// Spaces before the terminator.
     closing: String,
@@ -1301,6 +1427,12 @@ struct Slot {
     ends: bool,
     terminator: String,
     trailing: String,
+    /// Whether the line goes on after the `;` with only spaces and comments, which the text after the node holds.
+    open_end: bool,
+    /// Whether the end of the file follows, which ends the line too.
+    file_end: bool,
+    /// Whether the place starts a line, so the comment lines above a node can go there.
+    line_start: bool,
 }
 
 /// What belongs to a node apart from its text: the comments right above it, below its gap, with the indent of its line
@@ -1308,12 +1440,37 @@ struct Slot {
 struct Own {
     lead: String,
     tail: String,
-    /// A `//` comment ending the line, which needs a line ending after it.
-    comment: String,
+    /// The comments that end the node's line, with the spaces before them: what's after its `;`, or else the ones
+    /// before its terminator.
+    after: String,
 }
 
-/// Splits a node's whitespace from what's its own. `last` says whether it's the last node of its block.
-fn slot_and_own(node: &KdlNode, last: bool) -> (Slot, Own) {
+/// Splits the node at `index` from its place. `top` says whether the block is the document's.
+fn slot_and_own(block: &KdlDocument, index: usize, top: bool) -> (Slot, Own) {
+    let node = block.nodes().get(index).expect("the caller checks the index");
+    let prev = index.checked_sub(1);
+    let before = prev.and_then(|prev| semicolon_rest(block, prev, top));
+    let rest = semicolon_rest(block, index, top);
+    let last = index + 1 == block.nodes().len();
+    let (mut slot, own) = split_node(node, last, before.map_or(0, |rest| comments_in(rest).len()), rest);
+    let text_after = after(block, index);
+    slot.file_end = top && last && is_blank(text_after) && !text_after.contains(NEWLINES);
+    // The end of the file ends the line after a `;` too.
+    slot.open_end |= slot.file_end && slot.terminator == ";";
+    // Whether the first place is on the line of a `{` isn't known here: it counts as a line start, as it always did.
+    slot.line_start =
+        prev.is_none_or(|prev| block.nodes().get(prev).is_some_and(ends_own_line)) || leading(node).contains(NEWLINES);
+    (slot, own)
+}
+
+/// What's a node's own, as the last node of a block of its own.
+fn own_of(node: &KdlNode) -> Own {
+    split_node(node, true, 0, None).1
+}
+
+/// Splits a node's whitespace from what's its own. `last` says whether it's the last node of its block, `before` how
+/// much of its leading is the comments of the node before it, and `rest` is the rest of its line after its `;`.
+fn split_node(node: &KdlNode, last: bool, before: usize, rest: Option<&str>) -> (Slot, Own) {
     let (lead, bt, terminator, trailing) = node.format().map_or(("", "", "", ""), |f| {
         (
             f.leading.as_str(),
@@ -1322,59 +1479,110 @@ fn slot_and_own(node: &KdlNode, last: bool) -> (Slot, Own) {
             f.trailing.as_str(),
         )
     });
+    let (before, lead) = lead.split_at_checked(before).unwrap_or(("", lead));
     // Whether the leading starts a line only changes whether its first line counts as blank. It's whitespace either way,
     // so it's the slot's.
-    let rest = lead.get(gap_len(lead, true)..).unwrap_or_default();
-    let comments = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let lead_rest = lead.get(gap_len(lead, true)..).unwrap_or_default();
+    let comments = lead_rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     let space = lead.strip_suffix(comments).unwrap_or_default();
-    let (tail, closing, comment, terminator) = if terminator.starts_with("//") {
-        let comment = terminator.split(NEWLINES).next().unwrap_or_default();
-        let ending = terminator.strip_prefix(comment).unwrap_or_default();
-        (bt, "", comment, ending)
+    let semicolon = terminator == ";";
+    // After a `;`, only the comments after it end the line: the ones before it are the node's text.
+    let (tail, ending) = bt.split_at(if semicolon {
+        bt.trim_end_matches(is_space).len()
     } else {
-        let content = bt.trim_end_matches(is_space);
-        let closing = bt.strip_prefix(content).unwrap_or_default();
-        (content, closing, "", terminator)
+        closing_comments_at(bt)
+    });
+    let (closing, after, terminator) = if terminator.starts_with("//") {
+        let comment = terminator.split(NEWLINES).next().unwrap_or_default();
+        let line_end = terminator.strip_prefix(comment).unwrap_or_default();
+        ("", format!("{ending}{comment}"), line_end)
+    } else {
+        let comments = ending.trim_end_matches(is_space);
+        let spaces = ending.strip_prefix(comments).unwrap_or_default();
+        let after = if semicolon {
+            rest.map_or("", comments_in)
+        } else {
+            comments
+        };
+        (spaces, after.to_owned(), terminator)
     };
     (
         Slot {
+            before: before.to_owned(),
             lead: space.to_owned(),
             closing: closing.to_owned(),
             ends: last || !terminator.is_empty() || !trailing.is_empty(),
             terminator: terminator.to_owned(),
             trailing: trailing.to_owned(),
+            open_end: semicolon && rest.is_some(),
+            file_end: false,
+            line_start: true,
         },
         Own {
             lead: comments.to_owned(),
             tail: tail.to_owned(),
-            comment: comment.to_owned(),
+            after,
         },
     )
 }
 
 /// Whether a node with `own` can take `slot` and still read back as itself, with nothing after its `}`.
 fn fits_slot(own: &Own, slot: &Slot, has_block: bool) -> bool {
+    // A `//` comment has to end a line.
+    let ends_line = slot.open_end || eol_at(&slot.terminator).is_some() || slot.file_end && slot.terminator.is_empty();
+    let after_fits = !has_line_comment(&own.after) || ends_line;
     slot.ends
-        && (own.comment.is_empty() || slot.closing.is_empty() && eol_at(&slot.terminator).is_some())
+        && after_fits
+        // Comment lines after a `;` would be the comments on the line of the node before.
+        && (slot.line_start || line_rest(&own.lead).is_none())
         && continuation(&own.tail).is_none()
         && (!has_block || slot.closing.is_empty())
 }
 
-fn put_in_slot(node: &mut KdlNode, slot: Slot, own: Own) {
+/// Whether a line of comments ends in a `//` comment.
+fn has_line_comment(comments: &str) -> bool {
+    line_comment_at(comments) < comments.len()
+}
+
+/// `comments` in front of `text`, the rest of their line. A `//` comment would take in the spaces that end the line,
+/// so they go.
+fn join_comments(comments: &str, text: &str) -> String {
+    if has_line_comment(comments) {
+        format!("{comments}{}", text.trim_start_matches(is_space))
+    } else {
+        format!("{comments}{text}")
+    }
+}
+
+/// Gives `node` the place `slot`. Returns the comments that go after its `;`, at the start of the text after it.
+fn put_in_slot(node: &mut KdlNode, slot: Slot, own: Own) -> String {
     let f = fmt_mut(node, "\n");
-    f.leading = slot.lead + &own.lead;
-    f.before_terminator = own.tail + &slot.closing;
-    f.terminator = own.comment + &slot.terminator;
+    f.leading = slot.before + &slot.lead + &own.lead;
     f.trailing = slot.trailing;
+    if slot.open_end {
+        f.before_terminator = own.tail + &slot.closing;
+        f.terminator = slot.terminator;
+        return own.after;
+    }
+    // Where kdl-rs puts them: a `//` comment starts the terminator, and takes the place of the spaces that end the line.
+    let (comments, line_comment) = own.after.split_at(line_comment_at(&own.after));
+    let closing = if line_comment.is_empty() {
+        slot.closing.as_str()
+    } else {
+        ""
+    };
+    f.before_terminator = own.tail + comments + closing;
+    f.terminator = line_comment.to_owned() + &slot.terminator;
+    String::new()
 }
 
 /// Reverses the nodes of `block`. The whitespace layout stays by position, as with `permute`. Reversing twice gives
-/// back the same text.
+/// back the same text, but for spaces at the end of a line a `//` comment landed on.
 pub fn reverse(block: &mut KdlDocument, style: &Style) {
     let count = block.nodes().len();
     let places: Vec<usize> = (0..count).collect();
     let from: Vec<usize> = (0..count).rev().collect();
-    if permute(block, &places, &from) {
+    if permute_in(block, &places, &from, style.parent.is_none()) {
         return;
     }
     // A comment or `\` that needs a line ending would land where there's none. Moves the first node back to each
@@ -1389,38 +1597,75 @@ pub fn reverse(block: &mut KdlDocument, style: &Style) {
 /// Moves the node at `from[k]` to `places[k]`, for every `k`: `from` holds the same places in another order. The
 /// whitespace layout stays by position: each place keeps the whitespace before it and the end of its line, and the
 /// nodes move with their own comments. Changes nothing and returns false if a comment or `\` that needs a line ending
-/// would land where there's none, or a block where spaces follow.
+/// would land where there's none, comment lines above a node would land after a `;` on the line, or a block where
+/// spaces follow.
 pub fn permute(block: &mut KdlDocument, places: &[usize], from: &[usize]) -> bool {
+    permute_in(block, places, from, false)
+}
+
+/// `permute`, where `top` says whether the block is the document's: then a comment can end the last place.
+fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bool) -> bool {
     let count = block.nodes().len();
-    let nodes = block.nodes();
-    let parts = |i: usize| nodes.get(i).map(|node| (node, slot_and_own(node, i + 1 == count)));
-    let moves: Option<Vec<(Slot, Own)>> = places
-        .iter()
-        .zip(from)
-        .map(|(&to, &from)| {
-            let ((_, (slot, _)), (node, (_, own))) = (parts(to)?, parts(from)?);
-            (to == from || fits_slot(&own, &slot, node.children().is_some())).then_some((slot, own))
-        })
-        .collect();
-    let Some(moves) = moves else {
-        return false;
-    };
+    let (slots, mut owns): (Vec<Slot>, Vec<Option<Own>>) = (0..count)
+        .map(|i| slot_and_own(block, i, top))
+        .map(|(slot, own)| (slot, Some(own)))
+        .unzip();
+    let mut source: Vec<usize> = (0..count).collect();
+    for (&to, &from) in places.iter().zip(from) {
+        let fits = (
+            slots.get(to),
+            owns.get(from).and_then(Option::as_ref),
+            block.nodes().get(from),
+        );
+        let (Some(slot), Some(own), Some(node)) = fits else {
+            return false;
+        };
+        if to != from && !fits_slot(own, slot, node.children().is_some()) {
+            return false;
+        }
+        if let Some(s) = source.get_mut(to) {
+            *s = from;
+        }
+    }
+    // The comments after the last node's `;`, which kdl-rs keeps in the block's trailing.
+    let end = count
+        .checked_sub(1)
+        .and_then(|last| semicolon_rest(block, last, top))
+        .map_or(0, |rest| comments_in(rest).len());
     let mut taken: Vec<Option<KdlNode>> = std::mem::take(block.nodes_mut()).into_iter().map(Some).collect();
-    let mut landing: Vec<(usize, KdlNode)> = Vec::with_capacity(places.len());
-    for ((&to, &from), (slot, own)) in places.iter().zip(from).zip(moves) {
+    // The comments after the `;` of the node placed last, which go at the start of the next node's leading.
+    let mut after = String::new();
+    for (to, (mut slot, &from)) in slots.into_iter().zip(&source).enumerate() {
         let mut node = taken
             .get_mut(from)
             .and_then(Option::take)
             .expect("each place moves once");
-        put_in_slot(&mut node, slot, own);
-        landing.push((to, node));
-    }
-    for (to, node) in landing {
-        if let Some(place) = taken.get_mut(to) {
-            *place = Some(node);
+        let own = owns
+            .get_mut(from)
+            .and_then(Option::take)
+            .expect("each place moves once");
+        let before = std::mem::take(&mut after);
+        if from == to {
+            // Only what came before it changes.
+            if node.format().is_some() || !before.is_empty() {
+                let f = fmt_mut(&mut node, "\n");
+                f.leading = join_comments(&before, f.leading.get(slot.before.len()..).unwrap_or_default());
+            }
+            if slot.open_end {
+                after = own.after;
+            }
+        } else {
+            let lead = join_comments(&before, &slot.lead);
+            slot.before.clear();
+            slot.lead = lead;
+            after = put_in_slot(&mut node, slot, own);
         }
+        block.nodes_mut().push(node);
     }
-    *block.nodes_mut() = taken.into_iter().flatten().collect();
+    if end > 0 || !after.is_empty() {
+        let f = block_fmt_mut(block);
+        f.trailing = join_comments(&after, f.trailing.get(end..).unwrap_or_default());
+    }
     true
 }
 
@@ -1531,7 +1776,8 @@ mod tests {
         assert_eq!(line_rest("\r\n"), Some("\r\n"));
         assert_eq!(line_rest(" /* a\n */\n"), None);
         assert_eq!(line_rest(" b\n"), None);
-        assert_eq!(line_rest(" // b"), None);
+        assert_eq!(line_rest(" // b"), Some(" // b"));
+        assert_eq!(line_rest(" /* b */"), None);
         assert_eq!(continuation(" \\"), Some(false));
         assert_eq!(continuation(" \\ /* a */ // b"), Some(false));
         assert_eq!(continuation(" \\\r\n  "), Some(true));
@@ -1629,7 +1875,7 @@ mod tests {
             placed("a {\n    b; c\n}", Some(&[0]), 2, "x"),
             "a {\n    b; c\n    x\n}"
         );
-        assert_eq!(placed("a; b\n", None, 1, "x"), "a;\nx\n b\n");
+        assert_eq!(placed("a; b\n", None, 1, "x"), "a;\nx\nb\n");
         assert_eq!(unplaced("a {\n    b; c\n}", Some(&[0]), 1), "a {\n    b;\n}");
         assert_eq!(unplaced("a { b\n}", Some(&[0]), 0), "a {}");
         assert_eq!(unplaced("a { b\n    c\n}", Some(&[0]), 0), "a {\n    c\n}");
