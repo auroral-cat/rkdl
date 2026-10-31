@@ -866,6 +866,133 @@ def test_a_new_node_goes_below_the_comment_on_the_line_before(text, index, expec
     reads_back(str(d))
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Each place keeps its `;` and its line ending, and the comment goes with a.
+        ("a; // x\nb\n", "b;\na // x\n"),
+        ("a; /* x */ // y\nb\n", "b;\na /* x */ // y\n"),
+        ("b // y\na; // x\n", "a // x\nb; // y\n"),
+        ("p {\n    a; // x\n    b\n}\n", "p {\n    b;\n    a // x\n}\n"),
+        # At the end of a file with no final line ending.
+        ("b\na; // x", "a // x\nb;"),
+        ("a; // x\r\nb\r\n", "b;\r\na // x\r\n"),
+        # The comments that end a node's line go with it the other way too.
+        ("a /* y */\nb; // x\n", "b // x\na; /* y */\n"),
+    ],
+)
+def test_reversing_moves_the_comments_after_a_semicolon_with_their_node(text, expected):
+    d = rkdl.parse(text)
+    _block(d).reverse()
+    assert str(d) == expected
+    reads_back(expected)
+    _block(d).reverse()
+    assert str(d) == text
+    # The comments are where kdl-rs puts them when it reads the text, so formatting treats them as it would there.
+    _block(d).reverse()
+    fresh = rkdl.parse(expected)
+    d.fmt()
+    fresh.fmt()
+    assert str(d) == str(fresh)
+
+
+def test_sorting_moves_the_comments_after_a_semicolon_with_their_node():
+    d = rkdl.parse("c; // about c\nb\na\n")
+    d.children = sorted(d.children, key=lambda n: n.name)
+    assert str(d) == "a;\nb\nc // about c\n"
+    reads_back(str(d))
+    # The comment is where kdl-rs puts it when it reads the text, so formatting treats it as it would there.
+    fresh = rkdl.parse(str(d))
+    fresh.fmt()
+    d.fmt()
+    assert str(d) == str(fresh)
+
+
+@pytest.mark.parametrize(
+    ("text", "index", "expected", "old"),
+    [
+        # The comment after a's `;` is a's, not b's: it stays when b is replaced, and goes when a is.
+        ("a; // x\nb\n", 1, "a; // x\ny\n", "b"),
+        ("a; // x\nb\n", 0, "y;\nb\n", "a; // x"),
+    ],
+)
+def test_replacing_next_to_the_comments_after_a_semicolon(text, index, expected, old):
+    d = rkdl.parse(text)
+    replaced = d.children[index]
+    d.children[index] = N("y")
+    assert str(d) == expected
+    reads_back(expected)
+    assert str(replaced).strip() == old
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a; // x\nb\n", "z\na; // x\n"),
+        ("b\na; // x", "z\na; // x\n"),
+        ("p {\n    a; /* x */\n}\n", "z\na; /* x */\n"),
+    ],
+)
+def test_a_copy_brings_the_comments_after_its_semicolon(text, expected):
+    d = rkdl.parse(text)
+    other = rkdl.parse("z\n")
+    other.children.append(_parent(d)["a"].copy())
+    assert str(other) == expected
+    reads_back(expected)
+    assert str(d) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "edit", "expected"),
+    [
+        # A `//` comment at the end of a file with no final line ending is still the node's.
+        ("b\nc; // x", lambda d: d.children.pop(), "b\n"),
+        ("a; c; // x", lambda d: d.children.pop(), "a;"),
+        ("b\nc; // x", lambda d: d.children.append(N("x")), "b\nc; // x\nx\n"),
+        ("b\nc; // x", lambda d: d.children.insert(0, d.children.pop()), "c; // x\nb\n"),
+        # There the end of the text ends the line, so `/* */` comments count too.
+        ("a;\nc; /* x */", lambda d: d.children.pop(), "a;\n"),
+        ("a; /* x */", lambda d: d.children.append(N("x")), "a; /* x */\nx\n"),
+    ],
+)
+def test_the_comment_after_a_semicolon_at_the_end_of_a_file(text, edit, expected):
+    d = rkdl.parse(text)
+    edit(d)
+    assert str(d) == expected
+    reads_back(expected)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a; b\n", "a;\nx\nb\n"),
+        ("a; /* c */ b\n", "a;\nx\n/* c */ b\n"),
+        ("p {\n    a; b\n}\n", "p {\n    a;\n    x\n    b\n}\n"),
+        # The block's `}` lines up with the parent the same way.
+        ("p {\n    a; }\n", "p {\n    a;\n    x\n}\n"),
+    ],
+)
+def test_a_node_that_followed_on_the_line_starts_the_next_one_cleanly(text, expected):
+    d = rkdl.parse(text)
+    _block(d).insert(1, N("x"))
+    assert str(d) == expected
+    reads_back(expected)
+
+
+@pytest.mark.parametrize(
+    ("new", "expected"),
+    [
+        (N("x"), "a { /* c */\n    x\n}\n"),
+        (N("x", children=[N("y")]), "a { /* c */\n    x {\n        y\n    }\n}\n"),
+    ],
+)
+def test_no_trailing_space_after_a_comment_on_the_brace_line(new, expected):
+    d = rkdl.parse("a { /* c */ }\n")
+    d["a"].children.append(new)
+    assert str(d) == expected
+    reads_back(expected)
+
+
 def test_a_moved_node_s_multi_line_string_keeps_its_lines():
     # Inside strings, the indentation is content: it doesn't move with the node.
     x = rkdl.parse('x """\n  hi\n  """\n').children.pop()

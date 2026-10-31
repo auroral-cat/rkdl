@@ -481,6 +481,20 @@ def line_rest_end(text, i):
     return j + scanner.newline(j) if scanner.newline(j) else i
 
 
+def inserted_before_a_node(old, new, lo, hi):
+    """Whether `new` is `old` with text inserted somewhere in lo..hi, and the spaces from there to a node that went on
+    the same line gone: that node starts the line after the new one."""
+    for q in range(lo, hi + 1):
+        j = q
+        while j < len(old) and old[j] in SPACES:
+            j += 1
+        if j == q or j == len(old) or old[j] in "}/\\" or old.startswith(NEWLINES, j):
+            continue
+        if new.startswith(old[:q]) and new.endswith(old[j:]) and len(new) > q + len(old) - j:
+            return True
+    return False
+
+
 def common_prefix(a, b):
     n = min(len(a), len(b))
     i = 0
@@ -508,7 +522,9 @@ def test_untouched(file, path, edit):
         lo, hi = (span.start, span.core) if edit == "insert_sibling" else (span.body_end, span.end)
         assert len(new) > len(old)
         q_lo, q_hi = max(len(old) - s, lo), min(p, hi)
-        assert q_lo <= q_hi, f"not a pure insertion in {lo}..{hi}: prefix {p}, suffix {s}"
+        assert q_lo <= q_hi or inserted_before_a_node(old, new, lo, hi), (
+            f"not a pure insertion in {lo}..{hi}: prefix {p}, suffix {s}"
+        )
         return
     if edit == "pop":
         lo, hi = span.start, span.end
