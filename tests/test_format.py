@@ -163,7 +163,8 @@ def test_fmt_keeps_the_line_ending_style(eol):
 
 def test_fmt_keeps_the_line_endings_inside_a_string():
     # A CRLF file with a commented-out multi-line string written with LF line endings: those are the string's.
-    # Slashdashed, because then it's text fmt keeps as written; an argument's string is rewritten from its value.
+    # Slashdashed, because fmt keeps the line endings of commented-out text (it does dedent it); an argument's string
+    # is rewritten from its value.
     doc = rkdl.parse('a 1\r\n/-b """\n  keep\n  """\r\nc\r\n')
     doc.fmt()
     out = str(doc)

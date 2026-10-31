@@ -860,6 +860,9 @@ def test_a_node_ending_in_a_semicolon_moves_with_the_comment_on_its_line_into_a_
     d = rkdl.Document()
     d.children.append(rkdl.parse("p {\n    b\n    c; // x\n}\n")["p"].children.pop())
     assert str(d) == "c; // x\n"
+    reads_back(str(d))
+    # Its format records are the ones a parse of that text gives: the comment is where kdl-rs would put it, so fmt
+    # treats it the same. A record that only prints the same (say, the line ending in the wrong field) fails here.
     fresh = rkdl.parse(str(d))
     fresh.fmt()
     d.fmt()
@@ -1128,6 +1131,7 @@ def test_a_node_after_an_open_continuation(text, edit, expected):
     ],
 )
 def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expected):
+    reads_back(expected)
     d = rkdl.parse(text)
     _block(d).pop(index)
     assert str(d) == expected
@@ -1153,6 +1157,7 @@ def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expect
     ],
 )
 def test_a_comment_before_the_closing_brace_after_a_semicolon(text, edit, expected):
+    reads_back(expected)
     d = rkdl.parse(text)
     edit(d)
     assert str(d) == expected

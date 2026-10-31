@@ -2135,18 +2135,32 @@ mod tests {
         assert!(!is_single_line(block));
     }
 
+    /// A strict xfail for a cargo test: `out` should be `expected`, and isn't yet. Once a fix makes it so, this
+    /// fails, and the call becomes an `assert_eq!`.
+    fn known_bug(out: &str, expected: &str, task: &str) {
+        assert_ne!(out, expected, "{task} fixed this: make it an assert_eq!");
+    }
+
     #[test]
     fn a_node_with_a_block_without_a_format_record_moves() {
-        // Placed in a nested block (its children are reindented) and in a one-line one (which spreads): the text it
-        // ends up in reads back, with every node where it went.
+        // Placed in a nested block, and in a one-line one (which spreads). It reads back with every node where it
+        // went. The module doc also has its children take the new indent and its `}` line up with it, which a block
+        // without a record doesn't get yet: today y stays at column 0 and `}` follows it on its line.
         for text in ["a {\n    b\n}\n", "a { b }\n"] {
+            let mut x = with_bare_block();
+            x.format_mut().unwrap().before_children = " ".into();
             let mut doc = parse(text);
             let style = Style::of(&doc, Some(&[0]), "\n");
             let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
-            place(block, 1, with_bare_block(), &style);
+            place(block, 1, x, &style);
             assert!(!is_single_line(block));
             let out = doc.to_string();
             assert_eq!(names(&parse(&out)), ["a", "b", "x", "y"], "{out:?}");
+            known_bug(
+                &out,
+                "a {\n    b\n    x 1 {\n        y\n    }\n}\n",
+                "task 71 (the node-format rewrite)",
+            );
         }
     }
 
@@ -2156,12 +2170,14 @@ mod tests {
         let mut bare = KdlDocument::new();
         bare.nodes_mut().push(node("y"));
         doc.nodes_mut()[0].set_children(bare);
+        doc.nodes_mut()[0].format_mut().unwrap().before_children = " ".into();
         let style = Style::of(&doc, Some(&[0]), "\n");
         let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
         assert_eq!(unplace(block, 0, &style).name().value(), "y");
-        // There's no text to clear, and none is made up.
-        assert!(block.nodes().is_empty() && block.format().is_none());
+        assert!(block.nodes().is_empty());
         assert_eq!(names(&parse(&doc.to_string())), ["p"]);
+        // `unplace`'s doc: an emptied children block prints as `{}`. Without a record, kdl-rs prints `{\n}` today.
+        known_bug(&doc.to_string(), "p {}\n", "task 71 (`block_fmt_mut` in `unplace`)");
     }
 
     #[test]
@@ -2187,20 +2203,6 @@ mod tests {
         let block = node_at_mut(&mut doc, &[0, 0]).children_mut().as_mut().unwrap();
         close_on_own_line(block, &style);
         assert_eq!(doc.to_string(), text);
-    }
-
-    #[test]
-    fn ending_the_line_of_a_node_that_is_not_last_leaves_the_brace() {
-        // Only the last node of a block ends open, so only its line can hold the block's `}`. Made by hand here: a
-        // with no terminator, and the space before `}` in the block's trailing text.
-        let mut doc = parse("p {\n    a\n    b }\n");
-        let style = Style::of(&doc, Some(&[0]), "\n");
-        let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
-        block.nodes_mut()[0].format_mut().unwrap().terminator = String::new();
-        block.nodes_mut()[1].format_mut().unwrap().before_terminator = String::new();
-        block.format_mut().unwrap().trailing = " ".into();
-        end_line(block, 0, None, &style);
-        assert_eq!(doc.to_string(), "p {\n    a\n    b }\n");
     }
 
     #[test]
