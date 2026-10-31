@@ -40,6 +40,7 @@ dev = [
     "hypothesis>=6.168.5",
     "mypy>=2.4.1",
     "pytest",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.17.3",
 ]
 
@@ -52,6 +53,15 @@ exclude = [
     { path = "tests/kdl-spec/**/*", format = "sdist" },
     { path = ".github/**/*", format = "sdist" },
 ]
+
+[tool.pytest.ini_options]
+# So a hang fails the run instead of freezing it. The slowest test takes about 30 s on a loaded 4-CPU machine; the
+# limit stays above the thread tests' own 60 s guard so their deadlock message gets out first. The thread method
+# because a hang inside the extension, with the GIL released, never returns to Python to see a signal; it ends the
+# whole run, after dumping every thread's stack. The long Hypothesis profile runs TestEditSequences for over 10
+# minutes: run it with PYTEST_TIMEOUT=1800.
+timeout = 120
+timeout_method = "thread"
 
 [tool.ruff]
 line-length = 120
