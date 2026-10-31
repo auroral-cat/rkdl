@@ -433,15 +433,12 @@ def test_a_node_ending_in_a_semicolon_fits_a_one_line_block():
 
 
 def test_a_node_ending_in_a_continuation_spreads_a_one_line_block():
-    # Nothing can follow its `\` on the line, so it can't go before the `}`. Where the closing `;` goes isn't pinned:
-    # task 63 indents it, and then this can check the exact text.
+    # Nothing can follow its `\` on the line, so it can't go before the `}`. The `;` that ends it goes at its indent.
     x = rkdl.parse("n 1 \\").children.pop()
     d = rkdl.parse("a { b }\n")
     d["a"].children.append(x)
-    out = str(d)
-    assert out.startswith("a {\n    b\n    n 1 \\\n")
-    assert out.endswith("\n}\n")
-    assert [n.name for n in rkdl.parse(out)["a"].children] == ["b", "n"]
+    assert str(d) == "a {\n    b\n    n 1 \\\n    ;\n}\n"
+    reads_back(str(d))
 
 
 def test_a_block_with_a_multi_line_string_is_not_one_line():
@@ -877,16 +874,18 @@ def test_a_moved_node_s_multi_line_string_keeps_its_lines():
     assert str(d) == 'a {\n    b\n    x """\n  hi\n  """\n}\n'
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="task 63: lines inside a moved node's own text (continuations, slashdashed blocks) keep their old indent",
-)
+# A moved node's own lines (`\` continuations, comments and slashdashed parts after its entries) shift with it, as
+# its children do, but not the lines of strings in them.
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
         ("x 1 /-{\n    y\n}\n", "a {\n    b\n    x 1 /-{\n        y\n    }\n}\n"),
         ("x \\\n    1\n", "a {\n    b\n    x \\\n        1\n}\n"),
+        ("x \\ // c\n    1\n", "a {\n    b\n    x \\ // c\n        1\n}\n"),
+        ("x 1 /* a\n   b */\n", "a {\n    b\n    x 1 /* a\n       b */\n}\n"),
+        ('x 1 /-"""\n  a\n  """\n', 'a {\n    b\n    x 1 /-"""\n  a\n  """\n}\n'),
+        ('x \\\n    """\n  a\n  """\n', 'a {\n    b\n    x \\\n        """\n  a\n  """\n}\n'),
+        ("x {\n    y \\\n        1\n}\n", "a {\n    b\n    x {\n        y \\\n            1\n    }\n}\n"),
     ],
 )
 def test_a_moved_node_s_own_lines_take_the_new_indent(source, expected):
@@ -894,14 +893,59 @@ def test_a_moved_node_s_own_lines_take_the_new_indent(source, expected):
     d = rkdl.parse("a {\n    b\n}\n")
     d["a"].children.append(x)
     assert str(d) == expected
+    reads_back(expected)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="task 63: spreading a one-line block leaves `}` after the comment before it, off the parent's indent",
-)
+def test_a_node_moved_out_of_a_block_takes_the_shallower_indent():
+    x = rkdl.parse("p {\n    x \\\n        1 /-{\n            y\n        }\n}\n")["p"].children.pop()
+    d = rkdl.parse("q\n")
+    d.children.append(x)
+    assert str(d) == "q\nx \\\n    1 /-{\n        y\n    }\n"
+    reads_back(str(d))
+
+
 def test_spreading_a_one_line_block_puts_its_closing_comment_on_a_line():
+    # The comment goes at the nodes' indent, and `}` lines up with the parent.
     d = rkdl.parse("a { b; /* c */ }\n")
     d["a"].children.append(N("x", children=[N("y")]))
     assert str(d) == "a {\n    b\n    x {\n        y\n    }\n    /* c */\n}\n"
+    reads_back(str(d))
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [
+        ("x 1 // c", "q\n", "q\nx 1 // c\n"),
+        ("x 1 // c", "a { b }\n", "a {\n    b\n    x 1 // c\n}\n"),
+        ("x 1 //\n", "q\n", "q\nx 1 //\n"),
+        ("x 1 //\n", "a { b }\n", "a {\n    b\n    x 1 //\n}\n"),
+    ],
+)
+def test_a_moved_node_keeps_the_comment_that_ends_it(source, target, expected):
+    x = rkdl.parse(source).children.pop()
+    d = rkdl.parse(target)
+    (d["a"] if target.startswith("a") else d).children.append(x)
+    assert str(d) == expected
+    reads_back(expected)
+
+
+# A node ending in a `\` continuation carries on onto the next line, so a node after it needs a `;` there first, at
+# the node's indent.
+
+
+@pytest.mark.parametrize(
+    ("text", "edit", "expected"),
+    [
+        ("a {\n    n 1 \\\n}\n", lambda d: d["a"].children.append(N("x")), "a {\n    n 1 \\\n    ;\n    x\n}\n"),
+        # Its line ending is there already: it's the `;` that's missing, not a blank line.
+        ("x 1 \\\n", lambda d: d.children.append(N("z")), "x 1 \\\n;\nz\n"),
+        ("y\nx 1 \\\n", lambda d: d.children.reverse(), "x 1 \\\n;\ny\n"),
+        # A comment after the `\` doesn't end it.
+        ("x 1 \\ // c", lambda d: d.children.append(N("z")), "x 1 \\ // c\n;\nz\n"),
+    ],
+)
+def test_a_node_after_an_open_continuation(text, edit, expected):
+    d = rkdl.parse(text)
+    edit(d)
+    assert str(d) == expected
+    reads_back(expected)

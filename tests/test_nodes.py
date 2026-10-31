@@ -138,8 +138,9 @@ def test_text_around_a_node_annotation_moves_with_the_node():
     node = doc["a"].children.pop(0)
     other = rkdl.parse("z\n")
     other.children.append(node)
-    # Line endings follow the new document. Like a continuation between entries, the next line keeps its indent.
-    assert str(other) == "z\n( t ) \\\n    b 1\n"
+    # Line endings follow the new document. Like a continuation between entries, the next line shifts with the node,
+    # from an indent of 4 to none.
+    assert str(other) == "z\n( t ) \\\nb 1\n"
     assert other["b"].type == "t"
 
 
