@@ -1202,3 +1202,16 @@ pub(crate) fn _debug_from_python(
         encoded.ty,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::reads_back_as;
+
+    #[test]
+    fn a_property_doesnt_read_back_as_its_value() {
+        // A spelling that parses as `key=value` holds the value, but printed in an argument's place it would make a
+        // property instead.
+        assert!(reads_back_as("\"k=v\"", "k=v"));
+        assert!(!reads_back_as("k=v", "v"));
+    }
+}

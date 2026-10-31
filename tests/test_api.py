@@ -280,6 +280,7 @@ def test_writing_another_float_zero_is_a_write():
         ('n """\n  a\n  b\n  """', "c\nd", 'n """\n  c\n  d\n  """'),
         ('n """\n    a\n    """', 'say """hi"""\n', 'n """\n    say ""\\"hi""\\"\n\n    """'),
         ('n #"""\n  a\n  """#', "c\\n\nd", 'n #"""\n  c\\n\n  d\n  """#'),
+        ('n """\n  a\n  """', "C:\\dir\nD:\\dir", 'n """\n  C:\\\\dir\n  D:\\\\dir\n  """'),
         # A multi-line string without a line break in the new value goes on one line, staying raw if it was.
         ('n """\n  a\n  """', "b", 'n "b"'),
         ('n #"""\n  a\n  """#', "b", 'n #"b"#'),
@@ -318,6 +319,11 @@ def test_multi_line_strings_keep_crlf():
         ("n +1", -2, "n -2"),
         ("n 1.5e10", 2.5e-7, "n 2.5e-7"),
         ("n 1E+3", 2.0e5, "n 2E+5"),
+        # The `+` goes with the exponent's sign: a negative one has none.
+        ("n 1.5E+3", 2.5e-4, "n 2.5E-4"),
+        # A `+` in front stays while the number is positive.
+        ("n +1.5e3", 2.0e5, "n +2e5"),
+        ("n +1.5e3", -2.0e5, "n -2e5"),
         ("n 1.5e10", float("inf"), "n #inf"),
         ("n 1.5", 2.25, "n 2.25"),
         ("n 0x10", 1.5, "n 1.5"),
@@ -339,6 +345,13 @@ def test_props_and_annotations_keep_their_spelling():
     assert str(doc) == 'n "k"=0x2 ("t")"w" (u16)0x100'
     n.args.entry(0).type = "other"
     assert str(doc) == 'n "k"=0x2 ("other")"w" (u16)0x100'
+
+
+def test_a_quoted_name_escapes_a_backslash():
+    doc, n = node('"src/main.rs" lines=120')
+    n.name = "src\\main.rs"
+    assert str(doc) == '"src\\\\main.rs" lines=120'
+    assert rkdl.parse(str(doc)).children[0].name == "src\\main.rs"
 
 
 def test_quoted_names_keys_and_types_stay_quoted():

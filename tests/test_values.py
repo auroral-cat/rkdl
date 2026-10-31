@@ -315,6 +315,7 @@ def test_an_unknown_annotation_stays_over_a_non_plain_value(value, text):
         (float("inf"), "u8", "inf doesn't fit (u8): expected an integer"),
         (300.0, "u8", "300.0 doesn't fit (u8): out of range 0..=255"),
         (1e40, "i128", "1e+40 doesn't fit (i128): out of range"),
+        (-1e40, "i128", "-1e+40 doesn't fit (i128): out of range"),
     ],
 )
 def test_a_number_out_of_its_types_range_raises(value, current, message):
@@ -425,6 +426,13 @@ def test_user_encode_must_return_plain():
         from_python(Celsius(1), None, [bad])
 
 
+def test_user_encode_returning_an_int_outside_i128_overflows():
+    # What encode returns is written as a plain value would be, so the same limit applies.
+    too_fine = rkdl.Type("celsius", Celsius, decode=Celsius, encode=lambda c: c.degrees * 10**40)
+    with pytest.raises(OverflowError, match=re.escape("int doesn't fit in a KDL integer (i128)")):
+        from_python(Celsius(1), None, [too_fine])
+
+
 def test_user_decode_errors_are_the_cause():
     def decode(value):
         raise RuntimeError("nope")
@@ -438,13 +446,16 @@ def test_user_decode_errors_are_the_cause():
 
 
 def test_type_requires_callables():
-    with pytest.raises(TypeError):
-        rkdl.Type("x", int, decode=1, encode=int)
+    for decode, encode in [(1, int), (int, 1)]:
+        with pytest.raises(TypeError, match="^Type decode and encode must be callable$"):
+            rkdl.Type("x", int, decode=decode, encode=encode)
 
 
 def test_type_attributes():
     assert CELSIUS.name == "celsius"
     assert CELSIUS.cls is Celsius
+    assert CELSIUS.decode is Celsius
+    assert CELSIUS.encode(Celsius(3)) == 3
 
 
 def test_type_is_immutable():
@@ -529,6 +540,72 @@ def test_decimal64_reads_digits_from_the_text():
     assert to_python(f"(decimal128){digits}") == decimal.Decimal(digits)
     assert to_python("(decimal64)1_000.000_1") == decimal.Decimal("1000.0001")
     assert to_python("(decimal64)0x10") == decimal.Decimal(16)
+
+
+# Task 66: errors in Python's or the decimal module's words, or a value that should be refused and isn't.
+
+TASK_66 = "task 66: "
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=re.error,
+    reason=TASK_66 + "the flagless recompile fails on a VERBOSE comment, and re.error isn't a ValueError",
+)
+def test_a_verbose_regex_whose_comment_doesnt_compile_without_the_flag_is_refused():
+    pattern = re.compile(r"\d+  # digits (optional", re.VERBOSE)
+    with pytest.raises(ValueError, match=re.escape("can't write a regex compiled with re.VERBOSE")):
+        from_python(pattern)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=TASK_66 + "the ValueError has Python's words, 'cannot convert signaling NaN to float'",
+)
+@pytest.mark.parametrize("snan", ["sNaN", "-sNaN"])
+def test_a_signaling_nan_doesnt_fit_decimal64(snan):
+    with pytest.raises(ValueError, match=re.escape(f"Decimal('{snan}') doesn't fit (decimal64): ")):
+        from_python(decimal.Decimal(snan), "decimal64")
+
+
+# The reason the write side gives for a decimal64 or decimal128 past the f64 range; a read gives the same one.
+DECIMAL_RANGE = "out of range ±1.7976931348623157e+308"
+
+
+@pytest.mark.xfail(
+    strict=True, raises=rkdl.ReadError, reason=TASK_66 + "decimal refuses the exponent, though the value is zero"
+)
+@pytest.mark.parametrize(
+    ("text", "signed"),
+    [("0.0e99999999999999999999", False), ("-0.0e99999999999999999999", True), ("0e1000000000000000000", False)],
+)
+def test_a_decimal64_zero_with_an_exponent_past_what_decimal_takes_reads_as_zero(text, signed):
+    read = rkdl.parse(f"n (decimal64){text}\n")["n"].args[0]
+    assert read == decimal.Decimal(0)
+    assert read.is_signed() == signed
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason=TASK_66 + "the reason is decimal's [<class 'decimal.InvalidOperation'>]"
+)
+def test_a_decimal64_exponent_past_what_decimal_takes_is_refused_for_it():
+    # Tiny, not past the f64 range: the reason is the exponent, in words task 66 picks.
+    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
+    err = read_error(lambda n: n.args[0], n)
+    assert type(err) is rkdl.ReadError
+    assert "exponent" in reason(err)
+
+
+@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=TASK_66 + "it reads as Decimal('Infinity')")
+@pytest.mark.parametrize("ty", ["decimal64", "decimal128"])
+def test_a_decimal_number_literal_past_the_f64_range_doesnt_fit(ty):
+    n = rkdl.parse(f"n ({ty})1e400\n")["n"]
+    assert reason(read_error(lambda n: n.args[0], n)) == DECIMAL_RANGE
+    # The same reason as the write side's.
+    with pytest.raises(ValueError) as info:
+        from_python(decimal.Decimal("1e400"), ty)
+    assert reason(info.value) == DECIMAL_RANGE
 
 
 def test_decimal64_out_of_the_f64_range_doesnt_fit():
@@ -858,6 +935,10 @@ def test_a_decode_that_raises_a_base_exception_propagates():
     doc = rkdl.Parser(types=[stop]).parse("t (celsius)1\n")
     with pytest.raises(Stop):
         doc["t"].args[0]
+    # Writing a plain value over the annotation asks decode whether it fits, and that propagates too.
+    with pytest.raises(Stop):
+        doc["t"].args.append(rkdl.Value(2, type="celsius"))
+    assert str(doc) == "t (celsius)1\n"
 
 
 def test_setting_a_type_the_value_doesnt_fit_says_so_without_a_place():
@@ -1025,6 +1106,9 @@ MISFITS = {
     "bad date": ("date", '"May 6th"', "May 6th", "expected an ISO 8601 date, like 2026-01-31"),
     "month out of range": ("date", '"2026-13-01"', "2026-13-01", "month must be in 1..12, not 13"),
     "day out of range": ("date", '"2026-02-30"', "2026-02-30", "day must be in 1..28, not 30"),
+    # Gregorian leap years: every fourth year, except centuries, except every fourth century.
+    "Feb 29 in a century": ("date", '"2100-02-29"', "2100-02-29", "day must be in 1..28, not 29"),
+    "Feb 30 in a fourth century": ("date", '"2000-02-30"', "2000-02-30", "day must be in 1..29, not 30"),
     "year 0": ("date", '"0000-01-01"', "0000-01-01", "year must be in 1..9999, not 0"),
     "bad date-time": ("date-time", '"soon"', "soon", "expected an ISO 8601 date-time, like 2026-01-31T09:30:00"),
     "minute out of range": ("date-time", '"2026-01-01T12:60"', "2026-01-01T12:60", "minute must be in 0..59, not 60"),
@@ -1085,6 +1169,8 @@ def test_a_misfit_has_one_reason_on_every_route(ty, text, value, why):
     [
         # Misfits only a write makes: a file can't hold a Python object.
         (datetime.datetime(2029, 1, 1, 10), "date", "would lose its time"),
+        # Only a datetime has a time to lose; any other class is just not a date.
+        (datetime.time(9, 30), "date", "expected a date"),
         (datetime.date(2029, 1, 1), "celsius", "expected a Celsius"),
     ],
 )
