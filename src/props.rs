@@ -1,5 +1,5 @@
 use pyo3::PyTraverseError;
-use pyo3::exceptions::{PyKeyError, PyTypeError};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
@@ -65,8 +65,8 @@ fn pairs<'py>(
                 add(&key, other.get_item(&key)?)?;
             }
         } else {
-            for pair in other.try_iter()? {
-                let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = pair?.extract()?;
+            for (index, pair) in other.try_iter()?.enumerate() {
+                let [key, value] = two_items(&pair?, index)?;
                 add(&key, value)?;
             }
         }
@@ -75,6 +75,28 @@ fn pairs<'py>(
         add(&key, value)?;
     }
     Ok(pairs)
+}
+
+/// A pair is any iterable of two items, as for a dict: pairs loaded from JSON are lists. `index` is the pair's place
+/// in what the caller passed, for the error.
+fn two_items<'py>(pair: &Bound<'py, PyAny>, index: usize) -> PyResult<[Bound<'py, PyAny>; 2]> {
+    let items = match pair.try_iter() {
+        Ok(items) => items,
+        Err(e) if e.is_instance_of::<PyTypeError>(pair.py()) => {
+            return Err(PyTypeError::new_err(format!(
+                "item {index} is not a (key, value) pair: it isn't iterable"
+            )));
+        }
+        Err(e) => return Err(e),
+    };
+    // All of it, like a dict, so the error can say how long it was.
+    let items = items.collect::<PyResult<Vec<_>>>()?;
+    <[_; 2]>::try_from(items).map_err(|items| {
+        let len = items.len();
+        PyValueError::new_err(format!(
+            "item {index} is not a (key, value) pair: it has length {len}, not 2"
+        ))
+    })
 }
 
 /// Writes every pair in one edit: a key that's there gets its value written as `props[key] = value` would, and a new
@@ -307,7 +329,8 @@ impl Props {
         )
     }
 
-    /// Sets properties from a mapping or an iterable of pairs, and from keyword arguments.
+    /// Sets properties from a mapping or an iterable of pairs, and from keyword arguments. A pair is any iterable of two
+    /// items, such as a tuple or a list.
     ///
     /// If any value can't be converted, nothing changes.
     #[pyo3(signature = (other=None, /, **kwargs))]

@@ -722,7 +722,8 @@ class Props(MutableMapping[str, Any]):
         """
     @overload
     def update(self, other: _SupportsKeysAndGetItem, /, **kwargs: Any) -> None:
-        """Sets properties from a mapping or an iterable of pairs, and from keyword arguments.
+        """Sets properties from a mapping or an iterable of pairs, and from keyword arguments. A pair is any iterable of two
+        items, such as a tuple or a list.
 
         If any value can't be converted, nothing changes.
         """
