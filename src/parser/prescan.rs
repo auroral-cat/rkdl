@@ -889,6 +889,8 @@ mod tests {
             ("a \"\\u41}\"", 3, "Invalid escape in a string"),
             ("a \"\\u{d800}\"", 3, "Invalid escape in a string"),
             ("a \"\\u{1F600\"", 3, "Invalid escape in a string"),
+            // At most six digits, though seven could still spell U+0041.
+            ("a \"\\u{0000041}\"", 3, "Invalid escape in a string"),
             ("a \"\"\"\n  \\q\n  \"\"\"", 8, "Invalid escape in a string"),
             ("a \"x\ny\"", 4, "Line break in a single-line string"),
             ("a #\"x\ny\"#", 5, "Line break in a single-line raw string"),
@@ -1026,6 +1028,7 @@ mod tests {
             "a \"\\u{41} \\s\"",
             "\u{feff}a",
             "a {}; b {} /- {}",
+            "a {\n}\nb",
         ] {
             assert!(text.parse::<kdl::KdlDocument>().is_ok(), "{text:?}");
             let scan = scan(text);
