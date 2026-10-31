@@ -1144,7 +1144,7 @@ fn spread(block: &mut KdlDocument, parent_indent: &str, unit: &str, eol: &str) {
         f.trailing.clear();
     }
     let f = block_fmt_mut(block);
-    // unreachable: a one-line block's leading text is blank
+    // unreachable: a one-line block's leading text is blank.
     // What's before its first node is that node's (kdl-rs). rkdl writes a block's leading text only into an empty
     // block, or a line ending into one it fills, so neither is one-line. The check keeps a comment if that changes.
     if is_blank(&f.leading) {
@@ -1175,7 +1175,7 @@ fn sibling_indent(block: &KdlDocument, index: usize) -> Option<String> {
 fn close_on_own_line(block: &mut KdlDocument, style: &Style) {
     if let Some(parent) = &style.parent {
         let f = block_fmt_mut(block);
-        // unreachable: the trailing text here never holds a line ending
+        // unreachable: the trailing text here never holds a line ending.
         // Blank with a line ending, it's the rest of the last node's line, which every caller takes first. kdl-rs
         // puts the line ending after a node with no terminator in the node.
         if is_blank(&f.trailing) && !f.trailing.contains(NEWLINES) {
@@ -1195,7 +1195,7 @@ fn end_line(block: &mut KdlDocument, index: usize, rest: Option<String>, style: 
             // Spaces that came before a `}` would now end the line.
             split_closing(node);
             fmt_mut(node, style.eol).terminator = style.eol.into();
-            // unreachable: only the last node of a block ends open
+            // unreachable: only the last node of a block ends open.
             // Every other one ends with a terminator, which rkdl puts back after a `}` when parsing, and every edit
             // keeps.
             if last {
@@ -1298,7 +1298,7 @@ fn place_at(
     f.leading = format!("{gap}{start}{indent}{own}");
     // The comments on the line of a node that ends in `;` go after it, where kdl-rs reads them, for the same reason.
     let rest = (f.terminator == ";" && !is_blank(&f.trailing)).then(|| std::mem::take(&mut f.trailing));
-    // unreachable: only a `;` node's trailing text holds comments, and those were just taken
+    // unreachable: only a `;` node's trailing text holds comments, and those were just taken.
     // `take` and `drop_gap` put the rest of its line there. The check keeps others from being dropped if that changes.
     if is_blank(&f.trailing) {
         f.trailing.clear();
@@ -1650,7 +1650,7 @@ fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bo
             owns.get(from).and_then(Option::as_ref),
             block.nodes().get(from),
         );
-        // unreachable-start: `places` and `from` are places in this block
+        // unreachable-start: `places` and `from` are places in this block.
         // `reverse` makes them from its length, `children::reorder` from the block's own nodes.
         let (Some(slot), Some(own), Some(node)) = fits else {
             return false;
