@@ -359,24 +359,29 @@ class Step(int):
         return then
 
 
+class Renumbered(int):
+    """An int whose conversions all give another number."""
+
+    def __index__(self):
+        return 99
+
+    def __int__(self):
+        return 99
+
+
 @pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param(
-            Rotating(0xA5),
-            marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 69: its >> gives a wrong int"),
-        ),
-        pytest.param(Step(7), marks=pytest.mark.xfail(strict=True, raises=TypeError, reason="task 69: its >> runs")),
-    ],
-    ids=["Rotating", "Step"],
+    ("value", "base"),
+    [(Rotating(0xA5), 0xA5), (Step(7), 7), (Renumbered(7), 7)],
+    ids=["Rotating", "Step", "Renumbered"],
 )
-def test_an_int_subclass_writes_its_value_whatever_its_shift_does(value):
-    # An int is written as its value; an operator the class gives its own meaning has nothing to do with that.
+def test_an_int_subclass_writes_its_value_whatever_its_shift_does(value, base):
+    # An int is written as its value; an operator or conversion the class gives its own meaning has nothing to do
+    # with that.
     doc = rkdl.parse("n 1 (u8)1\n")
     doc["n"].args[0] = value
-    assert str(doc) == f"n {int(value)} (u8)1\n"
+    assert str(doc) == f"n {base} (u8)1\n"
     doc["n"].args[1] = value
-    assert str(doc) == f"n {int(value)} (u8){int(value)}\n"
+    assert str(doc) == f"n {base} (u8){base}\n"
 
 
 def test_lone_surrogate_raises_value_error():
@@ -595,37 +600,68 @@ class Stamp(datetime.date):
         return self.strftime("%d/%m/%Y")
 
 
-def task69(row, *, ids, why):
-    return pytest.param(
-        *row, id=ids, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"task 69: {why}")
-    )
+class Moment(datetime.datetime):
+    def isoformat(self, sep="T", timespec="auto"):
+        return self.strftime("%d/%m/%Y %H:%M")
+
+
+class Clock(datetime.time):
+    def isoformat(self, timespec="auto"):
+        return self.strftime("%I:%M %p")
+
+
+class Shout(float):
+    def __float__(self):
+        return 99.0
+
+    def __repr__(self):
+        return "99.0"
+
+
+class Host(ipaddress.IPv4Address):
+    def __str__(self):
+        return "localhost"
+
+
+class Host6(ipaddress.IPv6Address):
+    def __str__(self):
+        return "localhost"
+
+
+class Short(uuid.UUID):
+    def __str__(self):
+        return self.hex[:8]
+
+
+class Blob(bytes):
+    # Python 3.12+ lets a class give its own buffer.
+    def __buffer__(self, flags):
+        return memoryview(b"other")
 
 
 @pytest.mark.parametrize(
     ("old", "value", "base"),
     [
-        task69(("(f64)1.0", Ninety(1), 1), ids="int __float__", why="its __float__ is called"),
-        task69(
-            ("(decimal64)1.0", FloatPrice("1.50"), decimal.Decimal("1.50")),
-            ids="Decimal __float__",
-            why="its __float__ is called",
+        pytest.param("(f64)1.0", Ninety(1), 1, id="int __float__"),
+        pytest.param("(decimal64)1.0", FloatPrice("1.50"), decimal.Decimal("1.50"), id="Decimal __float__"),
+        pytest.param("(decimal64)1.0", Price("1.50"), decimal.Decimal("1.50"), id="Decimal __str__ over decimal64"),
+        pytest.param('(decimal)"1.0"', Price("1.50"), decimal.Decimal("1.50"), id="Decimal __str__ over decimal"),
+        pytest.param("1.0", Price("1.50"), decimal.Decimal("1.50"), id="Decimal __str__"),
+        pytest.param("(f64)1.0", Shout(1.5), 1.5, id="float __float__"),
+        pytest.param("1.0", Shout(1.5), 1.5, id="float __repr__"),
+        pytest.param('(date)"2026-01-01"', Stamp(2026, 10, 31), datetime.date(2026, 10, 31), id="date isoformat"),
+        pytest.param("1", Stamp(2026, 10, 31), datetime.date(2026, 10, 31), id="date isoformat inferred"),
+        pytest.param(
+            '(date-time)"2026-01-01T00:00:00"',
+            Moment(2026, 10, 31, 9, 30),
+            datetime.datetime(2026, 10, 31, 9, 30),
+            id="datetime isoformat",
         ),
-        task69(
-            ("(decimal64)1.0", Price("1.50"), decimal.Decimal("1.50")),
-            ids="Decimal __str__ over decimal64",
-            why="its __str__ is written",
-        ),
-        task69(
-            ('(decimal)"1.0"', Price("1.50"), decimal.Decimal("1.50")),
-            ids="Decimal __str__ over decimal",
-            why="its __str__ is written",
-        ),
-        task69(("1.0", Price("1.50"), decimal.Decimal("1.50")), ids="Decimal __str__", why="its __str__ is written"),
-        task69(
-            ('(date)"2026-01-01"', Stamp(2026, 10, 31), datetime.date(2026, 10, 31)),
-            ids="date isoformat",
-            why="its isoformat is called",
-        ),
+        pytest.param("1", Clock(9, 30), datetime.time(9, 30), id="time isoformat"),
+        pytest.param("1", Host("10.0.0.1"), ipaddress.IPv4Address("10.0.0.1"), id="IPv4Address __str__"),
+        pytest.param("1", Host6("fe80::1%eth0"), ipaddress.IPv6Address("fe80::1%eth0"), id="IPv6Address __str__"),
+        pytest.param("1", Short(int=5), uuid.UUID(int=5), id="UUID __str__"),
+        pytest.param("1", Blob(b"ab"), b"ab", id="bytes __buffer__"),
     ],
 )
 def test_a_subclass_is_written_as_its_base_types_value(old, value, base):
@@ -637,6 +673,54 @@ def test_a_subclass_is_written_as_its_base_types_value(old, value, base):
 
     assert written(value) == written(base)
     assert rkdl.parse(written(value))["n"].args[0] == base
+
+
+def test_a_str_subclass_fits_where_its_value_does():
+    class Text(str):
+        def __str__(self):
+            return "whenever"
+
+    doc = rkdl.parse('n (date)"2026-01-01"\n')
+    doc["n"].args[0] = Text("2026-10-31")
+    assert str(doc) == 'n (date)"2026-10-31"\n'
+    assert doc["n"].args[0] == datetime.date(2026, 10, 31)
+
+
+# The thread's decimal context belongs to the program; a file reads the same whatever it says.
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        ('(decimal)"weekly"', "expected a decimal number, like 1.25"),
+        ("(decimal64)1e-99999999999999999999", "exponent past what Python's decimal takes"),
+        ("(decimal128)1e-99999999999999999999", "exponent past what Python's decimal takes"),
+    ],
+)
+def test_a_decimal_misfit_is_refused_whatever_the_threads_context(text, why):
+    with decimal.localcontext() as context:
+        context.traps[decimal.InvalidOperation] = False
+        n = rkdl.parse(f"n {text}\n")["n"]
+        err = read_error(lambda n: n.args[0], n)
+    assert type(err) is rkdl.ReadError
+    assert reason(err) == why
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ('(decimal)"3.14159265358979323846264338327950288"', decimal.Decimal("3.14159265358979323846264338327950288")),
+        ("(decimal64)123456.789", decimal.Decimal("123456.789")),
+        ("(decimal128)1e-400", decimal.Decimal("1e-400")),
+        ("(decimal64)0.0e99999999999999999999", decimal.Decimal(0)),
+    ],
+)
+def test_a_decimal_reads_the_same_whatever_the_threads_context(text, value):
+    # A tiny precision and exponent range, with every trap set.
+    with decimal.localcontext(decimal.Context(prec=2, Emax=10, Emin=-10, traps=list(decimal.Context().flags))):
+        read = to_python(text)
+    assert type(read) is decimal.Decimal
+    assert str(read) == str(value)
 
 
 def test_decimal64_reads_digits_from_the_text():
