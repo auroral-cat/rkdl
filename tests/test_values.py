@@ -1219,11 +1219,12 @@ def test_a_recursion_error_from_decode_isnt_wrapped():
     assert str(doc) == "t (celsius)1\n"
 
 
-# A decode that reads its own entry recurses through rkdl until something stops it. Wrapping each level's
-# RecursionError in a ReadError doubled the message per level, until memory ran out; on 3.14 the wrapping also
-# overflowed the C stack of a debug build. A subprocess, with its memory capped, so a crash fails only this test. At
-# Python's default limit: before rkdl stopped hooks 200 deep (task 76), a debug build overflowed 8 MB of C stack first.
-ENDLESS_DECODE = """
+# Hooks that recurse through rkdl, each level reading or writing the same entry, stop at Python's recursion limit
+# with its RecursionError (task 77), at the default limit. Wrapping each level's RecursionError in a ReadError
+# doubled the message per level, until memory ran out (task 73); an unoptimized build overflowed the C stack first
+# (task 76), which the dev profile's opt-level 1 fixes. A subprocess, with its memory capped, so a crash fails only
+# this test.
+ENDLESS_HOOKS = """
 import sys
 try:
     import resource
@@ -1231,21 +1232,53 @@ try:
 except ImportError:
     pass
 import rkdl
-def decode(value):
+class Celsius:
+    def __init__(self, degrees):
+        self.degrees = degrees
+calls = 0
+def count():
+    global calls
+    calls += 1
+def read(value):
+    count()
     return doc["n"].args[0]
-doc = rkdl.Parser(types=[rkdl.Type("loop", object, decode=decode, encode=lambda v: v)]).parse("n (loop)1\\n")
+def write_back(value):
+    count()
+    doc["n"].args[0] = value
+    return Celsius(value)
+def encode(c):
+    count()
+    doc["n"].args[0] = c
+    return c.degrees
+case = sys.argv[1]
+if case == "read":
+    types, value = [rkdl.Type("t", object, decode=read, encode=str)], None
+elif case == "encode":
+    types, value = [rkdl.Type("t", Celsius, decode=Celsius, encode=encode)], Celsius(2)
+else:
+    types, value = [rkdl.Type("t", Celsius, decode=write_back, encode=lambda c: c.degrees)], 2
+doc = rkdl.Parser(types=types).parse("n (t)1\\n")
 try:
-    doc["n"].args[0]
+    if value is None:
+        doc["n"].args[0]
+    else:
+        doc["n"].args[0] = value
 except RecursionError:
-    print("RecursionError")
+    print("RecursionError", calls)
 """
 
 
-def test_a_decode_that_recurses_without_end_raises_recursion_error():
-    command = [sys.executable, "-c", ENDLESS_DECODE]
+# The decode that reads, the encode that writes, and the decode a plain value written goes through: writes take the
+# most C stack a level.
+@pytest.mark.parametrize("case", ["read", "encode", "write-side decode"])
+def test_hooks_that_recurse_without_end_raise_recursion_error_at_pythons_limit(case):
+    command = [sys.executable, "-c", ENDLESS_HOOKS, case]
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout == "RecursionError\n"
+    name, calls = result.stdout.split()
+    assert name == "RecursionError"
+    # Python's default limit of 1000 frames stopped it, not a limit of rkdl's.
+    assert int(calls) > 900
 
 
 # A decode's exception is quoted by its message, at most 200 characters of it; the whole exception is the __cause__
@@ -1273,8 +1306,8 @@ def test_a_decodes_exception_is_quoted_by_its_message_cut_short(raised, reason):
 # Decodes that read their own entry, where the deepest catches the RecursionError and raises a ValueError: every level
 # above fails, each with a ReadError quoting the one below. Quoting each one's repr doubled the message per level, so
 # memory ran out long before the top. Its message stays short; the chain is all there as __cause__s. A subprocess with
-# its memory capped, so a crash fails only this test. Before rkdl stopped hooks 200 deep (task 76), a debug build on
-# 3.14 ran out of C stack first, and the deepest wrapping, which runs kdl-rs's parser, overflowed what Python leaves.
+# its memory capped, so a crash fails only this test. At Python's default limit: unoptimized, the deepest wrapping,
+# which runs kdl-rs's parser, overflowed the C stack (task 76).
 FAILING_DECODE_CHAIN = """
 import json
 import sys
@@ -1311,8 +1344,8 @@ def test_a_chain_of_failing_decodes_ends_in_a_short_message():
     assert top_type == below_type == "ReadError"
     assert top == place + "ReadError(" + repr(below[:200] + "…") + ")"
     assert last_two == [["ReadError", place + "ValueError('too deep')"], ["ValueError", "too deep"]]
-    # 200 ReadErrors, one per decode, and the ValueError.
-    assert seen["depth"] == 201
+    # A ReadError per decode, as deep as Python's limit, and the ValueError.
+    assert seen["depth"] > 900
 
 
 # A decode that reprs its own node's args: catching the RecursionError there kept the recursion going until the
@@ -1340,48 +1373,6 @@ def test_a_repr_that_recurses_through_decode_raises_recursion_error():
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout == "RecursionError\n"
-
-
-# Python before 3.14 doesn't count the C stack rkdl's frames take between hooks: up to 20 kB a level in a debug build,
-# writing. So rkdl stops hooks 200 deep on a thread (task 76). The recursions here stop by themselves a little past
-# that, so without the stop the test fails instead of the stack.
-HOOKS_TOO_DEEP = r"^maximum recursion depth exceeded: 200 rkdl Type hooks running, each inside the one before$"
-
-
-def test_hooks_nest_at_most_200_deep_reading():
-    calls = 0
-
-    def decode(value):
-        nonlocal calls
-        calls += 1
-        return doc["n"].args[0] if calls < 220 else value
-
-    doc = rkdl.Parser(types=[rkdl.Type("loop", object, decode=decode, encode=str)]).parse("n (loop)1\n")
-    with pytest.raises(RecursionError, match=HOOKS_TOO_DEEP):
-        doc["n"].args[0]
-    assert calls == 200
-    # The count went back down: the next read goes as deep.
-    calls = 0
-    with pytest.raises(RecursionError, match=HOOKS_TOO_DEEP):
-        doc["n"].args[0]
-    assert calls == 200
-
-
-def test_hooks_nest_at_most_200_deep_writing():
-    calls = 0
-
-    def encode(c):
-        nonlocal calls
-        calls += 1
-        if calls < 220:
-            doc["n"].args[0] = c
-        return c.degrees
-
-    doc = rkdl.Parser(types=[rkdl.Type("celsius", Celsius, decode=Celsius, encode=encode)]).parse("n (celsius)1\n")
-    with pytest.raises(RecursionError, match=HOOKS_TOO_DEEP):
-        doc["n"].args[0] = Celsius(2)
-    assert calls == 200
-    assert str(doc) == "n (celsius)1\n"
 
 
 def test_setting_a_type_the_value_doesnt_fit_says_so_without_a_place():
