@@ -1,6 +1,7 @@
 import collections.abc
 import datetime
 import gc
+import re
 import weakref
 
 import pytest
@@ -191,23 +192,47 @@ def test_views_take_iterables(use):
     assert str(d) == "n 1 2 a=3\n"
 
 
-def test_props_take_str_keys_and_two_item_pairs():
+def test_props_take_str_keys():
     d, n = node("n a=3\n")
     with pytest.raises(TypeError, match="property keys must be str"):
         n.props.setdefault(1, 2)
-    # As for a dict, a pair has two items.
-    with pytest.raises(ValueError):
-        n.props.update([("b",)])
     assert str(d) == "n a=3\n"
 
 
-@pytest.mark.xfail(
-    strict=True, raises=TypeError, reason="props take pairs only as tuples; a dict takes any two-item iterable"
-)
-def test_props_update_takes_pairs_as_lists():
+def ior(n, pairs):
+    props = n.props
+    props |= pairs
+
+
+WRITE_PAIRS = {
+    "update": lambda n, pairs: n.props.update(pairs),
+    "|=": ior,
+    "assign": lambda n, pairs: setattr(n, "props", pairs),
+}
+
+
+# As for a dict, a pair is any iterable of two items, a two-character str included.
+@pytest.mark.parametrize("write", WRITE_PAIRS.values(), ids=WRITE_PAIRS.keys())
+def test_props_take_any_two_item_pairs(write):
     d, n = node("n a=1\n")
-    n.props.update([["b", 2]])
-    assert str(d) == "n a=1 b=2\n"
+    write(n, [["a", 1], ["b", 2], "cd", iter(["e", 3])])
+    assert str(d) == "n a=1 b=2 c=d e=3\n"
+
+
+BAD_PAIRS = {
+    "not iterable": ([("b", 2), 5], TypeError, "item 1 is not a (key, value) pair: it isn't iterable"),
+    "one item": ([("b",)], ValueError, "item 0 is not a (key, value) pair: it has length 1, not 2"),
+    "three items": ([("b", 2), ["c", 3, 4]], ValueError, "item 1 is not a (key, value) pair: it has length 3, not 2"),
+}
+
+
+@pytest.mark.parametrize("write", WRITE_PAIRS.values(), ids=WRITE_PAIRS.keys())
+@pytest.mark.parametrize(("pairs", "error", "message"), BAD_PAIRS.values(), ids=BAD_PAIRS.keys())
+def test_props_refuse_items_that_are_not_pairs(write, pairs, error, message):
+    d, n = node("n a=1\n")
+    with pytest.raises(error, match=re.escape(message)):
+        write(n, pairs)
+    assert str(d) == "n a=1\n"
 
 
 def test_props_clear():
