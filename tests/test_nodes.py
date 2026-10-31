@@ -543,20 +543,33 @@ def test_view_follows_node_and_block():
 
 
 # Every read or edit through a view of a removed block raises, even where a list would answer (`in`) or do nothing
-# (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.)
+# (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.) That holds whatever the argument or the
+# other side of `==` is: a view of a dead block is a bug wherever it's touched. (Task 54.)
 REMOVED_BLOCK_USES = {
     "list": lambda v, stray: list(v),
     "reversed": lambda v, stray: list(reversed(v)),
     "getitem": lambda v, stray: v[0],
+    "get slice": lambda v, stray: v[:],
     "in": lambda v, stray: stray in v,
+    "in, not a node": lambda v, stray: "x" in v,
     "eq": lambda v, stray: v == [],
+    "eq, a tuple": lambda v, stray: v == (),
+    "ne, a tuple": lambda v, stray: v != (),
+    "eq, on the right of a list": lambda v, stray: [] == v,
+    "eq, on the right of a tuple": lambda v, stray: () == v,
+    "eq, on the right of a live view": lambda v, stray: rkdl.parse("").children == v,
+    "eq, a live view on the right": lambda v, stray: v == rkdl.parse("").children,
     "index": lambda v, stray: v.index(stray),
+    "index, not a node": lambda v, stray: v.index("x"),
     "count": lambda v, stray: v.count(stray),
+    "count, not a node": lambda v, stray: v.count("x"),
     "append": lambda v, stray: v.append(stray),
     "insert": lambda v, stray: v.insert(0, stray),
     "extend": lambda v, stray: v.extend([stray]),
     "setitem": lambda v, stray: v.__setitem__(0, stray),
     "set slice": lambda v, stray: v.__setitem__(slice(None), [stray]),
+    "set empty slice": lambda v, stray: v.__setitem__(slice(None), []),
+    "del slice": lambda v, stray: v.__delitem__(slice(None)),
     "pop": lambda v, stray: v.pop(),
     "delitem": lambda v, stray: v.__delitem__(0),
     "remove": lambda v, stray: v.remove(stray),
@@ -655,13 +668,16 @@ def test_children_take_int_indexes_and_nodes():
     d = doc()
     before = str(d)
     # By name is doc["a"], not doc.children["a"].
-    with pytest.raises(TypeError):
+    by_name = r"a children index is an int or a slice; doc\[name\] and node\[name\] look a node up by name"
+    with pytest.raises(TypeError, match=by_name):
         d.children["a"]
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=by_name):
         d.children["a"] = rkdl.Node("x")
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=by_name):
         del d.children["a"]
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=by_name):
+        d["b"].children["c"]
+    with pytest.raises(TypeError, match="item assignment to children takes a Node"):
         d.children[0] = "x"
     # A string is an iterable, of strings.
     with pytest.raises(TypeError, match="slice assignment to children takes an iterable of Nodes"):

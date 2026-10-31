@@ -393,12 +393,9 @@ pub(crate) fn splice(
 /// can keep every place's whitespace.
 fn reorder(t: &mut DocState, parent: Option<NodeId>, places: &[usize], ids: &[NodeId]) -> bool {
     let block = block_ids(&t.ids, parent).ok().flatten().unwrap_or_default();
-    let Some(from) = (ids.iter())
-        .map(|id| block.iter().position(|n| n == id))
-        .collect::<Option<Vec<usize>>>()
-    else {
-        return false;
-    };
+    let from: Vec<usize> = (ids.iter())
+        .map(|id| block.iter().position(|n| n == id).expect("picked from this block"))
+        .collect();
     if !layout::permute(block_mut(&mut t.kdl, &t.ids, parent), places, &from) {
         return false;
     }
@@ -468,7 +465,7 @@ fn check_depth(t: &DocState, parent: Option<NodeId>, opens: bool, incoming: &[&m
     }
     let room = MAX_DEPTH.saturating_sub(level);
     for s in incoming {
-        if level > MAX_DEPTH || parser::levels(s.kdl.nodes(), room) > room {
+        if parser::levels(s.kdl.nodes(), room) > room {
             return Err(too_deep().into());
         }
     }
@@ -791,6 +788,17 @@ fn slice_ids(ids: &[NodeId], slice: &Bound<'_, PySlice>) -> PyResult<Vec<NodeId>
     Ok(pick_slice(ids, slice)?.into_iter().copied().collect())
 }
 
+/// An int index into the view. A wrong type gets a message pointing at lookup by name, which a string usually means.
+fn int_index(index: &Bound<'_, PyAny>) -> PyResult<isize> {
+    match index.extract::<Index>() {
+        Ok(Index(index)) => Ok(index),
+        Err(err) if err.is_instance_of::<PyTypeError>(index.py()) => Err(PyTypeError::new_err(
+            "a children index is an int or a slice; doc[name] and node[name] look a node up by name",
+        )),
+        Err(err) => Err(err),
+    }
+}
+
 #[pymethods]
 impl Children {
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
@@ -808,7 +816,7 @@ impl Children {
             let found = self.owner.chosen(py, |ids| slice_ids(ids, slice))?;
             return Ok(PyList::new(py, found)?.into_any());
         }
-        let Index(index) = index.extract()?;
+        let index = int_index(index)?;
         let mut found = self.owner.chosen(py, |ids| pick_id(ids, index))?;
         Ok(found.pop().expect("chose one node").into_any())
     }
@@ -819,8 +827,10 @@ impl Children {
             let nodes = nodes_in(value, "slice assignment to children")?;
             return splice(py, &self.owner, &At::Slice(slice.clone()), &nodes, false);
         }
-        let Index(index) = index.extract()?;
-        let node = value.cast::<Node>()?;
+        let index = int_index(index)?;
+        let Ok(node) = value.cast::<Node>() else {
+            return Err(PyTypeError::new_err("item assignment to children takes a Node"));
+        };
         splice(py, &self.owner, &At::Replace(index), std::slice::from_ref(node), false)
     }
 
@@ -829,7 +839,7 @@ impl Children {
         match index.cast::<PySlice>() {
             Ok(slice) => take_out(py, &self.owner, |ids| slice_ids(ids, slice), false)?,
             Err(_) => {
-                let Index(index) = index.extract()?;
+                let index = int_index(index)?;
                 take_out(py, &self.owner, |ids| pick_id(ids, index), false)?
             }
         };
@@ -848,11 +858,10 @@ impl Children {
         Ok(PyList::new(py, found)?.try_iter()?.into_any())
     }
 
+    // The block is read first, so a view of a removed block raises whatever `node` is.
     fn __contains__(&self, node: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let Ok(node) = node.cast::<Node>() else {
-            return Ok(false);
-        };
-        Ok(self.owner.ids(node.py())?.1.contains(&node.get().id))
+        let ids = self.owner.ids(node.py())?.1;
+        Ok(node.cast::<Node>().is_ok_and(|node| ids.contains(&node.get().id)))
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {
@@ -864,9 +873,10 @@ impl Children {
     }
 
     // Equal to a `Children` or a list holding the same nodes in the same order. Like a list, it isn't equal to a
-    // tuple.
+    // tuple. The block is read first, so a view of a removed block raises whatever it's compared with.
     fn __eq__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = other.py();
+        let ours = self.owner.ids(py)?.1;
         let theirs: Vec<Option<NodeId>> = if let Ok(other) = other.cast::<Children>() {
             other.get().owner.ids(py)?.1.into_iter().map(Some).collect()
         } else if let Ok(other) = other.cast::<PyList>() {
@@ -877,7 +887,6 @@ impl Children {
         } else {
             return Ok(py.NotImplemented().into_bound(py));
         };
-        let ours = self.owner.ids(py)?.1;
         let same = ours.len() == theirs.len() && ours.iter().zip(&theirs).all(|(a, b)| Some(*a) == *b);
         Ok(same.into_pyobject(py)?.to_owned().into_any())
     }
