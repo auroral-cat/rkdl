@@ -698,7 +698,7 @@ fn plain_to_kdl(value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
         // bool is a subclass of int, so it has to be checked first.
         KdlValue::Bool(value.is_truthy()?)
     } else if value.is_instance_of::<PyInt>() {
-        KdlValue::Integer(value.extract().map_err(|e: PyErr| {
+        KdlValue::Integer(exact_int(value)?.extract().map_err(|e: PyErr| {
             if e.is_instance_of::<PyOverflowError>(value.py()) {
                 PyOverflowError::new_err("int doesn't fit in a KDL integer (i128)")
             } else {
@@ -755,6 +755,42 @@ fn call<'py>(py: Python<'py>, module: &str, attr: &str, arg: impl IntoPyObject<'
 
 fn is_instance(value: &Bound<'_, PyAny>, module: &str, attr: &str) -> PyResult<bool> {
     value.is_instance(&value.py().import(module)?.getattr(attr)?)
+}
+
+// A subclass of a built-in type is written by its base type's value, so the helpers below read it without calling
+// anything the subclass may override.
+
+/// An int (subclass) as an exact `int`. Extracting a subclass directly would call its `>>` (the i128 conversion
+/// under abi3) or its `__float__`; `operator.index` copies the value instead.
+fn exact_int<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    if value.is_exact_instance_of::<PyInt>() {
+        return Ok(value.clone());
+    }
+    call(value.py(), "operator", "index", value)
+}
+
+/// A `Decimal` (subclass) as an exact `Decimal`, which the constructor copies without calling its methods.
+fn exact_decimal<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    call(value.py(), "decimal", "Decimal", value)
+}
+
+/// The built-in class's own `method` called on `value`, whatever a subclass puts in its place.
+fn base_method<'py>(value: &Bound<'py, PyAny>, module: &str, class: &str, method: &str) -> PyResult<Bound<'py, PyAny>> {
+    value
+        .py()
+        .import(module)?
+        .getattr(class)?
+        .getattr(method)?
+        .call1((value,))
+}
+
+/// `Decimal(text)` under a fresh default context, so a program that relaxes the thread's traps doesn't change what a
+/// file reads as: a malformed or out-of-range literal still raises `InvalidOperation` rather than reading as NaN.
+fn read_decimal<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
+    let decimal = py.import("decimal")?;
+    decimal
+        .getattr("Decimal")?
+        .call1((text, decimal.getattr("Context")?.call0()?))
 }
 
 /// The inner Err is the reason the value doesn't fit, for the caller's message. An `Exception` from Python's parser
@@ -831,15 +867,15 @@ fn parse_builtin<'py>(
             };
             // The only literal `decimal` refuses is one whose exponent is past about ±10^18, which kdl-rs reads.
             // Zero fits whatever its exponent.
-            match call(py, "decimal", "Decimal", &digits) {
+            match read_decimal(py, &digits) {
                 Err(err) if err.is_instance_of::<InvalidOperation>(py) => match zero_sign(&digits) {
-                    Some(sign) => call(py, "decimal", "Decimal", format!("{sign}0")),
+                    Some(sign) => read_decimal(py, &format!("{sign}0")),
                     None => return Err(DECIMAL_EXPONENT.to_owned()),
                 },
                 decimal => decimal,
             }
         }
-        Builtin::DecimalString => call(py, "decimal", "Decimal", string()?),
+        Builtin::DecimalString => read_decimal(py, string()?),
         Builtin::DateTime => from_iso(py, Iso::DateTime, string()?),
         Builtin::Date => from_iso(py, Iso::Date, string()?),
         Builtin::Time => from_iso(py, Iso::Time, string()?),
@@ -920,6 +956,7 @@ fn b64decode<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
 /// type: the wrong class, or a number out of range.
 fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlValue, Option<String>)>> {
     let is_int = value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>();
+    let value = &if is_int { exact_int(value)? } else { value.clone() };
     let string = |v: Bound<'_, PyAny>| -> PyResult<Option<(KdlValue, Option<String>)>> {
         Ok(Some((KdlValue::String(v.extract()?), None)))
     };
@@ -950,15 +987,25 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
             Ok(Some((KdlValue::Float(f), None)))
         }
         Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => decimal_number(value),
-        Builtin::DecimalString if is_instance(value, "decimal", "Decimal")? => string(value.str()?.into_any()),
-        Builtin::DateTime if is_instance(value, "datetime", "datetime")? => string(value.call_method0("isoformat")?),
-        Builtin::Date if is_instance(value, "datetime", "date")? && !is_instance(value, "datetime", "datetime")? => {
-            string(value.call_method0("isoformat")?)
+        Builtin::DecimalString if is_instance(value, "decimal", "Decimal")? => {
+            string(exact_decimal(value)?.str()?.into_any())
         }
-        Builtin::Time if is_instance(value, "datetime", "time")? => string(value.call_method0("isoformat")?),
-        Builtin::Ipv4 if is_instance(value, "ipaddress", "IPv4Address")? => string(value.str()?.into_any()),
-        Builtin::Ipv6 if is_instance(value, "ipaddress", "IPv6Address")? => string(value.str()?.into_any()),
-        Builtin::Uuid if is_instance(value, "uuid", "UUID")? => string(value.str()?.into_any()),
+        Builtin::DateTime if is_instance(value, "datetime", "datetime")? => {
+            string(base_method(value, "datetime", "datetime", "isoformat")?)
+        }
+        Builtin::Date if is_instance(value, "datetime", "date")? && !is_instance(value, "datetime", "datetime")? => {
+            string(base_method(value, "datetime", "date", "isoformat")?)
+        }
+        Builtin::Time if is_instance(value, "datetime", "time")? => {
+            string(base_method(value, "datetime", "time", "isoformat")?)
+        }
+        Builtin::Ipv4 if is_instance(value, "ipaddress", "IPv4Address")? => {
+            string(base_method(value, "ipaddress", "IPv4Address", "__str__")?)
+        }
+        Builtin::Ipv6 if is_instance(value, "ipaddress", "IPv6Address")? => {
+            string(base_method(value, "ipaddress", "IPv6Address", "__str__")?)
+        }
+        Builtin::Uuid if is_instance(value, "uuid", "UUID")? => string(base_method(value, "uuid", "UUID", "__str__")?),
         Builtin::Regex if is_instance(value, "re", "Pattern")? => {
             // A bytes pattern has no KDL spelling.
             let pattern = value.getattr("pattern")?;
@@ -996,7 +1043,9 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
             string(pattern)
         }
         Builtin::Base64 if value.is_instance_of::<PyBytes>() => {
-            string(call(value.py(), "base64", "b64encode", value)?.call_method1("decode", ("ascii",))?)
+            // The bytes themselves: b64encode would take a subclass's own `__buffer__`.
+            let bytes = value.cast::<PyBytes>()?.as_bytes();
+            string(call(value.py(), "base64", "b64encode", bytes)?.call_method1("decode", ("ascii",))?)
         }
         Builtin::PlainString if value.is_instance_of::<PyString>() => string(value.clone()),
         Builtin::DecimalNumber
@@ -1030,9 +1079,9 @@ fn encode_kept_builtin(
     }
     let reason = if let Some(reason) = number_misfit(b, value)? {
         reason
-    } else if is_exact_plain(value) {
-        // A plain value fits if the annotation reads it, and if it doesn't, the reason is the one reading it gives.
-        let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
+    } else if let Some(kdl) = plain_to_kdl(value)? {
+        // A plain value (or a subclass of one, by its value) fits if the annotation reads it, and if it doesn't, the
+        // reason is the one reading it gives.
         match decode_builtin(value.py(), b, &kdl, None)? {
             Ok(_) => return Ok((kdl, None)),
             Err(reason) => reason,
@@ -1103,7 +1152,8 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
         Builtin::Int { .. } | Builtin::F32 | Builtin::F64 if is_int || is_float => range_of(b),
         // Writing `#nan` would quietly drop the signal.
         Builtin::DecimalNumber
-            if is_instance(value, "decimal", "Decimal")? && value.call_method0("is_snan")?.is_truthy()? =>
+            if is_instance(value, "decimal", "Decimal")?
+                && exact_decimal(value)?.call_method0("is_snan")?.is_truthy()? =>
         {
             Some("KDL has no signaling NaN".to_owned())
         }
@@ -1193,6 +1243,7 @@ fn whole_float(f: f64) -> Option<i128> {
 /// A `Decimal` as a `decimal64` or `decimal128`, written with its own digits so none are lost to the f64 kdl-rs
 /// keeps. Only the range is checked, against that f64. None if it's out of range, or a signaling NaN.
 fn decimal_number(value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlValue, Option<String>)>> {
+    let value = &exact_decimal(value)?;
     if value.call_method0("is_snan")?.is_truthy()? {
         return Ok(None);
     }
