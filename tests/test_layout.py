@@ -1145,7 +1145,9 @@ def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expect
     assert str(d) in expected
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="a comment before `}` keeps the space before it as indent")
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason="a comment before `}` keeps the space before it as indent"
+)
 @pytest.mark.parametrize(
     ("edit", "expected"),
     [
