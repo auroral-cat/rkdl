@@ -138,7 +138,7 @@ def test_a_continuation_closed_with_a_semicolon_moves_whole():
 # Line ending style lives on the document
 
 
-@pytest.mark.parametrize("text", ["\n", "\n\n", "  \n", "﻿\n", "// c\n", "\r\n", "\r\n\r\n", "﻿\r\n"])
+@pytest.mark.parametrize("text", ["\n", "\n\n", "  \n", "\ufeff\n", "// c\n", "\r\n", "\r\n\r\n", "\ufeff\r\n"])
 def test_appending_keeps_the_users_text(text):
     d = rkdl.parse(text)
     d.children.append(N("x"))
@@ -227,7 +227,7 @@ def test_a_detached_node_keeps_the_style_of_its_document():
     assert str(copied) == "a {\r\n    y\r\n}"
 
 
-@pytest.mark.parametrize("eol", ["\r", "\x85", "\x0b", "\x0c", " ", " "])
+@pytest.mark.parametrize("eol", ["\r", "\x85", "\x0b", "\x0c", "\u2028", "\u2029"])
 def test_every_kdl_line_ending_is_a_style(eol):
     d = rkdl.parse(f"a{eol}b")
     d.children.append(N("x"))
@@ -240,7 +240,7 @@ def test_every_kdl_line_ending_is_a_style(eol):
     assert str(d) == f"x{eol}"
 
 
-@pytest.mark.parametrize("eol", ["\r", " ", "\x0c"])
+@pytest.mark.parametrize("eol", ["\r", "\u2028", "\x0c"])
 def test_nested_blocks_with_other_line_endings(eol):
     d = rkdl.parse(f"a {{{eol}    b{eol}}}{eol}")
     d["a"].children.append(rkdl.parse("x {\n    y\n}").children.pop())
@@ -342,7 +342,7 @@ def corpus_blocks():
         for crlf in (False, True):
             text = text.replace("\n", "\r\n") if crlf else text
             doc = rkdl.parse(text)
-            # Files that don't read back as themselves unedited hit kdl-rs bugs (notes/upstream.md).
+            # Files that don't read back as themselves unedited hit known kdl-rs issues; skip them.
             if not unedited_reads_back(doc):
                 continue
             for where, node in [((), doc), *walk(doc)]:

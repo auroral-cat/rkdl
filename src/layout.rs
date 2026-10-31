@@ -1,5 +1,8 @@
-//! Whitespace and line breaks for nodes moving in and out of a block. Pure kdl-rs text work: see notes/kdl-rs.md,
-//! "Editing".
+//! Whitespace and line breaks for nodes moving in and out of a block. All of it is text in kdl-rs's format records,
+//! which print in order: a node's `KdlNodeFormat` holds the text before it (`leading`, comments included), before its
+//! block, before its terminator, the terminator (a line ending or `;`), and `trailing` after that. A block's
+//! `KdlDocumentFormat` holds the text before its first node and after its last. A node carries its own text with it,
+//! so this module only moves and rewrites those strings.
 //!
 //! The rule: a node starts at the beginning of a line and ends its own line, and every line break belongs to the thing
 //! before it. A node's line ending is in its own text. The one after a block's `{` is at the start of the block's
@@ -23,7 +26,7 @@
 //! nodes, as long as the new node fits on one line. One that doesn't spreads the block over lines first. An empty
 //! block prints as `{}`.
 //!
-//! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading (notes/upstream.md). rkdl's own
+//! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading, a known issue. rkdl's own
 //! parse puts it back (`parser/blocks.rs`), but what rkdl writes stays readable by kdl-rs alone. After a `}` rkdl
 //! writes comes a line ending, a `;`, or the parent's `}`. So a new block goes after a node's trailing spaces, and a
 //! node with a block at the end of a one-line block ends with `;` before the space: `a { b {}; }`.
@@ -663,7 +666,7 @@ fn fit_inline(node: &mut KdlNode, space: &str, closing: &str, terminator: String
 }
 
 /// Ends the node at `index` with `;` if it has a block and the space before the parent's `}` follows it. That space
-/// would sit right after its own `}`, which kdl-rs drops when it reads the text back (notes/upstream.md). After the
+/// would sit right after its own `}`, which kdl-rs drops when it reads the text back. After the
 /// `;`, the space belongs to the block.
 fn semicolon_after_block(block: &mut KdlDocument, index: usize) {
     let Some(node) = block.nodes_mut().get_mut(index) else {
@@ -977,7 +980,7 @@ struct Slot {
     /// Spaces before the terminator.
     closing: String,
     /// Whether the node there is followed by its terminator, or by the end of the block. A parsed node in the middle
-    /// of a block always is: rkdl puts back the terminator kdl-rs drops after a `}` and spaces (notes/upstream.md).
+    /// of a block always is: rkdl puts back the terminator kdl-rs drops after a `}` and spaces.
     ends: bool,
     terminator: String,
     trailing: String,
@@ -1134,7 +1137,7 @@ fn open_node_block(node: &mut KdlNode, eol: &str) {
     let f = fmt_mut(node, eol);
     // Without a block, trailing slashdashed entries sit in before_terminator, which prints after the block. They have
     // to stay in front of it. So does any other whitespace there: right after `}`, kdl-rs drops it when it reads the
-    // text back (notes/upstream.md).
+    // text back.
     if !f.before_terminator.is_empty() {
         let mut moved = std::mem::take(&mut f.before_terminator);
         // Autoformat ends before_terminator with a line ending. That goes after the block, not before `{`, where it

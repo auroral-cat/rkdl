@@ -64,7 +64,7 @@ def test_after_multi_line_strings():
     assert [at(e) for e in doc["c"].entries] == [(5, 3), (7, 8)]
 
 
-@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r", " ", "\x85"])
+@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r", "\u2028", "\x85"])
 def test_every_kdl_line_ending(eol):
     doc = rkdl.parse(f"a{eol}{eol}  b 1{eol}c")
     assert at(doc["a"]) == (1, 1)
@@ -83,7 +83,7 @@ def test_columns_count_characters():
 
 
 def test_byte_order_mark_is_not_a_column():
-    doc = rkdl.parse("﻿a 1\n")
+    doc = rkdl.parse("\ufeffa 1\n")
     assert at(doc["a"]) == (1, 1)
     assert at(doc["a"].args.entry(0)) == (1, 3)
 

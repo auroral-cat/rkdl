@@ -134,7 +134,7 @@ def test_defaults_and_repr():
     )
 
 
-@pytest.mark.parametrize("indent", ["", " ", "\t", "  \t", "　", " "])
+@pytest.mark.parametrize("indent", ["", " ", "\t", "  \t", "\u3000", "\xa0"])
 def test_indent_can_be_any_kdl_space(indent):
     assert formatted("a {\nb\n}\n", rkdl.Formatter(indent=indent)) == f"a {{\n{indent}b\n}}\n"
 

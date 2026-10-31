@@ -177,7 +177,7 @@ strings = st.one_of(
     st.sampled_from(AWKWARD_STRINGS),
     st.text(st.characters(exclude_categories=["Cs"]), max_size=6),
 )
-# i128::MIN itself is left out: kdl-rs can't parse it back (notes/upstream.md).
+# i128::MIN itself is left out: kdl-rs doesn't parse it back, a known issue.
 ints = st.one_of(
     st.sampled_from([0, 1, -1, I128 - 1, -I128 + 1, 2**63, -(2**63) - 1, 2**64]),
     st.integers(-I128 + 1, I128 - 1),
@@ -360,7 +360,7 @@ def render_nodes(draw, nodes, indent, level):
             out.append(pad + "// a comment\n")
             above = True
         if draw(st.integers(0, 6)) == 0:
-            # No `;` after a slashdashed node: kdl-rs rejects it (notes/upstream.md).
+            # No `;` after a slashdashed node: kdl-rs doesn't parse that, a known issue.
             out.append(pad + "/- gone 1 {\n" + pad + indent + "x\n" + pad + "}\n")
             above = True
         line = pad + render_head(draw, node, lines=True)
