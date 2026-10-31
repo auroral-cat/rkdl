@@ -40,15 +40,20 @@ fn restore_node(text: &str, node: &mut KdlNode, closes: Option<&[usize]>) {
     }
     let span = node.span();
     let (start, end) = (span.offset(), span.offset() + span.len());
+    // unreachable-start: every node kdl-rs parses has a format, and restore runs only on a freshly parsed document
     let Some(f) = node.format_mut() else {
         return;
     };
+    // unreachable-end
     if !f.terminator.is_empty() {
         return;
     }
+    // unreachable-start: the span is kdl-rs's, into exactly this text (BOM included), so it ends inside it on a
+    // character boundary
     let Some(rest) = text.get(end..) else {
         return;
     };
+    // unreachable-end
     f.terminator = terminator(rest).into();
     // The node's last `}`: its block's, or that of a slashdashed block after it, which ends `before_terminator`.
     let Some(&close) = closes.and_then(|closes| closes.get(closes.partition_point(|&c| c < end).wrapping_sub(1)))
@@ -140,6 +145,30 @@ mod tests {
             "a {\n    /- b { c {} }\n    d {} } // x\n",
         ] {
             assert_eq!(round_trip(text), text);
+        }
+    }
+
+    /// As if the scan had followed the text but put its blocks' `}` elsewhere than kdl-rs did.
+    fn with_closes(text: &str, closes: &[usize]) -> String {
+        let mut doc: KdlDocument = text.parse().expect("test documents parse");
+        restore(text, &mut doc, Some(&[closes.to_vec()]));
+        doc.to_string()
+    }
+
+    #[test]
+    fn a_close_that_disagrees_with_the_span_brings_back_only_the_terminator() {
+        for (text, closes, printed) in [
+            // The scan missed `b`'s block, so the last `}` it knows is `a`'s, before `b` starts.
+            ("a {}\nb {}  \nc", &[3][..], "a {}\nb {}\nc"),
+            // A `}` right before the node, as if `}b` were one block's end and the next node.
+            ("a {}\nb {}  \nc", &[4][..], "a {}\nb {}\nc"),
+            // The scan missed the slashdashed block, so the `}` it has isn't the one `before_terminator` ends at.
+            ("a {} /-{}  \nb", &[3][..], "a {} /-{}\nb"),
+        ] {
+            let out = with_closes(text, closes);
+            assert_eq!(out, printed, "{text:?} with closes {closes:?}");
+            assert_eq!(out, without_closes(text));
+            assert!(out.parse::<KdlDocument>().is_ok(), "{out:?}");
         }
     }
 

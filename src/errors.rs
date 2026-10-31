@@ -160,6 +160,8 @@ pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>)
         .and_then(|()| value.setattr("path", path));
     match set {
         Ok(()) => exc,
+        // unreachable: setting an int, a list, a str or None on a fresh ParseError (a ValueError subclass with a
+        // __dict__) fails only on memory errors
         Err(e) => e,
     }
 }
@@ -179,8 +181,11 @@ fn help(input: &str, diag: &KdlDiagnostic) -> Option<String> {
 fn report(err: &KdlError, helps: &[Option<String>], path: Option<&str>, first: Option<(usize, usize)>) -> String {
     let at = match (path, first) {
         (Some(path), Some((line, column))) => format!("{path}:{line}:{column}: "),
+        // unreachable: every KdlError has a diagnostic: rkdl's refusals carry one, and kdl-rs gave one for every error
+        // probed (all spec-input prefixes, 4164 entry texts through KdlEntry::parse)
         (Some(path), None) => format!("{path}: "),
         (None, Some((line, column))) => format!("{line}:{column}: "),
+        // unreachable: as (Some(path), None) above, a KdlError always has a diagnostic
         (None, None) => String::new(),
     };
     let source = Source::new(err, path);
@@ -201,6 +206,8 @@ fn render(diagnostic: &dyn miette::Diagnostic) -> String {
     let mut out = String::new();
     match handler.render_report(&mut out, diagnostic) {
         Ok(()) => out.trim_end().to_owned(),
+        // unreachable: rendering into a String fails only if a span can't be read, and kdl-rs's spans and rkdl's
+        // refusals' lie inside the text they point into
         Err(_) => diagnostic.to_string(),
     }
 }
@@ -255,9 +262,12 @@ struct Located<'a> {
 }
 
 impl fmt::Debug for Located<'_> {
+    // unreachable-start: std::error::Error (which miette::Diagnostic needs) requires Debug, but nothing calls it:
+    // miette's graphical handler renders through Display and the Diagnostic methods
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.diagnostic, f)
     }
+    // unreachable-end
 }
 
 impl fmt::Display for Located<'_> {
