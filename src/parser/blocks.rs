@@ -143,6 +143,45 @@ mod tests {
         }
     }
 
+    /// As if the scan had followed the text but put its blocks' `}` elsewhere than kdl-rs did.
+    fn with_closes(text: &str, closes: &[usize]) -> String {
+        let mut doc: KdlDocument = text.parse().expect("test documents parse");
+        restore(text, &mut doc, Some(&[closes.to_vec()]));
+        doc.to_string()
+    }
+
+    #[test]
+    fn a_close_that_disagrees_with_the_span_brings_back_only_the_terminator() {
+        for (text, closes, printed) in [
+            // The scan missed `b`'s block, so the last `}` it knows is `a`'s, before `b` starts.
+            ("a {}\nb {}  \nc", &[3][..], "a {}\nb {}\nc"),
+            // A close recorded one byte before the node starts (at the line ending): `close >= start` fails while
+            // `start..after` is still a valid range.
+            ("a {}\nb {}  \nc", &[4][..], "a {}\nb {}\nc"),
+            // The scan missed the slashdashed block, so the `}` it has isn't the one `before_terminator` ends at.
+            ("a {} /-{}  \nb", &[3][..], "a {} /-{}\nb"),
+        ] {
+            let out = with_closes(text, closes);
+            assert_eq!(out, printed, "{text:?} with closes {closes:?}");
+            assert_eq!(out, without_closes(text));
+            assert!(out.parse::<KdlDocument>().is_ok(), "{out:?}");
+        }
+    }
+
+    /// A node without a format has nowhere to keep the text, so it's left as it is. No current caller gets here:
+    /// `restore` runs right after kdl-rs's parse, and every parsed node has a format.
+    #[test]
+    fn a_node_without_a_format_is_left_alone() {
+        let text = "a {}  \nb";
+        let mut doc: KdlDocument = text.parse().expect("test documents parse");
+        doc.nodes_mut()[0].clear_format();
+        let before = doc.to_string();
+        let scan = prescan::scan(text);
+        restore(text, &mut doc, Some(&scan.closes));
+        assert_eq!(doc.to_string(), before);
+        assert!(doc.nodes()[0].format().is_none());
+    }
+
     #[test]
     fn terminators() {
         assert_eq!(terminator(";x"), ";");

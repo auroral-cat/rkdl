@@ -137,4 +137,28 @@ mod tests {
         fold(node);
         assert_eq!(doc.to_string(), "( u )  \"n\" 1");
     }
+
+    #[test]
+    fn an_annotation_dropped_without_unfolding_leaves_the_name_plain() {
+        // No current caller produces this state: `set_type` and `fmt()`'s `requote` both clear the padding with the
+        // annotation. This pins the module's documented guard for when one doesn't: the padding stays on the node, but
+        // folding only touches a node with an annotation, and unfolding strips the name's padding all the same.
+        // `(t)  n` without its annotation is `n` (node.rs, `set_type`).
+        let mut doc: KdlDocument = "( t )  n 1".parse().expect("parses");
+        restore(&mut doc);
+        *doc.nodes_mut()[0].ty_mut() = None;
+        editing(&mut doc.nodes_mut()[0], |_| ());
+        assert_eq!(doc.to_string(), "n 1");
+        fold(&mut doc.nodes_mut()[0]);
+        assert_eq!(doc.to_string(), "n 1");
+    }
+
+    #[test]
+    fn text_that_is_all_padding_is_not_folded() {
+        assert_eq!(unpadded(" n", " ", ""), Some("n"));
+        // An identifier whose whole text is the padding wasn't folded: stripping it would blank the identifier.
+        assert_eq!(unpadded("/*c*/", "/*c*/", ""), None);
+        // No padding: nothing was folded either.
+        assert_eq!(unpadded("n", "", ""), None);
+    }
 }

@@ -191,6 +191,14 @@ def test_stdin_is_not_a_path():
         assert rkdl.load(stdin).path is None
 
 
+def test_an_error_setting_the_attributes_is_raised_instead(monkeypatch):
+    # A program that has made ParseError's attributes read-only gets its own error back, not a ParseError that's
+    # missing them.
+    monkeypatch.setattr(rkdl.ParseError, "line", property(lambda self: 0), raising=False)
+    with pytest.raises(AttributeError):
+        rkdl.parse("a {")
+
+
 def test_diagnostics_compare_by_value():
     first = parse_error("a {").diagnostics[0]
     same = rkdl.Diagnostic(first.message, first.label, first.help, first.offset, first.length, first.line, first.column)

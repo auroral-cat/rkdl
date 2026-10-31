@@ -286,3 +286,79 @@ impl miette::Diagnostic for Located<'_> {
         miette::Diagnostic::labels(self.diagnostic)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `KdlError` rkdl sees has a diagnostic (its refusals carry one, and kdl-rs gave one for every error
+    /// probed), but if one didn't, the summary has no position to name: only the file, if any, then the error itself.
+    #[test]
+    fn a_report_without_diagnostics_names_no_position() {
+        let err = KdlError {
+            input: Arc::new("a {".to_owned()),
+            diagnostics: vec![],
+        };
+        assert_eq!(
+            report(&err, &[], Some("config.kdl"), None),
+            format!("config.kdl: {err}")
+        );
+        assert_eq!(report(&err, &[], None, None), err.to_string());
+    }
+
+    /// Text that reads once and then fails. miette prints a line in place of a label it can't read at all, so
+    /// rendering fails only when a read that worked fails on reading again. `Source`'s reads depend only on the text,
+    /// so this is a stand-in.
+    #[derive(Debug)]
+    struct Flaky {
+        text: String,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SourceCode for Flaky {
+        fn read_span<'a>(
+            &'a self,
+            span: &SourceSpan,
+            before: usize,
+            after: usize,
+        ) -> Result<Box<dyn SpanContents<'a> + 'a>, MietteError> {
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                return Err(MietteError::OutOfBounds);
+            }
+            self.text.read_span(span, before, after)
+        }
+    }
+
+    /// A diagnostic of a program's own, pointing into a `Flaky` text.
+    #[derive(Debug)]
+    struct Problem(Flaky);
+
+    impl fmt::Display for Problem {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("unknown setting")
+        }
+    }
+
+    impl std::error::Error for Problem {}
+
+    impl miette::Diagnostic for Problem {
+        fn source_code(&self) -> Option<&dyn SourceCode> {
+            Some(&self.0)
+        }
+
+        fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
+            Some(Box::new(std::iter::once(LabeledSpan::at(5..9, "here"))))
+        }
+    }
+
+    /// A report that can't be rendered still says what the problem is: the diagnostic's own text, never an empty
+    /// message.
+    #[test]
+    fn a_report_that_fails_to_render_is_the_diagnostics_text() {
+        let flaky = Flaky {
+            text: "mode auto\n".to_owned(),
+            reads: 0.into(),
+        };
+        assert_eq!(render(&Problem(flaky)), "unknown setting");
+    }
+}
