@@ -7,11 +7,13 @@
 //! The rule: a node starts at the beginning of a line and ends its own line, and every line break belongs to the thing
 //! before it. A node's line ending is in its own text. The one after a block's `{` is at the start of the block's first
 //! node, which is where kdl-rs puts it. kdl-rs also puts the one after a `;` at the start of what follows, but it's the
-//! node's all the same, with any comments before it on the node's line. A new node goes at the first line start at or
-//! after its place: if the node before it doesn't end its line, it gets a line ending first. Taking a node out takes
-//! its own line ending with it, and whatever followed it keeps starting a line if it did: a node that was second on a
-//! line takes over its start. Replacing a node and reversing a block keep the layout by position instead: each place
-//! keeps the whitespace before it and the end of its line, and the nodes move with their own comments.
+//! node's all the same, with any comments before it on the node's line. So is a `//` comment that ends the node's line,
+//! even at the end of the file. A new node goes at the first line start at or after its place: if the node before it
+//! doesn't end its line, it gets a line ending first. If that node ends in a `\` continuation, which would carry it
+//! onto the new node, it ends with `;` on the next line instead, at its indent. Taking a node out takes its own line
+//! ending with it, and whatever followed it keeps starting a line if it did: a node that was second on a line takes
+//! over its start. Replacing a node and reversing a block keep the layout by position instead: each place keeps the
+//! whitespace before it and the end of its line, and the nodes move with their own comments.
 //!
 //! Comments above a node are its own only up to the last blank line above it. What's above that line, the line
 //! included, is the gap: it belongs to the block and stays where it is. Taking a node out leaves its gap in front of
@@ -22,11 +24,13 @@
 //!
 //! Every line ending rkdl adds is in the block's own style, its first line ending, or else the document's, which is
 //! the first line ending in the text it was parsed from (`\n` if there was none). A moved node takes the style and the
-//! indentation of where it lands, unit and character included, except inside strings.
+//! indentation of where it lands, unit and character included, except inside strings. That goes for its comments, its
+//! children and the lines of its own text: `\` continuations, and comments and slashdashed parts after its name. Each
+//! line shifts by the change in the node's indent, plus the change in unit for each level of its children it's in.
 //!
 //! The exception is a children block written on one line (`a { b; c }`). It stays on one line, with `;` between
-//! nodes, as long as the new node fits on one line. One that doesn't spreads the block over lines first. An empty
-//! block prints as `{}`.
+//! nodes, as long as the new node fits on one line. One that doesn't spreads the block over lines first, with the
+//! comments before its `}` on a line of their own and `}` lined up with the parent. An empty block prints as `{}`.
 //!
 //! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading, a known issue. rkdl's own
 //! parse puts it back (`parser/blocks.rs`), but what rkdl writes stays readable by kdl-rs alone. After a `}` rkdl
@@ -134,6 +138,58 @@ fn multi_line_pieces(leading: &str) -> Vec<std::ops::Range<usize>> {
         }
     }
     out
+}
+
+/// The byte ranges of the strings in `text`, quotes included.
+fn string_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut scan = Scan { text, pos: 0 };
+    while let Some(c) = scan.peek() {
+        let start = scan.pos;
+        if scan.eat("//") {
+            scan.line_comment();
+        } else if scan.text_at().starts_with("/*") {
+            scan.block_comment();
+        } else if matches!(c, '"' | '#') {
+            scan.string();
+            out.push(start..scan.pos);
+        } else {
+            scan.bump();
+        }
+    }
+    out
+}
+
+/// Whether `text` ends in a `\` continuation, which carries the node on over its line ending: None if it doesn't,
+/// else whether that line ending is in `text` too.
+fn continuation(text: &str) -> Option<bool> {
+    let mut scan = Scan { text, pos: 0 };
+    let mut open = None;
+    while let Some(c) = scan.peek() {
+        if NEWLINES.contains(&c) {
+            // A second line ending ends the node.
+            open = (open == Some(false)).then_some(true);
+            if !scan.eat("\r\n") {
+                scan.bump();
+            }
+        } else if is_space(c) {
+            scan.bump();
+        } else if scan.eat("//") {
+            scan.line_comment();
+        } else if scan.text_at().starts_with("/*") {
+            scan.block_comment();
+        } else if scan.eat("\\") {
+            open = Some(false);
+        } else {
+            open = None;
+            if matches!(c, '"' | '#') {
+                scan.string();
+            } else {
+                scan.bump();
+            }
+        }
+    }
+    open
 }
 
 /// Reads valid KDL text far enough to tell where comments, strings and slashdashed nodes end.
@@ -307,22 +363,58 @@ fn without_closing_blanks(gap: &str, line_start: bool) -> &str {
     gap.get(..start).unwrap_or(gap)
 }
 
-/// Whether `text` ends in a `\` line continuation that still needs its line ending.
-fn ends_in_open_escline(text: &str) -> bool {
-    text.trim_end_matches(is_space).ends_with('\\')
+/// A line of whitespace and comments, which can hold slashdashed values: strings, whose lines are content.
+struct Line<'a> {
+    text: &'a str,
+    ending: &'a str,
+    /// Whether the line starts inside a string.
+    in_string: bool,
+    /// Whether its line ending is inside one.
+    ends_in_string: bool,
 }
 
-/// `text` with its line endings in the style `eol`.
+/// The lines of `text`, as `lines` gives them, with where strings are.
+fn text_lines(text: &str) -> Vec<Line<'_>> {
+    let strings = if text.contains(NEWLINES) {
+        string_ranges(text)
+    } else {
+        Vec::new()
+    };
+    // Asked in order, so strings behind are dropped: a text can have many lines and many strings.
+    let mut strings = strings.into_iter().peekable();
+    let mut inside = |at: usize| {
+        while strings.next_if(|r| r.end <= at).is_some() {}
+        strings.peek().is_some_and(|r| r.start < at)
+    };
+    let mut at = 0;
+    lines(text)
+        .into_iter()
+        .map(|(line, ending)| {
+            let out = Line {
+                text: line,
+                ending,
+                in_string: inside(at),
+                ends_in_string: inside(at + line.len()),
+            };
+            at += line.len() + ending.len();
+            out
+        })
+        .collect()
+}
+
+/// `text` with its line endings in the style `eol`, but for those in strings.
 fn restyle(text: &str, eol: &str) -> String {
     if !text.contains(NEWLINES) {
         return text.to_owned();
     }
     let mut out = String::with_capacity(text.len());
-    for (line, ending) in lines(text) {
-        out.push_str(line);
-        if !ending.is_empty() {
-            out.push_str(eol);
-        }
+    for line in text_lines(text) {
+        out.push_str(line.text);
+        out.push_str(if line.ends_in_string || line.ending.is_empty() {
+            line.ending
+        } else {
+            eol
+        });
     }
     out
 }
@@ -507,8 +599,20 @@ impl Shift {
 
     /// Moves a node's text and its children. Its leading is the caller's.
     fn move_node(&self, node: &mut KdlNode) {
-        restyle_node(node, self.eol);
+        self.move_own_text(node);
         reindent_children(node, self);
+    }
+
+    /// Moves the lines in a node's own text: `\` continuations, and comments and slashdashed parts after its name.
+    /// What follows its terminator is the next line's start, which isn't the node's.
+    fn move_own_text(&self, node: &mut KdlNode) {
+        edit_own_text(node, |text, before_terminator| {
+            if before_terminator {
+                self.apply(text, false)
+            } else {
+                restyle(text, self.eol)
+            }
+        });
     }
 
     /// The new indentation for a line indented `spaces`, if it's indented `from` at least.
@@ -525,32 +629,35 @@ impl Shift {
         Some(out)
     }
 
-    /// `text`, moved. `line_start` says whether the text itself starts a line. Blank lines stay blank.
+    /// `text`, moved. `line_start` says whether the text itself starts a line. Blank lines stay blank, and lines in
+    /// strings stay as they are.
     fn apply(&self, text: &str, line_start: bool) -> String {
         let mut out = String::with_capacity(text.len());
-        for (i, (line, ending)) in lines(text).into_iter().enumerate() {
-            let blank = line.is_empty() && !ending.is_empty();
-            let content = line.trim_start_matches(is_space);
-            let spaces = line.strip_suffix(content).unwrap_or_default();
+        for (i, line) in text_lines(text).into_iter().enumerate() {
+            let blank = line.text.is_empty() && !line.ending.is_empty();
+            let content = line.text.trim_start_matches(is_space);
+            let spaces = line.text.strip_suffix(content).unwrap_or_default();
             match self.indent(spaces) {
-                Some(indent) if (i > 0 || line_start) && !blank => {
+                Some(indent) if (i > 0 || line_start) && !blank && !line.in_string => {
                     out.push_str(&indent);
                     out.push_str(content);
                 }
-                _ => out.push_str(line),
+                _ => out.push_str(line.text),
             }
-            if !ending.is_empty() {
-                out.push_str(self.eol);
-            }
+            out.push_str(if line.ends_in_string || line.ending.is_empty() {
+                line.ending
+            } else {
+                self.eol
+            });
         }
         out
     }
 }
 
-/// Line endings in a node's own text, apart from its leading and its children. That includes the whitespace around
-/// its entries, where `\` continuations end their lines, but not their values: a line ending inside a string is part
-/// of the string.
-fn restyle_node(node: &mut KdlNode, eol: &str) {
+/// Rewrites the text of a node apart from its leading, its children and its values: the whitespace around its
+/// entries, where `\` continuations end their lines, and comments and slashdashed parts. `edit` also gets whether the
+/// text comes before the terminator.
+fn edit_own_text(node: &mut KdlNode, mut edit: impl FnMut(&str, bool) -> String) {
     crate::parser::annotation::editing(node, |node| {
         if let Some(f) = node.format_mut() {
             for text in [
@@ -559,10 +666,11 @@ fn restyle_node(node: &mut KdlNode, eol: &str) {
                 &mut f.after_ty,
                 &mut f.before_children,
                 &mut f.before_terminator,
-                &mut f.terminator,
-                &mut f.trailing,
             ] {
-                *text = restyle(text, eol);
+                *text = edit(text, true);
+            }
+            for text in [&mut f.terminator, &mut f.trailing] {
+                *text = edit(text, false);
             }
         }
     });
@@ -577,10 +685,15 @@ fn restyle_node(node: &mut KdlNode, eol: &str) {
                 &mut f.after_key,
                 &mut f.after_eq,
             ] {
-                *text = restyle(text, eol);
+                *text = edit(text, true);
             }
         }
     }
+}
+
+/// Line endings in a node's own text.
+fn restyle_node(node: &mut KdlNode, eol: &str) {
+    edit_own_text(node, |text, _| restyle(text, eol));
 }
 
 /// Puts every line ending in the document's whitespace and comments in the style `eol`. Line endings inside values
@@ -621,7 +734,7 @@ fn reindent_children(node: &mut KdlNode, shift: &Shift) {
                 f.leading = shift.apply(&f.leading, line_start);
                 line_start = ends_line(&format!("{}{}", f.terminator, f.trailing));
             }
-            restyle_node(child, shift.eol);
+            shift.move_own_text(child);
         }
         if let Some(f) = block.format_mut() {
             f.trailing = shift.apply(&f.trailing, line_start);
@@ -630,18 +743,25 @@ fn reindent_children(node: &mut KdlNode, shift: &Shift) {
     }
 }
 
-/// Whether the node ends in a `\` continuation, which would carry it onto whatever comes next.
-fn open_escline(node: &KdlNode) -> bool {
+/// Whether the node ends in a `\` continuation, which would carry it onto whatever comes next: None if it doesn't,
+/// else whether the continuation's line ending is in its text.
+fn open_escline(node: &KdlNode) -> Option<bool> {
     node.format()
-        .is_some_and(|f| f.terminator.is_empty() && f.trailing.is_empty())
-        && ends_in_open_escline(&node.to_string())
+        .filter(|f| f.terminator.is_empty() && f.trailing.is_empty())
+        .and_then(|_| continuation(&last_part(node)))
 }
 
-/// Finishes an open `\` continuation and ends the node with `;` on the line after, which keeps the old text as it was.
-fn close_escline(node: &mut KdlNode, eol: &str) {
-    if open_escline(node) {
+/// Finishes an open `\` continuation and ends the node with `;` on the line after, at `indent`, which keeps the old
+/// text as it was.
+fn close_escline(node: &mut KdlNode, eol: &str, indent: &str) {
+    if let Some(ended) = open_escline(node) {
         let f = fmt_mut(node, eol);
-        f.before_terminator.push_str(eol);
+        f.before_terminator
+            .truncate(f.before_terminator.trim_end_matches(is_space).len());
+        if !ended {
+            f.before_terminator.push_str(eol);
+        }
+        f.before_terminator.push_str(indent);
         f.terminator = ";".into();
     }
 }
@@ -733,7 +853,7 @@ fn fits_on_a_line(node: &KdlNode) -> bool {
         && !node
             .children()
             .is_some_and(|block| block.format().is_none() || block_breaks(block))
-        && !ends_in_open_escline(&last_part(node))
+        && continuation(&last_part(node)).is_none()
         && matches!(tail.trim(), "" | ";")
 }
 
@@ -917,9 +1037,13 @@ fn spread(block: &mut KdlDocument, parent_indent: &str, unit: &str, eol: &str) {
     if is_blank(&f.leading) {
         f.leading.clear();
     }
-    if is_blank(&f.trailing) {
-        parent_indent.clone_into(&mut f.trailing);
-    }
+    // `}` lines up with the parent, below any comments before it.
+    let comments = f.trailing.trim();
+    f.trailing = if comments.is_empty() {
+        parent_indent.to_owned()
+    } else {
+        format!("{parent_indent}{unit}{comments}{eol}{parent_indent}")
+    };
 }
 
 /// The indent of the line the node before `index` starts on (or the node at 0), if one starts a line.
@@ -1006,7 +1130,7 @@ fn place_at(
         }
     };
     if let Some(prev) = index.checked_sub(1).and_then(|i| block.nodes_mut().get_mut(i)) {
-        close_escline(prev, eol);
+        close_escline(prev, eol, &indent);
     }
     // Below the gap, which ends a line.
     let gap = gap.unwrap_or_else(|| split_gap(block, index, style.parent.is_some()));
@@ -1025,34 +1149,37 @@ fn place_at(
         }
     }
 
-    let escline = open_escline(&node);
+    let escline = open_escline(&node).is_some();
     let shift = Shift::of(&node, &indent, style);
+    shift.move_node(&mut node);
     let f = fmt_mut(&mut node, eol);
     // Keep the node's own comments, but not the whitespace it had where it came from.
     let own = shift.apply(f.leading.trim_start(), false);
     f.leading = format!("{gap}{start}{indent}{own}");
     // The comments on the line of a node that ends in `;` go after it, where kdl-rs reads them, for the same reason.
-    let rest = (f.terminator == ";" && !is_blank(&f.trailing)).then(|| restyle(&std::mem::take(&mut f.trailing), eol));
+    let rest = (f.terminator == ";" && !is_blank(&f.trailing)).then(|| std::mem::take(&mut f.trailing));
     if is_blank(&f.trailing) {
         f.trailing.clear();
     }
     if let Some(rest) = rest {
         after_mut(block, index, eol).insert_str(0, &rest);
     } else if escline {
-        close_escline(&mut node, eol);
+        close_escline(&mut node, eol, &indent);
         fmt_mut(&mut node, eol).trailing = eol.into();
     } else if !ends_own_line(&node) {
         let f = fmt_mut(&mut node, eol);
-        // A `;` after a `\` continuation's line ending is what ends the node, so it stays.
-        if f.trailing.is_empty() && !ends_line(&f.before_terminator) {
+        if f.terminator.starts_with("//") {
+            // A comment at the end of the file ends the node too, and keeps it.
+            f.terminator.push_str(eol);
+        } else if f.trailing.is_empty() && !ends_line(&f.before_terminator) {
             // Spaces that came before a `}` or a `;` would now end the line.
             split_closing(&mut node);
             fmt_mut(&mut node, eol).terminator = eol.into();
         } else {
+            // A `;` after a `\` continuation's line ending is what ends the node, so it stays.
             f.trailing.push_str(eol);
         }
     }
-    shift.move_node(&mut node);
     block.nodes_mut().insert(index, node);
 }
 
@@ -1229,7 +1356,7 @@ fn slot_and_own(node: &KdlNode, last: bool) -> (Slot, Own) {
 fn fits_slot(own: &Own, slot: &Slot, has_block: bool) -> bool {
     slot.ends
         && (own.comment.is_empty() || slot.closing.is_empty() && eol_at(&slot.terminator).is_some())
-        && !ends_in_open_escline(&own.tail)
+        && continuation(&own.tail).is_none()
         && (!has_block || slot.closing.is_empty())
 }
 
@@ -1338,7 +1465,7 @@ fn open_node_block(node: &mut KdlNode, eol: &str) {
                 f.terminator = eol.into();
             }
         }
-        if ends_in_open_escline(&moved) {
+        if continuation(&moved) == Some(false) {
             moved.push_str(eol);
         }
         f.before_children = moved + &f.before_children;
@@ -1405,6 +1532,14 @@ mod tests {
         assert_eq!(line_rest(" /* a\n */\n"), None);
         assert_eq!(line_rest(" b\n"), None);
         assert_eq!(line_rest(" // b"), None);
+        assert_eq!(continuation(" \\"), Some(false));
+        assert_eq!(continuation(" \\ /* a */ // b"), Some(false));
+        assert_eq!(continuation(" \\\r\n  "), Some(true));
+        assert_eq!(continuation(" \\\n\n"), None);
+        assert_eq!(continuation(" /-\"\\\\\" \\"), Some(false));
+        assert_eq!(continuation(" /-\"\\\""), None);
+        assert_eq!(continuation(" /* \\ */"), None);
+        assert_eq!(string_ranges("/-#\"a\"# /* \" */ \"\\\"\""), vec![2..7, 16..20]);
         assert!(ends_line("a\r\n  "));
         assert!(!ends_line("a;"));
         assert_eq!(indent_of("\r\n    // c\r\n  "), "  ");
@@ -1418,6 +1553,11 @@ mod tests {
             eol: "\r\n",
         };
         assert_eq!(shift.apply("// c\n  x", false), "// c\r\n    x");
+        // Lines in strings stay as they are, line endings included.
+        assert_eq!(
+            shift.apply("\n  /-\"\"\"\n  a\n  \"\"\"\n  ", false),
+            "\r\n    /-\"\"\"\n  a\n  \"\"\"\r\n    "
+        );
     }
 
     #[test]
