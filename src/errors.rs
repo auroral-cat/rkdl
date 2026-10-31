@@ -294,8 +294,8 @@ impl miette::Diagnostic for Located<'_> {
 mod tests {
     use super::*;
 
-    /// No KdlError rkdl sees has no diagnostics (its refusals carry one, and kdl-rs gave one for every error probed),
-    /// but if one did, the summary has no position to name: only the file, if any, then the error itself.
+    /// No `KdlError` rkdl sees has no diagnostics (its refusals carry one, and kdl-rs gave one for every error
+    /// probed), but if one did, the summary has no position to name: only the file, if any, then the error itself.
     #[test]
     fn a_report_without_diagnostics_names_no_position() {
         let err = KdlError {
