@@ -1,5 +1,5 @@
-//! rkdl's own reasons a string isn't an ISO 8601 date, time or date-time. `fromisoformat` decides what reads;
-//! these say why a string didn't, in words that don't change with the Python version, as Python's own do.
+//! rkdl's own reasons a string isn't an ISO 8601 date, time or date-time. `fromisoformat` decides what reads, apart
+//! from hour 24; these say why a string didn't, in words that don't change with the Python version, as Python's own do.
 
 #[derive(Clone, Copy)]
 pub(crate) enum Iso {
@@ -14,9 +14,7 @@ pub(crate) fn reason(kind: Iso, text: &str) -> String {
     let s = text.as_bytes();
     let field = match kind {
         Iso::Date => date(s).and_then(|(reason, _)| reason),
-        Iso::Time => time(s.strip_prefix(b"T").unwrap_or(s)),
-        // Python takes any one character between the date and the time.
-        Iso::DateTime => date(s).and_then(|(reason, rest)| reason.or_else(|| rest.get(1..).and_then(time))),
+        Iso::Time | Iso::DateTime => split(kind, s).and_then(|(reason, rest)| reason.or_else(|| time(rest?))),
     };
     field.unwrap_or_else(|| {
         match kind {
@@ -28,12 +26,37 @@ pub(crate) fn reason(kind: Iso, text: &str) -> String {
     })
 }
 
-/// `YYYY-MM-DD` or `YYYYMMDD` at the start of `s`: the first field out of range, if one is, and the rest of `s`. None
-/// if `s` doesn't start with either form.
+/// Whether a time or date-time gives hour 24. Python 3.14's `fromisoformat` reads it as the end of the day (the next
+/// day's midnight), earlier Pythons refuse it; rkdl refuses it on every Python, as RFC 3339 does, so a file means the
+/// same everywhere.
+pub(crate) fn hour_24(kind: Iso, text: &str) -> bool {
+    split(kind, text.as_bytes())
+        .and_then(|(_, rest)| number(rest?, 2))
+        .is_some_and(|(hour, _)| hour == 24)
+}
+
+/// A time or date-time's date part's reason, if it has one, and the time part, if there is one to pick out.
+fn split(kind: Iso, s: &[u8]) -> Option<(Option<String>, Option<&[u8]>)> {
+    match kind {
+        Iso::Date => None,
+        Iso::Time => Some((None, Some(s.strip_prefix(b"T").unwrap_or(s)))),
+        // Python takes any one character between the date and the time.
+        Iso::DateTime => date(s).map(|(reason, rest)| (reason, rest.get(1..))),
+    }
+}
+
+/// `YYYY-MM-DD` or `YYYYMMDD` at the start of `s`: the first field out of range, if one is, and the rest of `s`. A
+/// week date (`YYYY-Www[-D]`, `YYYYWww[D]`) gives no reason, only the rest. None if `s` doesn't start with a date.
 fn date(s: &[u8]) -> Option<(Option<String>, &[u8])> {
     let (year, s) = number(s, 4)?;
     let dashed = s.first() == Some(&b'-');
     let s = if dashed { s.get(1..)? } else { s };
+    if let Some(week) = s.strip_prefix(b"W") {
+        let (_, rest) = number(week, 2)?;
+        let day = if dashed { rest.strip_prefix(b"-") } else { Some(rest) };
+        let rest = day.and_then(|d| number(d, 1)).map_or(rest, |(_, after)| after);
+        return Some((None, rest));
+    }
     let (month, s) = number(s, 2)?;
     let s = if dashed { s.strip_prefix(b"-")? } else { s };
     let (day, rest) = number(s, 2)?;
@@ -114,7 +137,7 @@ fn skip_digits(s: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Iso, reason};
+    use super::{Iso, hour_24, reason};
 
     #[test]
     fn names_the_field_out_of_range() {
@@ -136,6 +159,7 @@ mod tests {
             (Iso::Time, "12:00-2400", "offset must be under 24 hours, not -2400"),
             (Iso::DateTime, "2026-13-01T25:00", "month must be in 1..12, not 13"),
             (Iso::DateTime, "2026-01-01 24:30", "hour must be in 0..23, not 24"),
+            (Iso::DateTime, "2026-W05-6T24:00", "hour must be in 0..23, not 24"),
             (
                 Iso::DateTime,
                 "20260101T12:00:00+24:00",
@@ -165,5 +189,27 @@ mod tests {
             reason(Iso::DateTime, "2026-01-01T"),
             "expected an ISO 8601 date-time, like 2026-01-31T09:30:00"
         );
+    }
+
+    #[test]
+    fn finds_hour_24_after_any_date_form() {
+        let cases = [
+            (Iso::Time, "24:00", true),
+            (Iso::Time, "T2400", true),
+            (Iso::Time, "24:00:00+01:00", true),
+            (Iso::Time, "23:59:59", false),
+            (Iso::Time, "12:24", false),
+            (Iso::DateTime, "2026-01-31T24:00:00", true),
+            (Iso::DateTime, "20260131 24", true),
+            (Iso::DateTime, "2026-W05-6T24:00", true),
+            (Iso::DateTime, "2026-W05T24:00", true),
+            (Iso::DateTime, "2026W056T24:00", true),
+            (Iso::DateTime, "2026W05T24:00", true),
+            (Iso::DateTime, "2026-01-24T12:00", false),
+            (Iso::Date, "2026-01-24", false),
+        ];
+        for (kind, text, expected) in cases {
+            assert_eq!(hour_24(kind, text), expected, "{text}");
+        }
     }
 }
