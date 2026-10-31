@@ -289,8 +289,10 @@ def test_two_threads_detaching_one_node():
 
 def test_detach_while_other_threads_move_the_node_to_other_blocks():
     # Each thread takes the node out and puts it into its own block, so a detach can find the node under a different
-    # parent from the one it saw a moment ago. It takes the node out of wherever it is now. The window is narrow, so
-    # this runs more rounds than the other tests (about a hundred hits in 3000 rounds of three threads).
+    # parent from the one it saw a moment ago (about a hundred times in 3000 rounds of three threads; the window is
+    # narrow, hence the rounds). What this checks: a racing detach never raises or panics, and the document ends with
+    # the node in one block at most, its parent's. It can't check which block a racing detach took the node out of:
+    # every check after `detach()` returns races with the other threads too.
     doc = rkdl.parse("p {\n    mover\n}\nq {\n    x\n}\nr {\n    y\n}\n")
     blocks = [doc["p"], doc["q"], doc["r"]]
     node = doc["p"]["mover"]

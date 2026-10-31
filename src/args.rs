@@ -358,13 +358,9 @@ impl Args {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        // unreachable-start: read() fails only with stale() (the id tree and the KDL disagree: an rkdl bug): a
-        // node's home never empties, a move is retried, and snapshot runs no Python, so retry never gives up. Kept
-        // so a repr never raises
         let Ok(snapshot) = read(py, self.node.get()) else {
             return Ok("Args(<unreadable>)".to_owned());
         };
-        // unreachable-end
         let found = args(&snapshot.items)
             .into_iter()
             .map(|(_, item)| item.repr(py, snapshot.types(), false))
@@ -375,5 +371,28 @@ impl Args {
     // No `__clear__`: a cycle through the node passes a Type, which clears.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.node)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handles::Home;
+    use crate::props::Props;
+    use crate::testing::{empty_doc, stray_id, with_python};
+
+    // Reprs never raise. A node out of step with its document (an rkdl bug) can't be read, and its repr and its views'
+    // reprs say so rather than raise.
+    #[test]
+    fn reprs_of_a_node_that_cant_be_read() {
+        with_python(|py| {
+            let node = Py::new(py, Node::new(stray_id(), Home::new(empty_doc(py)))).expect("allocates");
+            let repr = |object: Bound<'_, PyAny>| object.repr().expect("never raises").to_string();
+            assert_eq!(repr(node.bind(py).clone().into_any()), "<Node (unreadable)>");
+            let args = Bound::new(py, Args::new(node.clone_ref(py))).expect("allocates");
+            assert_eq!(repr(args.into_any()), "Args(<unreadable>)");
+            let props = Bound::new(py, Props::new(node)).expect("allocates");
+            assert_eq!(repr(props.into_any()), "Props(<unreadable>)");
+        });
     }
 }

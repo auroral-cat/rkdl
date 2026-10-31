@@ -114,10 +114,12 @@ impl Home {
             // unreachable: a home's lock is poisoned only by a panic while it's held, and nothing under it can panic
             // (its holders only swap a Place, compare a generation or clone_ref)
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            // unreachable: a race with no deterministic route: the collector traversing a handle on one thread while
-            // a move on another holds the handle's home lock in repoint (a few nanoseconds; that lock is never held
-            // while Python runs). gc.collect() in a loop while 500 handled nodes move between documents hits it a
-            // few times a second, but skipping or waiting give the same result, so no test can tell; not in the suite
+            // unreachable: a race no test can make happen on demand: the collector traverses a handle on one thread
+            // while a move on another holds that handle's home lock in repoint, which takes nanoseconds and never
+            // runs Python. A probe hits it: loops/coverage/runs/round3/handles/probe-traverse-race.py in the wiki
+            // (two threads calling gc.collect() while a block node with 500 handled children moves between two
+            // documents, a few hits in 5 s; moving one child at a time hits it far less). Skipping and waiting give
+            // the same result there (the holders run detached and need nothing to finish), so a test couldn't fail
             Err(TryLockError::WouldBlock) => return Ok(()),
         };
         match &place.ptr {
@@ -165,11 +167,9 @@ impl Drop for Garbage {
     /// from the cycle collector for good, so this settles them anyway. The panic poisoned the documents it had
     /// locked, but a node it moved to a new private home may still be usable.
     fn drop(&mut self) {
-        // unreachable-start: (the true side) moved homes are left only when a panic skipped release, i.e. an rkdl bug
         if !self.moved.is_empty() {
             Python::try_attach(|py| self.settle(py));
         }
-        // unreachable-end
     }
 }
 
@@ -389,12 +389,61 @@ pub(crate) fn on_home<R>(
         match op(&doc) {
             Ok(result) => Ok(Some(result)),
             Err(Fail::Err(err)) => Err(err),
-            // unreachable: (the true side) every Fail::Missing comes with a moved home: an entry is removed only by
-            // Target::remove, which empties its home and bumps the generation under the same lock, and a node's
-            // home is repointed by every move; the rest are stale() (an rkdl bug). Kept so such a bug raises rather
-            // than retrying forever
             Err(Fail::Missing(err)) if !home.moved_from(&doc) => Err(err),
             Err(Fail::Changed | Fail::Missing(_)) => Ok(None),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{empty_doc, with_python};
+
+    // `Fail::Missing` from a home that didn't move is the answer (its doc): the error comes out after one try. Retrying
+    // it instead would loop forever, since nothing changes.
+    #[test]
+    fn missing_from_an_unmoved_home_is_the_answer() {
+        with_python(|py| {
+            let home = Home::new(empty_doc(py));
+            let mut tries = 0;
+            let result: PyResult<()> = on_home(py, &home, |_| {
+                tries += 1;
+                Err(Fail::Missing(stale()))
+            });
+            let err = result.expect_err("the error is the answer");
+            assert!(err.is_instance_of::<PyRuntimeError>(py));
+            assert!(err.to_string().contains("out of step with its document"), "{err}");
+            assert_eq!(tries, 1);
+        });
+    }
+
+    // A `Garbage` dropped without `release` (a panic skipped it) still gives each home `repoint` moved a reference of
+    // its own, so the document doesn't stay hidden from the collector.
+    #[test]
+    fn garbage_dropped_without_release_settles_its_homes() {
+        with_python(|py| {
+            let home = Home::new(empty_doc(py));
+            let to = Arc::new(empty_doc(py));
+            let mut garbage = Garbage::default();
+            repoint_one(&home, &to, &mut garbage);
+            assert!(matches!(&home.place().ptr, Ptr::Shared(_)));
+            drop(garbage);
+            assert!(matches!(&home.place().ptr, Ptr::Own(doc) if doc.is(&*to)));
+        });
+    }
+
+    /// What `repoint` does to one live handle's home.
+    fn repoint_one(home: &Arc<Home>, to: &Arc<Py<Document>>, garbage: &mut Garbage) {
+        let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
+        let old = std::mem::replace(
+            &mut *home.place(),
+            Place {
+                ptr: Ptr::Shared(Arc::clone(to)),
+                generation,
+            },
+        );
+        garbage.old.push(old.ptr);
+        garbage.moved.push((Arc::clone(home), generation, Arc::clone(to)));
+    }
 }

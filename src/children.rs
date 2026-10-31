@@ -133,12 +133,9 @@ fn check_detached(id: NodeId, home: &Home, source_doc: &DocRef, source: &DocStat
     }
     // Another thread inserted it first; the retry will find it attached. `on_doc` follows the target's home, not the
     // node's, so this applies the `Fail::Missing` rule to the node's home itself.
-    // unreachable: (the false side) every move out of a document repoints the node's handles under that document's
-    // lock, so a node gone from its home's document always finds its home moved; anything else is an rkdl bug
     Err(if home.moved_from(source_doc) {
         Fail::Changed
     } else {
-        // unreachable: the home didn't move but the node left its document: an rkdl bug, which stale() says
         Fail::Err(stale())
     })
 }
@@ -157,7 +154,7 @@ impl NewHome {
         let doc = Py::new(
             py,
             Document::empty_home(from.get().types.clone_ref(py), from.get().path.clone()),
-        )?; // unreachable: Py::new fails only when allocating the object does
+        )?;
         Ok(NewHome {
             shared: Arc::new(doc.clone_ref(py)),
             doc,
@@ -998,5 +995,28 @@ impl Children {
     // No `__clear__`, as for the other views: any cycle through the owner passes a Type, which clears.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(self.owner.as_py())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{empty_doc, stray_id, with_python};
+
+    // A node gone from its home's document when no move repointed the home: the id tree and the KDL disagree, which
+    // only an rkdl bug does. `check_detached` says so (`stale()`) rather than asking for a retry that would find the
+    // same thing forever.
+    #[test]
+    fn a_node_gone_from_an_unmoved_home_is_stale() {
+        with_python(|py| {
+            let home = Home::new(empty_doc(py));
+            let source = home.doc(py).expect("a node's home never empties");
+            let result = source
+                .get()
+                .with_state(py, |s| check_detached(stray_id(), &home, &source, s));
+            assert!(
+                matches!(&result, Err(Fail::Err(err)) if err.to_string().contains("out of step with its document"))
+            );
+        });
     }
 }
