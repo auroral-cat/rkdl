@@ -284,8 +284,9 @@ def test_finalizer_in_a_garbage_cycle_gets_a_fresh_handle(case):
 
 
 def test_a_weakref_callback_on_a_handle_can_look_its_node_up():
-    # The cache's own callback on the dying handle runs after this one, and finds the slot already holds the new
-    # handle, which it leaves alone: the new handle stays the node's one handle.
+    # The handle's home is freed before its weakrefs are cleared, and CPython runs the newer callback first, so this
+    # lookup finds the node's slot dead and puts a new handle in it. The cache's own callback for the old handle runs
+    # after, and must leave the new one's slot alone.
     doc = rkdl.parse("server 8080\n")
     looked_up = []
     ref = weakref.ref(doc["server"], lambda _: looked_up.append(doc["server"]))
