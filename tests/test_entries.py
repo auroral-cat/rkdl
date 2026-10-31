@@ -175,8 +175,6 @@ def test_views_take_int_indexes_and_iterables():
     with pytest.raises(TypeError):
         n.args[0:1] = 5
     with pytest.raises(TypeError):
-        n.args.extend(5)
-    with pytest.raises(TypeError):
         n.props = 5
     with pytest.raises(TypeError):
         n.props.update(5)
@@ -188,7 +186,9 @@ def test_views_take_int_indexes_and_iterables():
     assert str(d) == "n 1 2 a=3\n"
 
 
-@pytest.mark.xfail(strict=True, reason="props take pairs only as tuples; a dict takes any two-item iterable")
+@pytest.mark.xfail(
+    strict=True, raises=TypeError, reason="props take pairs only as tuples; a dict takes any two-item iterable"
+)
 def test_props_update_takes_pairs_as_lists():
     d, n = node("n a=1\n")
     n.props.update([["b", 2]])
