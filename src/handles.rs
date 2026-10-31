@@ -111,7 +111,13 @@ impl Home {
         // the collector can't free it as garbage meanwhile.
         let place = match self.0.try_lock() {
             Ok(place) => place,
+            // unreachable: a home's lock is poisoned only by a panic while it's held, and nothing under it can panic
+            // (its holders only swap a Place, compare a generation or clone_ref)
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            // unreachable: a race with no deterministic route: the collector traversing a handle on one thread while
+            // a move on another holds the handle's home lock in repoint (a few nanoseconds; that lock is never held
+            // while Python runs). gc.collect() in a loop while 500 handled nodes move between documents hits it a
+            // few times a second, but skipping or waiting give the same result, so no test can tell; not in the suite
             Err(TryLockError::WouldBlock) => return Ok(()),
         };
         match &place.ptr {
@@ -159,9 +165,11 @@ impl Drop for Garbage {
     /// from the cycle collector for good, so this settles them anyway. The panic poisoned the documents it had
     /// locked, but a node it moved to a new private home may still be usable.
     fn drop(&mut self) {
+        // unreachable-start: (the true side) moved homes are left only when a panic skipped release, i.e. an rkdl bug
         if !self.moved.is_empty() {
             Python::try_attach(|py| self.settle(py));
         }
+        // unreachable-end
     }
 }
 
@@ -381,6 +389,10 @@ pub(crate) fn on_home<R>(
         match op(&doc) {
             Ok(result) => Ok(Some(result)),
             Err(Fail::Err(err)) => Err(err),
+            // unreachable: (the true side) every Fail::Missing comes with a moved home: an entry is removed only by
+            // Target::remove, which empties its home and bumps the generation under the same lock, and a node's
+            // home is repointed by every move; the rest are stale() (an rkdl bug). Kept so such a bug raises rather
+            // than retrying forever
             Err(Fail::Missing(err)) if !home.moved_from(&doc) => Err(err),
             Err(Fail::Changed | Fail::Missing(_)) => Ok(None),
         }

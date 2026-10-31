@@ -84,6 +84,9 @@ impl Node {
     pub(crate) fn repr(&self, py: Python<'_>) -> String {
         match self.with_node(py, |n| values::identifier(n.name().value()).to_string()) {
             Ok(name) => format!("<Node {name}>"),
+            // unreachable: with_node fails only with stale() (the id tree and the KDL disagree: an rkdl bug): a node's
+            // home never empties, a move is retried, and it runs no Python, so retry never gives up. Kept so a repr
+            // never raises
             Err(_) => "<Node (unreadable)>".to_owned(),
         }
     }
@@ -124,6 +127,8 @@ pub(crate) struct Spec<'a, 'py> {
 
 /// Forgets the whitespace and comments inside a node's `(...)` and between it and the name.
 pub(crate) fn drop_annotation_text(node: &mut KdlNode) {
+    // unreachable: (the None side) every node here has a format: kdl-rs's parse and autoformat leave one, and so does
+    // every node rkdl builds; a node without one would have no annotation text to forget
     if let Some(f) = node.format_mut() {
         f.before_ty_name.clear();
         f.after_ty_name.clear();

@@ -133,9 +133,12 @@ fn check_detached(id: NodeId, home: &Home, source_doc: &DocRef, source: &DocStat
     }
     // Another thread inserted it first; the retry will find it attached. `on_doc` follows the target's home, not the
     // node's, so this applies the `Fail::Missing` rule to the node's home itself.
+    // unreachable: (the false side) every move out of a document repoints the node's handles under that document's
+    // lock, so a node gone from its home's document always finds its home moved; anything else is an rkdl bug
     Err(if home.moved_from(source_doc) {
         Fail::Changed
     } else {
+        // unreachable: the home didn't move but the node left its document: an rkdl bug, which stale() says
         Fail::Err(stale())
     })
 }
@@ -154,7 +157,7 @@ impl NewHome {
         let doc = Py::new(
             py,
             Document::empty_home(from.get().types.clone_ref(py), from.get().path.clone()),
-        )?;
+        )?; // unreachable: Py::new fails only when allocating the object does
         Ok(NewHome {
             shared: Arc::new(doc.clone_ref(py)),
             doc,

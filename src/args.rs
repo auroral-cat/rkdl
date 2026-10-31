@@ -358,9 +358,13 @@ impl Args {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        // unreachable-start: read() fails only with stale() (the id tree and the KDL disagree: an rkdl bug): a
+        // node's home never empties, a move is retried, and snapshot runs no Python, so retry never gives up. Kept
+        // so a repr never raises
         let Ok(snapshot) = read(py, self.node.get()) else {
             return Ok("Args(<unreadable>)".to_owned());
         };
+        // unreachable-end
         let found = args(&snapshot.items)
             .into_iter()
             .map(|(_, item)| item.repr(py, snapshot.types(), false))
