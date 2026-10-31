@@ -45,6 +45,8 @@
 //! writes comes a line ending, a `;`, or the parent's `}`. So a new block goes after a node's trailing spaces, and a
 //! node with a block at the end of a one-line block ends with `;` before the space: `a { b {}; }`.
 
+use std::borrow::Cow;
+
 use kdl::{KdlDocument, KdlDocumentFormat, KdlNode, KdlNodeFormat};
 
 use crate::tree::{node_at, node_at_mut};
@@ -87,11 +89,10 @@ fn eol_in(text: &str) -> Option<&'static str> {
 fn lines(text: &str) -> Vec<(&str, &str)> {
     let mut out = Vec::new();
     let mut rest = text;
-    while let Some((line, tail)) = rest.find(NEWLINES).and_then(|i| rest.split_at_checked(i))
-        && let Some((ending, next)) = eol_at(tail).and_then(|e| tail.split_at_checked(e.len()))
-    {
+    while let Some((line, tail)) = rest.find(NEWLINES).and_then(|i| rest.split_at_checked(i)) {
+        let ending = eol_at(tail).expect("NEWLINES and eol_at list the same line endings");
         out.push((line, ending));
-        rest = next;
+        rest = tail.get(ending.len()..).unwrap_or_default();
     }
     out.push((rest, ""));
     out
@@ -542,13 +543,13 @@ fn first_eol(block: &KdlDocument) -> Option<&'static str> {
             }
             Part::Node(node) => {
                 let f = node.format();
-                if let Some(f) = f {
-                    pending.extend([&f.trailing, &f.terminator, &f.before_terminator].map(|t| Part::Text(t)));
-                }
+                let after = f
+                    .into_iter()
+                    .flat_map(|f| [&f.trailing, &f.terminator, &f.before_terminator]);
+                pending.extend(after.map(|t| Part::Text(t)));
                 pending.extend(node.children().map(Part::Block));
-                if let Some(f) = f {
-                    pending.extend([&f.before_children, &f.leading].map(|t| Part::Text(t)));
-                }
+                let before = f.into_iter().flat_map(|f| [&f.before_children, &f.leading]);
+                pending.extend(before.map(|t| Part::Text(t)));
             }
         }
     }
@@ -675,7 +676,7 @@ impl Shift {
     /// Moves the lines in a node's own text: `\` continuations, and comments and slashdashed parts after its name.
     /// What follows its terminator is the next line's start, which isn't the node's.
     fn move_own_text(&self, node: &mut KdlNode) {
-        edit_own_text(node, |text, before_terminator| {
+        edit_own_text(node, self.eol, |text, before_terminator| {
             if before_terminator {
                 self.apply(text, false)
             } else {
@@ -725,22 +726,21 @@ impl Shift {
 
 /// Rewrites the text of a node apart from its leading, its children and its values: the whitespace around its
 /// entries, where `\` continuations end their lines, and comments and slashdashed parts. `edit` also gets whether the
-/// text comes before the terminator.
-fn edit_own_text(node: &mut KdlNode, mut edit: impl FnMut(&str, bool) -> String) {
+/// text comes before the terminator. `eol` is the line ending style.
+fn edit_own_text(node: &mut KdlNode, eol: &str, mut edit: impl FnMut(&str, bool) -> String) {
     crate::parser::annotation::editing(node, |node| {
-        if let Some(f) = node.format_mut() {
-            for text in [
-                &mut f.before_ty_name,
-                &mut f.after_ty_name,
-                &mut f.after_ty,
-                &mut f.before_children,
-                &mut f.before_terminator,
-            ] {
-                *text = edit(text, true);
-            }
-            for text in [&mut f.terminator, &mut f.trailing] {
-                *text = edit(text, false);
-            }
+        let f = fmt_mut(node, eol);
+        for text in [
+            &mut f.before_ty_name,
+            &mut f.after_ty_name,
+            &mut f.after_ty,
+            &mut f.before_children,
+            &mut f.before_terminator,
+        ] {
+            *text = edit(text, true);
+        }
+        for text in [&mut f.terminator, &mut f.trailing] {
+            *text = edit(text, false);
         }
     });
     for entry in node.entries_mut() {
@@ -762,7 +762,7 @@ fn edit_own_text(node: &mut KdlNode, mut edit: impl FnMut(&str, bool) -> String)
 
 /// Line endings in a node's own text.
 fn restyle_node(node: &mut KdlNode, eol: &str) {
-    edit_own_text(node, |text, _| restyle(text, eol));
+    edit_own_text(node, eol, |text, _| restyle(text, eol));
 }
 
 /// Puts every line ending in the document's whitespace and comments in the style `eol`. Line endings inside values
@@ -775,9 +775,8 @@ pub fn restyle_document(doc: &mut KdlDocument, eol: &str) {
             f.trailing = restyle(&f.trailing, eol);
         }
         for node in block.nodes_mut() {
-            if let Some(f) = node.format_mut() {
-                f.leading = restyle(&f.leading, eol);
-            }
+            let f = fmt_mut(node, eol);
+            f.leading = restyle(&f.leading, eol);
             restyle_node(node, eol);
         }
         pending.extend(block.nodes_mut().iter_mut().filter_map(|n| n.children_mut().as_mut()));
@@ -786,29 +785,38 @@ pub fn restyle_document(doc: &mut KdlDocument, eol: &str) {
 
 /// Moves everything under `node` to its new indentation and line ending style.
 fn reindent_children(node: &mut KdlNode, shift: &Shift) {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
+    // Each node with the indent of its line where it lands: the caller gives the top one its leading after this.
+    let mut pending = vec![(node, shift.to.clone())];
+    while let Some((node, indent)) = pending.pop() {
         let Some(block) = node.children_mut() else {
             continue;
         };
-        let mut line_start = false;
-        if let Some(f) = block.format_mut() {
+        if block.format().is_none() {
+            // kdl-rs prints a block without a format record over lines, so it's laid out like one: a node per line
+            // at the new indent, and `}` lined up with the parent.
+            spread(block, &indent, &shift.to_unit, shift.eol);
+            for child in block.nodes_mut() {
+                shift.move_own_text(child);
+            }
+        } else {
+            let f = block_fmt_mut(block);
             f.leading = shift.apply(&f.leading, false);
             // Spaces after the last line ending were reindented already, as the start of that line. Only an empty
             // block has more text on that line: its trailing.
-            line_start = f.leading.ends_with(NEWLINES);
-        }
-        for child in block.nodes_mut() {
-            if let Some(f) = child.format_mut() {
+            let mut line_start = f.leading.ends_with(NEWLINES);
+            for child in block.nodes_mut() {
+                let f = fmt_mut(child, shift.eol);
                 f.leading = shift.apply(&f.leading, line_start);
                 line_start = ends_line(&format!("{}{}", f.terminator, f.trailing));
+                shift.move_own_text(child);
             }
-            shift.move_own_text(child);
-        }
-        if let Some(f) = block.format_mut() {
+            let f = block_fmt_mut(block);
             f.trailing = shift.apply(&f.trailing, line_start);
         }
-        pending.extend(block.nodes_mut());
+        pending.extend(block.nodes_mut().iter_mut().map(|child| {
+            let indent = indent_of(leading(child)).to_owned();
+            (child, indent)
+        }));
     }
 }
 
@@ -920,13 +928,12 @@ pub fn drop_gap(doc: &KdlDocument, path: &[usize], copy: &mut KdlNode) {
         node_at(doc, parent).children().expect("a parent has a block")
     };
     let start = line_start_at(block, index, !parent.is_empty());
-    if let Some(f) = copy.format_mut() {
-        let gap = gap_len(&f.leading, start);
-        f.leading.replace_range(..gap, "");
-        // Where `take` puts them, so they go back after the `;` when the copy is placed.
-        if let Some(rest) = semicolon_rest(block, index, parent.is_empty()).filter(|rest| !is_blank(rest)) {
-            f.trailing.push_str(rest);
-        }
+    let f = fmt_mut(copy, "\n");
+    let gap = gap_len(&f.leading, start);
+    f.leading.replace_range(..gap, "");
+    // Where `take` puts them, so they go back after the `;` when the copy is placed.
+    if let Some(rest) = semicolon_rest(block, index, parent.is_empty()).filter(|rest| !is_blank(rest)) {
+        f.trailing.push_str(rest);
     }
 }
 
@@ -938,17 +945,16 @@ fn is_single_line(block: &KdlDocument) -> bool {
 /// Whether `node` can go into a single-line block: its text, apart from the whitespace around it, has no line
 /// endings, and it ends with at most a `;`.
 fn fits_on_a_line(node: &KdlNode) -> bool {
-    let Some(f) = node.format() else {
-        return false;
-    };
-    let tail = format!("{}{}", f.terminator, f.trailing);
-    !f.leading.trim_start().contains(NEWLINES)
-        && !own_text_breaks(node)
-        && !node
-            .children()
-            .is_some_and(|block| block.format().is_none() || block_breaks(block))
-        && continuation(&last_part(node)).is_none()
-        && matches!(tail.trim(), "" | ";")
+    node.format().is_some_and(|f| {
+        let tail = format!("{}{}", f.terminator, f.trailing);
+        !f.leading.trim_start().contains(NEWLINES)
+            && !own_text_breaks(node)
+            && !node
+                .children()
+                .is_some_and(|block| block.format().is_none() || block_breaks(block))
+            && continuation(&last_part(node)).is_none()
+            && matches!(tail.trim(), "" | ";")
+    })
 }
 
 // The checks below read the parts kdl-rs prints rather than printing them: its printing recurses once per level.
@@ -987,8 +993,7 @@ fn block_breaks(block: &KdlDocument) -> bool {
 /// Whether a node's own text has a line ending: everything but its leading text, its children, its terminator and its
 /// trailing text.
 fn own_text_breaks(node: &KdlNode) -> bool {
-    let f = node.format();
-    let format_breaks = f.is_some_and(|f| {
+    let format = node.format().into_iter().flat_map(|f| {
         [
             &f.before_ty_name,
             &f.after_ty_name,
@@ -996,13 +1001,13 @@ fn own_text_breaks(node: &KdlNode) -> bool {
             &f.before_children,
             &f.before_terminator,
         ]
-        .iter()
-        .any(|t| t.contains(NEWLINES))
+        .map(|text| Cow::Borrowed(text.as_str()))
     });
-    format_breaks
-        || node.name().to_string().contains(NEWLINES)
-        || node.ty().is_some_and(|ty| ty.to_string().contains(NEWLINES))
-        || node.entries().iter().any(|e| e.to_string().contains(NEWLINES))
+    let name = std::iter::once(node.name().to_string());
+    let ty = node.ty().map(ToString::to_string);
+    let entries = node.entries().iter().map(ToString::to_string);
+    let parts = name.chain(ty).chain(entries).map(Cow::Owned);
+    format.chain(parts).any(|text| text.contains(NEWLINES))
 }
 
 /// The last part of a node's text that isn't all spaces, before its terminator.
@@ -1061,9 +1066,10 @@ fn fit_inline(node: &mut KdlNode, space: &str, closing: &str, terminator: String
 /// would sit right after its own `}`, which kdl-rs drops when it reads the text back. After the
 /// `;`, the space belongs to the block.
 fn semicolon_after_block(block: &mut KdlDocument, index: usize) {
-    let Some(node) = block.nodes_mut().get_mut(index) else {
-        return;
-    };
+    let node = block
+        .nodes_mut()
+        .get_mut(index)
+        .expect("the caller just put a node at the index, or a path leads to it");
     if node.children().is_none() || !ends_open(node) {
         return;
     }
@@ -1175,7 +1181,6 @@ fn close_on_own_line(block: &mut KdlDocument, style: &Style) {
 /// Ends the line of the node at `index`: with `rest`, the rest of its line taken from the text after it, or else with
 /// a line ending of its own.
 fn end_line(block: &mut KdlDocument, index: usize, rest: Option<String>, style: &Style) {
-    let last = index + 1 == block.nodes().len();
     let node = block.nodes_mut().get_mut(index).expect("the caller checks the index");
     match rest {
         Some(rest) => fmt_mut(node, style.eol).trailing.push_str(&rest),
@@ -1183,9 +1188,8 @@ fn end_line(block: &mut KdlDocument, index: usize, rest: Option<String>, style: 
             // Spaces that came before a `}` would now end the line.
             split_closing(node);
             fmt_mut(node, style.eol).terminator = style.eol.into();
-            if last {
-                close_on_own_line(block, style);
-            }
+            // Only the last node ends open, before the `}`.
+            close_on_own_line(block, style);
         }
         None => fmt_mut(node, style.eol).trailing.push_str(style.eol),
     }
@@ -1315,14 +1319,12 @@ fn place_at(
 /// Takes the node at `index` out of `block`, the inverse of `place`. An emptied children block prints as `{}`.
 pub fn unplace(block: &mut KdlDocument, index: usize, style: &Style) -> KdlNode {
     let node = take(block, index, style);
-    if style.parent.is_some()
-        && block.nodes().is_empty()
-        && let Some(f) = block.format_mut()
-        && is_blank(&f.leading)
-        && is_blank(&f.trailing)
-    {
-        f.leading.clear();
-        f.trailing.clear();
+    if style.parent.is_some() && block.nodes().is_empty() {
+        let f = block_fmt_mut(block);
+        if is_blank(&f.leading) && is_blank(&f.trailing) {
+            f.leading.clear();
+            f.trailing.clear();
+        }
     }
     node
 }
@@ -1443,9 +1445,6 @@ struct Slot {
     lead: String,
     /// Spaces before the terminator.
     closing: String,
-    /// Whether the node there is followed by its terminator, or by the end of the block. A parsed node in the middle
-    /// of a block always is: rkdl puts back the terminator kdl-rs drops after a `}` and spaces.
-    ends: bool,
     terminator: String,
     trailing: String,
     /// Whether the line goes on after the `;` with only spaces and comments, which the text after the node holds.
@@ -1473,7 +1472,7 @@ fn slot_and_own(block: &KdlDocument, index: usize, top: bool) -> (Slot, Own) {
     let before = prev.and_then(|prev| semicolon_rest(block, prev, top));
     let rest = semicolon_rest(block, index, top);
     let last = index + 1 == block.nodes().len();
-    let (mut slot, own) = split_node(node, last, before.map_or(0, |rest| comments_in(rest).len()), rest);
+    let (mut slot, own) = split_node(node, before.map_or(0, |rest| comments_in(rest).len()), rest);
     let text_after = after(block, index);
     slot.file_end = top && last && is_blank(text_after) && !text_after.contains(NEWLINES);
     // The end of the file ends the line after a `;` too.
@@ -1484,14 +1483,14 @@ fn slot_and_own(block: &KdlDocument, index: usize, top: bool) -> (Slot, Own) {
     (slot, own)
 }
 
-/// What's a node's own, as the last node of a block of its own.
+/// What's a node's own, as the only node of a block of its own.
 fn own_of(node: &KdlNode) -> Own {
-    split_node(node, true, 0, None).1
+    split_node(node, 0, None).1
 }
 
-/// Splits a node's whitespace from what's its own. `last` says whether it's the last node of its block, `before` how
-/// much of its leading is the comments of the node before it, and `rest` is the rest of its line after its `;`.
-fn split_node(node: &KdlNode, last: bool, before: usize, rest: Option<&str>) -> (Slot, Own) {
+/// Splits a node's whitespace from what's its own. `before` is how much of its leading is the comments of the node
+/// before it, and `rest` is the rest of its line after its `;`.
+fn split_node(node: &KdlNode, before: usize, rest: Option<&str>) -> (Slot, Own) {
     let (lead, bt, terminator, trailing) = node.format().map_or(("", "", "", ""), |f| {
         (
             f.leading.as_str(),
@@ -1532,7 +1531,6 @@ fn split_node(node: &KdlNode, last: bool, before: usize, rest: Option<&str>) -> 
             before: before.to_owned(),
             lead: space.to_owned(),
             closing: closing.to_owned(),
-            ends: last || !terminator.is_empty() || !trailing.is_empty(),
             terminator: terminator.to_owned(),
             trailing: trailing.to_owned(),
             open_end: semicolon && rest.is_some(),
@@ -1552,8 +1550,7 @@ fn fits_slot(own: &Own, slot: &Slot, has_block: bool) -> bool {
     // A `//` comment has to end a line.
     let ends_line = slot.open_end || eol_at(&slot.terminator).is_some() || slot.file_end && slot.terminator.is_empty();
     let after_fits = !has_line_comment(&own.after) || ends_line;
-    slot.ends
-        && after_fits
+    after_fits
         // Comment lines after a `;` would be the comments on the line of the node before.
         && (slot.line_start || line_rest(&own.lead).is_none())
         && continuation(&own.tail).is_none()
@@ -1626,6 +1623,7 @@ pub fn permute(block: &mut KdlDocument, places: &[usize], from: &[usize]) -> boo
 
 /// `permute`, where `top` says whether the block is the document's: then a comment can end the last place.
 fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bool) -> bool {
+    const PLACES: &str = "places and from are places in this block";
     let count = block.nodes().len();
     let (slots, mut owns): (Vec<Slot>, Vec<Option<Own>>) = (0..count)
         .map(|i| slot_and_own(block, i, top))
@@ -1633,20 +1631,15 @@ fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bo
         .unzip();
     let mut source: Vec<usize> = (0..count).collect();
     for (&to, &from) in places.iter().zip(from) {
-        let fits = (
-            slots.get(to),
-            owns.get(from).and_then(Option::as_ref),
-            block.nodes().get(from),
-        );
-        let (Some(slot), Some(own), Some(node)) = fits else {
-            return false;
-        };
+        let fits = slots
+            .get(to)
+            .zip(owns.get(from).and_then(Option::as_ref))
+            .zip(block.nodes().get(from));
+        let ((slot, own), node) = fits.expect(PLACES);
         if to != from && !fits_slot(own, slot, node.children().is_some()) {
             return false;
         }
-        if let Some(s) = source.get_mut(to) {
-            *s = from;
-        }
+        *source.get_mut(to).expect(PLACES) = from;
     }
     // The comments after the last node's `;`, which kdl-rs keeps in the block's trailing.
     let end = count
@@ -1668,10 +1661,8 @@ fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bo
         let before = std::mem::take(&mut after);
         if from == to {
             // Only what came before it changes.
-            if node.format().is_some() || !before.is_empty() {
-                let f = fmt_mut(&mut node, "\n");
-                f.leading = join_comments(&before, f.leading.get(slot.before.len()..).unwrap_or_default());
-            }
+            let f = fmt_mut(&mut node, "\n");
+            f.leading = join_comments(&before, f.leading.get(slot.before.len()..).unwrap_or_default());
             if slot.open_end {
                 after = own.after;
             }
@@ -2124,6 +2115,7 @@ mod tests {
         drop_gap(&doc, &[0], &mut copy);
         assert_eq!(leading(&copy), "// about a\n");
     }
+
     /// `x 1` with a children block `{ y }` that has no format record, which kdl-rs prints with a line ending after
     /// `{`. rkdl never builds one: parsed blocks and `open_node_block`'s have a record.
     fn with_bare_block() -> KdlNode {
@@ -2156,17 +2148,10 @@ mod tests {
         assert!(!is_single_line(block));
     }
 
-    /// A strict xfail for a cargo test: `out` should be `expected`, and isn't yet. Once a fix makes it so, this
-    /// fails, and the call becomes an `assert_eq!`.
-    fn known_bug(out: &str, expected: &str, task: &str) {
-        assert_ne!(out, expected, "{task} fixed this: make it an assert_eq!");
-    }
-
     #[test]
     fn a_node_with_a_block_without_a_format_record_moves() {
         // Placed in a nested block, and in a one-line one (which spreads). It reads back with every node where it
-        // went. The module doc also has its children take the new indent and its `}` line up with it, which a block
-        // without a record doesn't get yet: today y stays at column 0 and `}` follows it on its line.
+        // went, its children take the new indent and its `}` lines up with it, as the module doc says.
         for text in ["a {\n    b\n}\n", "a { b }\n"] {
             let mut x = with_bare_block();
             x.format_mut().unwrap().before_children = " ".into();
@@ -2177,11 +2162,7 @@ mod tests {
             assert!(!is_single_line(block));
             let out = doc.to_string();
             assert_eq!(names(&parse(&out)), ["a", "b", "x", "y"], "{out:?}");
-            known_bug(
-                &out,
-                "a {\n    b\n    x 1 {\n        y\n    }\n}\n",
-                "task 71 (the node-format rewrite)",
-            );
+            assert_eq!(out, "a {\n    b\n    x 1 {\n        y\n    }\n}\n");
         }
     }
 
@@ -2197,8 +2178,8 @@ mod tests {
         assert_eq!(unplace(block, 0, &style).name().value(), "y");
         assert_eq!(block.nodes().len(), 0);
         assert_eq!(names(&parse(&doc.to_string())), ["p"]);
-        // `unplace`'s doc: an emptied children block prints as `{}`. Without a record, kdl-rs prints `{\n}` today.
-        known_bug(&doc.to_string(), "p {}\n", "task 71 (`block_fmt_mut` in `unplace`)");
+        // `unplace`'s doc: an emptied children block prints as `{}`.
+        assert_eq!(doc.to_string(), "p {}\n");
     }
 
     #[test]
@@ -2238,5 +2219,17 @@ mod tests {
         let style = Style::of(&doc, None, "\n");
         place(&mut doc, 1, x, &style);
         assert_eq!(doc.to_string(), "a\nx /* c */\n");
+    }
+
+    #[test]
+    fn a_node_without_a_format_record_gets_one_when_edited() {
+        // rkdl never builds one: parsed nodes and `KdlNode::new`'s have a record. Without it, kdl-rs prints no line
+        // ending after the node and no space before its `{`, so the text runs into the next node. The record `fmt_mut`
+        // gives it ends the node's line and puts the space back.
+        let mut doc = parse("b 1 {\n    c\n}\na\n");
+        doc.nodes_mut()[0].clear_format();
+        assert_eq!(doc.to_string(), "b 1{\n    c\n}a\n");
+        restyle_document(&mut doc, "\r\n");
+        assert_eq!(doc.to_string(), "b 1 {\r\n    c\r\n}\r\na\r\n");
     }
 }

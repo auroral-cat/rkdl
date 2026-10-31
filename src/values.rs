@@ -150,24 +150,27 @@ enum Builtin {
     PlainString,
 }
 
-const fn int(min: i128, max: i128) -> Builtin {
-    Builtin::Int { min, max }
+/// A `Builtin::Int` in the table below, on one line.
+macro_rules! int {
+    ($min:expr, $max:expr) => {
+        Builtin::Int { min: $min, max: $max }
+    };
 }
 
 const BUILTINS: &[(&str, Builtin)] = &[
-    ("i8", int(i8::MIN as i128, i8::MAX as i128)),
-    ("i16", int(i16::MIN as i128, i16::MAX as i128)),
-    ("i32", int(i32::MIN as i128, i32::MAX as i128)),
-    ("i64", int(i64::MIN as i128, i64::MAX as i128)),
-    ("i128", int(i128::MIN, i128::MAX)),
-    ("isize", int(i64::MIN as i128, i64::MAX as i128)),
-    ("u8", int(0, u8::MAX as i128)),
-    ("u16", int(0, u16::MAX as i128)),
-    ("u32", int(0, u32::MAX as i128)),
-    ("u64", int(0, u64::MAX as i128)),
+    ("i8", int!(i8::MIN as i128, i8::MAX as i128)),
+    ("i16", int!(i16::MIN as i128, i16::MAX as i128)),
+    ("i32", int!(i32::MIN as i128, i32::MAX as i128)),
+    ("i64", int!(i64::MIN as i128, i64::MAX as i128)),
+    ("i128", int!(i128::MIN, i128::MAX)),
+    ("isize", int!(i64::MIN as i128, i64::MAX as i128)),
+    ("u8", int!(0, u8::MAX as i128)),
+    ("u16", int!(0, u16::MAX as i128)),
+    ("u32", int!(0, u32::MAX as i128)),
+    ("u64", int!(0, u64::MAX as i128)),
     // kdl-rs stores integers as i128, so the top half of u128 can't be represented anyway.
-    ("u128", int(0, i128::MAX)),
-    ("usize", int(0, u64::MAX as i128)),
+    ("u128", int!(0, i128::MAX)),
+    ("usize", int!(0, u64::MAX as i128)),
     ("f32", Builtin::F32),
     ("f64", Builtin::F64),
     ("decimal64", Builtin::DecimalNumber),
@@ -198,19 +201,49 @@ const BUILTINS: &[(&str, Builtin)] = &[
     ("base85", Builtin::PlainString),
 ];
 
+/// A built-in type with a Python class of its own.
+#[derive(Clone, Copy)]
+enum Inferred {
+    DecimalString,
+    DateTime,
+    Date,
+    Time,
+    Ipv4,
+    Ipv6,
+    Uuid,
+    Regex,
+    Base64,
+}
+
+impl Inferred {
+    const fn builtin(self) -> Builtin {
+        match self {
+            Inferred::DecimalString => Builtin::DecimalString,
+            Inferred::DateTime => Builtin::DateTime,
+            Inferred::Date => Builtin::Date,
+            Inferred::Time => Builtin::Time,
+            Inferred::Ipv4 => Builtin::Ipv4,
+            Inferred::Ipv6 => Builtin::Ipv6,
+            Inferred::Uuid => Builtin::Uuid,
+            Inferred::Regex => Builtin::Regex,
+            Inferred::Base64 => Builtin::Base64,
+        }
+    }
+}
+
 // Which annotation a non-plain Python value gets when nothing else claims it. datetime comes before date because
 // it's a subclass of date.
-const INFERRED: &[(&str, Builtin)] = &[
-    ("date-time", Builtin::DateTime),
-    ("date", Builtin::Date),
-    ("time", Builtin::Time),
-    ("ipv4", Builtin::Ipv4),
-    ("ipv6", Builtin::Ipv6),
-    ("uuid", Builtin::Uuid),
-    ("regex", Builtin::Regex),
-    ("base64", Builtin::Base64),
+const INFERRED: &[(&str, Inferred)] = &[
+    ("date-time", Inferred::DateTime),
+    ("date", Inferred::Date),
+    ("time", Inferred::Time),
+    ("ipv4", Inferred::Ipv4),
+    ("ipv6", Inferred::Ipv6),
+    ("uuid", Inferred::Uuid),
+    ("regex", Inferred::Regex),
+    ("base64", Inferred::Base64),
     // `decimal` rather than decimal64, since a string keeps every digit.
-    ("decimal", Builtin::DecimalString),
+    ("decimal", Inferred::DecimalString),
 ];
 
 enum Converter<'a> {
@@ -495,7 +528,7 @@ fn infer(value: &Bound<'_, PyAny>, types: &TypeRegistry) -> PyResult<Encoded> {
         if !matches!(types.get(name), Some(Converter::Builtin(_))) {
             continue;
         }
-        if let Some((kdl, repr)) = encode_builtin(b, value)? {
+        if let Some((kdl, repr)) = encode_builtin(b.builtin(), value)? {
             return Ok(Encoded {
                 value: kdl,
                 ty: Some(name.to_owned()),
@@ -544,24 +577,19 @@ fn writable(value: &Bound<'_, PyAny>, types: &TypeRegistry) -> PyResult<bool> {
 }
 
 /// Whether `value` is of the class built-in type `b` writes. A bytes pattern isn't: KDL can't spell it.
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "only the inferred types have a class of their own"
-)]
-fn claims(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+fn claims(b: Inferred, value: &Bound<'_, PyAny>) -> PyResult<bool> {
     match b {
-        Builtin::DecimalString => is_instance(value, "decimal", "Decimal"),
-        Builtin::DateTime => is_instance(value, "datetime", "datetime"),
-        Builtin::Date => is_instance(value, "datetime", "date"),
-        Builtin::Time => is_instance(value, "datetime", "time"),
-        Builtin::Ipv4 => is_instance(value, "ipaddress", "IPv4Address"),
-        Builtin::Ipv6 => is_instance(value, "ipaddress", "IPv6Address"),
-        Builtin::Uuid => is_instance(value, "uuid", "UUID"),
-        Builtin::Regex => {
+        Inferred::DecimalString => is_instance(value, "decimal", "Decimal"),
+        Inferred::DateTime => is_instance(value, "datetime", "datetime"),
+        Inferred::Date => is_instance(value, "datetime", "date"),
+        Inferred::Time => is_instance(value, "datetime", "time"),
+        Inferred::Ipv4 => is_instance(value, "ipaddress", "IPv4Address"),
+        Inferred::Ipv6 => is_instance(value, "ipaddress", "IPv6Address"),
+        Inferred::Uuid => is_instance(value, "uuid", "UUID"),
+        Inferred::Regex => {
             Ok(is_instance(value, "re", "Pattern")? && value.getattr("pattern")?.is_instance_of::<PyString>())
         }
-        Builtin::Base64 => Ok(value.is_instance_of::<PyBytes>()),
-        _ => Ok(false),
+        Inferred::Base64 => Ok(value.is_instance_of::<PyBytes>()),
     }
 }
 
@@ -708,13 +736,12 @@ fn plain_to_kdl(value: &Bound<'_, PyAny>) -> PyResult<Option<KdlValue>> {
         // bool is a subclass of int, so it has to be checked first.
         KdlValue::Bool(value.is_truthy()?)
     } else if value.is_instance_of::<PyInt>() {
-        KdlValue::Integer(exact_int(value)?.extract().map_err(|e: PyErr| {
-            if e.is_instance_of::<PyOverflowError>(value.py()) {
-                PyOverflowError::new_err("int doesn't fit in a KDL integer (i128)")
-            } else {
-                e
-            }
-        })?)
+        // An exact int's extract fails only by overflow.
+        KdlValue::Integer(
+            exact_int(value)?
+                .extract()
+                .map_err(|_overflow| PyOverflowError::new_err("int doesn't fit in a KDL integer (i128)"))?,
+        )
     } else if value.is_instance_of::<PyFloat>() {
         KdlValue::Float(value.extract()?)
     } else if value.is_instance_of::<PyString>() {
@@ -900,22 +927,15 @@ fn parse_builtin<'py>(
 
 /// rkdl's own reason a string doesn't fit `b`, where Python's message would change with the Python version or isn't
 /// meant for the file's author. None where Python's is stable and plain: the IP addresses, regex and base64.
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "only the types that parse a string have their own reasons"
-)]
 fn own_reason(b: Builtin, value: &KdlValue) -> Option<String> {
-    let KdlValue::String(text) = value else {
-        return None;
-    };
-    match b {
-        Builtin::DateTime => Some(iso::reason(Iso::DateTime, text)),
-        Builtin::Date => Some(iso::reason(Iso::Date, text)),
-        Builtin::Time => Some(iso::reason(Iso::Time, text)),
+    match (b, value) {
+        (Builtin::DateTime, KdlValue::String(text)) => Some(iso::reason(Iso::DateTime, text)),
+        (Builtin::Date, KdlValue::String(text)) => Some(iso::reason(Iso::Date, text)),
+        (Builtin::Time, KdlValue::String(text)) => Some(iso::reason(Iso::Time, text)),
         // Python's is `[<class 'decimal.ConversionSyntax'>]`.
-        Builtin::DecimalString => Some("expected a decimal number, like 1.25".to_owned()),
+        (Builtin::DecimalString, KdlValue::String(_)) => Some("expected a decimal number, like 1.25".to_owned()),
         // Python's is either "badly formed hexadecimal UUID string" or int()'s, depending on what's wrong.
-        Builtin::Uuid => Some("expected 32 hex digits".to_owned()),
+        (Builtin::Uuid, KdlValue::String(_)) => Some("expected 32 hex digits".to_owned()),
         _ => None,
     }
 }
@@ -1030,8 +1050,9 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
             let own: u32 = match re.getattr("compile")?.call1((&pattern,)) {
                 Ok(own) => own.getattr("flags")?.extract()?,
                 // A VERBOSE comment can hold what doesn't compile without the flag, like `# (optional`. The flag
-                // isn't inline then, or the pattern would compile alone.
-                Err(err) if err.is_instance_of::<py_re::error>(value.py()) && flags & verbose != 0 => {
+                // isn't inline then, or the pattern would compile alone. VERBOSE is the only flag that changes what
+                // parses, so a pattern that compiled with its flags and fails alone was compiled with it.
+                Err(err) if err.is_instance_of::<py_re::error>(value.py()) => {
                     let own: u32 = re
                         .getattr("compile")?
                         .call1((&pattern, verbose))?
@@ -1151,16 +1172,24 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
     let is_int = value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>();
     let is_float = value.is_instance_of::<PyFloat>();
     Ok(match b {
-        Builtin::Int { .. } if is_float => {
+        Builtin::Int { min, max } if is_float => {
             let f: f64 = value.extract()?;
             // A whole float converts, so one that gets here is either not whole or out of range.
-            if f.is_finite() && f.fract() == 0.0 {
-                range_of(b)
+            Some(if f.is_finite() && f.fract() == 0.0 {
+                int_range(min, max)
             } else {
-                Some(expected(b).to_owned())
-            }
+                expected(b).to_owned()
+            })
         }
-        Builtin::Int { .. } | Builtin::F32 | Builtin::F64 if is_int || is_float => range_of(b),
+        Builtin::Int { min, max } if is_int => Some(int_range(min, max)),
+        Builtin::F32 | Builtin::F64 if is_int || is_float => {
+            let range = if matches!(b, Builtin::F32) {
+                F32_RANGE
+            } else {
+                F64_RANGE
+            };
+            Some(range.to_owned())
+        }
         // Writing `#nan` would quietly drop the signal.
         Builtin::DecimalNumber
             if is_instance(value, "decimal", "Decimal")?
@@ -1169,7 +1198,7 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
             Some("KDL has no signaling NaN".to_owned())
         }
         // A Decimal too big for the f64 kdl-rs keeps.
-        Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => range_of(Builtin::F64),
+        Builtin::DecimalNumber if is_instance(value, "decimal", "Decimal")? => Some(F64_RANGE.to_owned()),
         _ => None,
     })
 }
@@ -1243,17 +1272,7 @@ fn decode_raised(py: Python<'_>, err: &PyErr) -> PyResult<String> {
     ))
 }
 
-/// "out of range ..." for a numeric built-in type, reading or writing.
-#[expect(clippy::wildcard_enum_match_arm, reason = "only the numeric types have a range")]
-fn range_of(b: Builtin) -> Option<String> {
-    match b {
-        Builtin::Int { min, max } => Some(int_range(min, max)),
-        Builtin::F32 => Some(F32_RANGE.to_owned()),
-        Builtin::F64 => Some(F64_RANGE.to_owned()),
-        _ => None,
-    }
-}
-
+/// "out of range ..." for an integer built-in type, reading or writing.
 fn int_range(min: i128, max: i128) -> String {
     format!("out of range {min}..={max}")
 }
@@ -1294,19 +1313,15 @@ fn decimal_number(value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlValue, Option
     // `str` gives the Decimal's own digits, which are a KDL number unless they're an integer too large for i128, or
     // `-0`, which would read back as `0`. Those get the float's text.
     let digits: String = value.str()?.extract()?;
-    let parsed = KdlEntry::parse(&digits)
-        .ok()
-        .filter(|e| e.name().is_none() && e.ty().is_none());
-    let spelled = parsed.and_then(|e| {
-        let read = match *e.value() {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "compared with the f64 Python rounds the Decimal to"
-            )]
-            KdlValue::Integer(i) => i as f64,
-            KdlValue::Float(g) => g,
-            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => return None,
-        };
+    let spelled = KdlEntry::parse(&digits).ok().and_then(|e| {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "compared with the f64 Python rounds the Decimal to"
+        )]
+        let read = e
+            .value()
+            .as_float()
+            .or_else(|| e.value().as_integer().map(|i| i as f64))?;
         (read.to_bits() == f.to_bits()).then(|| e.value().clone())
     });
     Ok(Some(match spelled {
@@ -1375,13 +1390,7 @@ pub(crate) fn _debug_from_python(
 
 #[cfg(test)]
 mod tests {
-    use super::{Builtin, int, reads_back_as};
-
-    #[test]
-    fn int_builds_an_int_type_with_its_min_and_max() {
-        // `int` builds the BUILTINS table, which is evaluated at compile time, so only a call here runs it.
-        assert!(matches!(int(-128, 127), Builtin::Int { min: -128, max: 127 }));
-    }
+    use super::reads_back_as;
 
     #[test]
     fn a_property_doesnt_read_back_as_its_value() {

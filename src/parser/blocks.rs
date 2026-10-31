@@ -46,10 +46,7 @@ fn restore_node(text: &str, node: &mut KdlNode, closes: Option<&[usize]>) {
     if !f.terminator.is_empty() {
         return;
     }
-    let Some(rest) = text.get(end..) else {
-        return;
-    };
-    f.terminator = terminator(rest).into();
+    f.terminator = terminator(text.get(end..).unwrap_or_default()).into();
     // The node's last `}`: its block's, or that of a slashdashed block after it, which ends `before_terminator`.
     let Some(&close) = closes.and_then(|closes| closes.get(closes.partition_point(|&c| c < end).wrapping_sub(1)))
     else {

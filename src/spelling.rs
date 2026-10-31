@@ -18,8 +18,9 @@ pub(crate) fn value(old: &str, value: &KdlValue) -> Option<String> {
         KdlValue::Float(f) if f.is_finite() => float(old, *f)?,
         _ => return None,
     };
+    // `integer` and `float` spell only signs, prefixes, digits and exponents, never a property or an annotation.
     KdlEntry::parse(&candidate)
-        .is_ok_and(|e| e.name().is_none() && e.ty().is_none() && same_value(e.value(), value))
+        .is_ok_and(|e| same_value(e.value(), value))
         .then_some(candidate)
 }
 
@@ -212,7 +213,7 @@ fn group_size(digits: &str) -> Option<usize> {
     let groups: Vec<&str> = digits.split('_').collect();
     let (first, rest) = groups.split_first()?;
     let size = rest.first()?.len();
-    let regular = size > 0 && rest.iter().all(|g| g.len() == size) && (1..=size).contains(&first.len());
+    let regular = rest.iter().all(|g| g.len() == size) && (1..=size).contains(&first.len());
     regular.then_some(size)
 }
 

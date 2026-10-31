@@ -100,9 +100,7 @@ pub(crate) fn detached<'py>(
     let mut kdl = KdlDocument::new();
     kdl.nodes_mut().push(node);
     let ids = IdTree::from_document(&kdl);
-    let &[id] = ids.top() else {
-        return Err(stale());
-    };
+    let id = ids.top().first().copied().ok_or_else(stale)?;
     let home = Bound::new(py, Document::empty_home(types, None))?;
     home.get().fill(kdl, ids, eol);
     // Nothing else can reach a new home, so the node is still there.

@@ -142,6 +142,9 @@ def test_taking_the_last_node_off_a_shared_line():
         ("a {\n    b; c\n}\n", "a {\n    c\n}\n"),
         ("a; b\n", "b\n"),
         ("a {b;c;}\n", "a {c;}\n"),
+        # The slashdashed node on the `{` line is b's own comment and goes with it; c starts the line b started.
+        ("a { /-x\n    b; c\n}\n", "a {\n    c\n}\n"),
+        ("a { /-x\r\n    b; c\r\n}\r\n", "a {\r\n    c\r\n}\r\n"),
     ],
 )
 def test_the_node_that_becomes_first_on_a_line_takes_its_start(text, expected):

@@ -210,6 +210,7 @@ fn render(diagnostic: &dyn miette::Diagnostic) -> String {
 ///
 /// miette's own text sources count lines at `\r` and `\n` only, and columns in bytes, a byte order mark included. Snippet
 /// headers count lines and columns as `ParseError.line` and `node.line` do instead, so they agree with the summary.
+#[derive(Debug)]
 struct Source {
     text: Arc<String>,
     name: Option<NamedSource<Arc<String>>>,
@@ -247,17 +248,12 @@ impl SourceCode for Source {
 
 /// One kdl-rs diagnostic with the text it points into. kdl-rs's diagnostics don't carry the text: the `KdlError` holding
 /// them does.
+#[derive(Debug)]
 struct Located<'a> {
     diagnostic: &'a KdlDiagnostic,
     /// kdl-rs's help, or rkdl's in its place.
     help: Option<&'a str>,
     source: &'a Source,
-}
-
-impl fmt::Debug for Located<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.diagnostic, f)
-    }
 }
 
 impl fmt::Display for Located<'_> {
