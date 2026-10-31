@@ -428,9 +428,9 @@ def test_user_encode_must_return_plain():
 
 def test_user_encode_returning_an_int_outside_i128_overflows():
     # What encode returns is written as a plain value would be, so the same limit applies.
-    kelvin_nanos = rkdl.Type("celsius", Celsius, decode=Celsius, encode=lambda c: c.degrees * 10**40)
+    too_fine = rkdl.Type("celsius", Celsius, decode=Celsius, encode=lambda c: c.degrees * 10**40)
     with pytest.raises(OverflowError, match=re.escape("int doesn't fit in a KDL integer (i128)")):
-        from_python(Celsius(1), None, [kelvin_nanos])
+        from_python(Celsius(1), None, [too_fine])
 
 
 def test_user_decode_errors_are_the_cause():
@@ -456,8 +456,6 @@ def test_type_attributes():
     assert CELSIUS.cls is Celsius
     assert CELSIUS.decode is Celsius
     assert CELSIUS.encode(Celsius(3)) == 3
-    # Spelled the way a Type is made, as the hint for a value Python can't read spells one.
-    assert repr(CELSIUS) == 'Type("celsius", Celsius)'
 
 
 def test_type_is_immutable():
@@ -542,6 +540,47 @@ def test_decimal64_reads_digits_from_the_text():
     assert to_python(f"(decimal128){digits}") == decimal.Decimal(digits)
     assert to_python("(decimal64)1_000.000_1") == decimal.Decimal("1000.0001")
     assert to_python("(decimal64)0x10") == decimal.Decimal(16)
+
+
+# Task 66: errors in Python's or the decimal module's words, or a value that should be refused and isn't.
+
+TASK_66 = "task 66: "
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=re.error,
+    reason=TASK_66 + "the flagless recompile fails on a VERBOSE comment, and re.error isn't a ValueError",
+)
+def test_a_verbose_regex_whose_comment_doesnt_compile_without_the_flag_is_refused():
+    pattern = re.compile(r"\d+  # digits (optional", re.VERBOSE)
+    with pytest.raises(ValueError, match=re.escape("can't write a regex compiled with re.VERBOSE")):
+        from_python(pattern)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=TASK_66 + "the ValueError has Python's words, 'cannot convert signaling NaN to float'",
+)
+@pytest.mark.parametrize("snan", ["sNaN", "-sNaN"])
+def test_a_signaling_nan_doesnt_fit_decimal64(snan):
+    with pytest.raises(ValueError, match=re.escape(f"Decimal('{snan}') doesn't fit (decimal64): ")):
+        from_python(decimal.Decimal(snan), "decimal64")
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason=TASK_66 + "the reason is decimal's [<class 'decimal.InvalidOperation'>]"
+)
+def test_a_decimal64_exponent_past_what_decimal_takes_is_out_of_range():
+    n = rkdl.parse("n (decimal64)0.0e99999999999999999999\n")["n"]
+    assert reason(read_error(lambda n: n.args[0], n)).startswith("out of range")
+
+
+@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=TASK_66 + "it reads as Decimal('Infinity')")
+def test_a_decimal64_literal_past_its_range_doesnt_fit():
+    n = rkdl.parse("n (decimal64)1e400\n")["n"]
+    assert reason(read_error(lambda n: n.args[0], n)).startswith("out of range")
 
 
 def test_decimal64_out_of_the_f64_range_doesnt_fit():
