@@ -5,18 +5,20 @@
 //! so this module only moves and rewrites those strings.
 //!
 //! The rule: a node starts at the beginning of a line and ends its own line, and every line break belongs to the thing
-//! before it. A node's line ending is in its own text. The one after a block's `{` is at the start of the block's
-//! first node, which is where kdl-rs puts it. A new node goes at the first line start at or after its place: if the
-//! node before it doesn't end its line, it gets a line ending first. Taking a node out takes its own line ending with
-//! it, and whatever followed it keeps starting a line if it did: a node that was second on a line takes over its start.
-//! Replacing a node and reversing a block keep the layout by position instead: each place keeps the whitespace before
-//! it and the end of its line, and the nodes move with their own comments.
+//! before it. A node's line ending is in its own text. The one after a block's `{` is at the start of the block's first
+//! node, which is where kdl-rs puts it. kdl-rs also puts the one after a `;` at the start of what follows, but it's the
+//! node's all the same, with any comments before it on the node's line. A new node goes at the first line start at or
+//! after its place: if the node before it doesn't end its line, it gets a line ending first. Taking a node out takes
+//! its own line ending with it, and whatever followed it keeps starting a line if it did: a node that was second on a
+//! line takes over its start. Replacing a node and reversing a block keep the layout by position instead: each place
+//! keeps the whitespace before it and the end of its line, and the nodes move with their own comments.
 //!
 //! Comments above a node are its own only up to the last blank line above it. What's above that line, the line
 //! included, is the gap: it belongs to the block and stays where it is. Taking a node out leaves its gap in front of
 //! whatever followed it, a new node goes below the gap of the node it goes in front of, and reordering keeps gaps by
-//! position. So a file's header comment, if a blank line follows it, stays at the top. Slashdashed nodes in the
-//! leading text count as comments.
+//! position. So a file's header comment, if a blank line follows it, stays at the top. Slashdashed nodes in the leading
+//! text count as comments. A comment is one piece: a blank line inside it doesn't end the gap. The rest of the line
+//! before a node that doesn't start one is in the gap too.
 //!
 //! Every line ending rkdl adds is in the block's own style, its first line ending, or else the document's, which is
 //! the first line ending in the text it was parsed from (`\n` if there was none). A moved node takes the style and the
@@ -95,14 +97,183 @@ fn blank_rest(text: &str) -> Option<&str> {
     text.get(..spaces + eol_at(rest)?.len())
 }
 
+/// The rest of a line at the start of `text`, if it holds only spaces and comments: up to and including the line
+/// ending.
+fn line_rest(text: &str) -> Option<&str> {
+    let line = text.split(NEWLINES).next().unwrap_or_default();
+    let ending = eol_at(text.get(line.len()..)?)?;
+    let mut rest = line.trim_start_matches(is_space);
+    while rest.starts_with("/*") {
+        let mut scan = Scan { text: rest, pos: 0 };
+        if !scan.block_comment() {
+            // It goes on past the line.
+            return None;
+        }
+        rest = scan.text_at().trim_start_matches(is_space);
+    }
+    (rest.is_empty() || rest.starts_with("//")).then(|| text.get(..line.len() + ending.len()))?
+}
+
+/// The byte ranges of the pieces of a node's leading text that can hold line endings of their own: `/* */` comments
+/// and slashdashed nodes. A blank line in one is part of it, not a break between pieces.
+fn multi_line_pieces(leading: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut scan = Scan { text: leading, pos: 0 };
+    while let Some(c) = scan.peek() {
+        let start = scan.pos;
+        if scan.text_at().starts_with("/*") {
+            scan.block_comment();
+            out.push(start..scan.pos);
+        } else if scan.eat("/-") {
+            scan.dashed_node();
+            out.push(start..scan.pos);
+        } else if scan.eat("//") {
+            scan.line_comment();
+        } else {
+            scan.pos += c.len_utf8();
+        }
+    }
+    out
+}
+
+/// Reads valid KDL text far enough to tell where comments, strings and slashdashed nodes end.
+struct Scan<'a> {
+    text: &'a str,
+    pos: usize,
+}
+
+impl<'a> Scan<'a> {
+    fn text_at(&self) -> &'a str {
+        self.text.get(self.pos..).unwrap_or_default()
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.text_at().chars().next()
+    }
+
+    fn bump(&mut self) {
+        self.pos += self.peek().map_or(0, char::len_utf8);
+    }
+
+    fn eat(&mut self, s: &str) -> bool {
+        let found = self.text_at().starts_with(s);
+        if found {
+            self.pos += s.len();
+        }
+        found
+    }
+
+    /// Up to the line ending, which is left.
+    fn line_comment(&mut self) {
+        self.pos += self.text_at().find(NEWLINES).unwrap_or(self.text_at().len());
+    }
+
+    /// From a `/*` to its `*/`, if the text has it. They nest.
+    fn block_comment(&mut self) -> bool {
+        self.pos += 2;
+        let mut depth = 1;
+        while depth > 0 && self.peek().is_some() {
+            if self.eat("/*") {
+                depth += 1;
+            } else if self.eat("*/") {
+                depth -= 1;
+            } else {
+                self.bump();
+            }
+        }
+        depth == 0
+    }
+
+    /// A string at a `"` or `#`, or a keyword like `#true` (up to its name, which is plain text).
+    fn string(&mut self) {
+        let hashes = self.text_at().len() - self.text_at().trim_start_matches('#').len();
+        self.pos += hashes;
+        let quotes = if self.text_at().starts_with(r#"""""#) {
+            r#"""""#
+        } else {
+            "\""
+        };
+        if !self.eat(quotes) {
+            return;
+        }
+        let close = format!("{quotes}{}", "#".repeat(hashes));
+        if hashes > 0 {
+            // Raw: no escapes.
+            self.pos += self
+                .text_at()
+                .find(&close)
+                .map_or(self.text_at().len(), |i| i + close.len());
+            return;
+        }
+        while self.peek().is_some() && !self.eat(&close) {
+            // A `\` escapes what follows it.
+            self.eat("\\");
+            self.bump();
+        }
+    }
+
+    /// The node after a `/-`, up to its terminator: a `;` is the node's, a line ending isn't.
+    fn dashed_node(&mut self) {
+        let mut depth = 0usize;
+        // A `/-` or `\` reaches over line endings.
+        let mut dashed = true;
+        let mut escline = false;
+        while let Some(c) = self.peek() {
+            if NEWLINES.contains(&c) {
+                if depth == 0 && !dashed && !escline {
+                    return;
+                }
+                escline = false;
+                self.bump();
+            } else if is_space(c) {
+                self.bump();
+            } else if self.eat("//") {
+                self.line_comment();
+            } else if self.text_at().starts_with("/*") {
+                self.block_comment();
+            } else if self.eat("/-") {
+                dashed = true;
+            } else if self.eat("\\") {
+                escline = true;
+            } else {
+                dashed = false;
+                escline = false;
+                match c {
+                    '"' | '#' => self.string(),
+                    ';' if depth == 0 => {
+                        self.bump();
+                        return;
+                    }
+                    '}' if depth == 0 => return,
+                    '{' => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    '}' => {
+                        depth -= 1;
+                        self.bump();
+                    }
+                    _ => self.bump(),
+                }
+            }
+        }
+    }
+}
+
 /// The blank lines in `text`, as the byte ranges they take, line endings included. `line_start` says whether the text
-/// starts a line. If it doesn't, its first line is the rest of another one, and never counts.
+/// starts a line. If it doesn't, its first line is the rest of another one, and never counts. Nor does a blank line
+/// inside a comment or a slashdashed node.
 fn blank_lines(text: &str, line_start: bool) -> Vec<std::ops::Range<usize>> {
+    let pieces = multi_line_pieces(text);
     let mut out = Vec::new();
     let mut at = 0;
     for (i, (line, ending)) in lines(text).into_iter().enumerate() {
         let end = at + line.len() + ending.len();
-        if !ending.is_empty() && (i > 0 || line_start) && line.chars().all(is_space) {
+        if !ending.is_empty()
+            && (i > 0 || line_start)
+            && line.chars().all(is_space)
+            && !pieces.iter().any(|p| p.start < end && at < p.end)
+        {
             out.push(at..end);
         }
         at = end;
@@ -114,7 +285,14 @@ fn blank_lines(text: &str, line_start: bool) -> Vec<std::ops::Range<usize>> {
 /// gap belongs to the block, where it stays; the rest, the comments right above the node and its indent, is the node's
 /// own and goes where the node goes.
 fn gap_len(leading: &str, line_start: bool) -> usize {
-    blank_lines(leading, line_start).last().map_or(0, |r| r.end)
+    let blanks = blank_lines(leading, line_start).last().map_or(0, |r| r.end);
+    // The rest of the line before a node that doesn't start one belongs to what's before it.
+    let rest = if line_start {
+        0
+    } else {
+        line_rest(leading).map_or(0, str::len)
+    };
+    blanks.max(rest)
 }
 
 /// `gap` without the blank lines it ends with.
@@ -835,14 +1013,15 @@ fn place_at(
     let mut start = String::new();
     if gap.is_empty() && !line_start_at(block, index, style.parent.is_some()) {
         let after = after_mut(block, index, eol);
-        let rest = blank_rest(after).map(str::to_owned);
+        let rest = line_rest(after).map(str::to_owned);
         if let Some(rest) = &rest {
             after.replace_range(..rest.len(), "");
         }
         match index.checked_sub(1) {
-            Some(prev) => end_line(block, prev, rest, style),
-            // The line break after `{` is the first node's, as kdl-rs reads it.
-            None => start = rest.unwrap_or_else(|| eol.to_owned()),
+            Some(prev) if rest.as_deref().is_none_or(is_blank) => end_line(block, prev, rest, style),
+            // The line break after `{` is the first node's, as kdl-rs reads it. So is one after a `;` with comments
+            // before it: kdl-rs's autoformat loses comments anywhere else.
+            _ => start = rest.unwrap_or_else(|| eol.to_owned()),
         }
     }
 
@@ -852,10 +1031,14 @@ fn place_at(
     // Keep the node's own comments, but not the whitespace it had where it came from.
     let own = shift.apply(f.leading.trim_start(), false);
     f.leading = format!("{gap}{start}{indent}{own}");
+    // The comments on the line of a node that ends in `;` go after it, where kdl-rs reads them, for the same reason.
+    let rest = (f.terminator == ";" && !is_blank(&f.trailing)).then(|| restyle(&std::mem::take(&mut f.trailing), eol));
     if is_blank(&f.trailing) {
         f.trailing.clear();
     }
-    if escline {
+    if let Some(rest) = rest {
+        after_mut(block, index, eol).insert_str(0, &rest);
+    } else if escline {
         close_escline(&mut node, eol);
         fmt_mut(&mut node, eol).trailing = eol.into();
     } else if !ends_own_line(&node) {
@@ -906,10 +1089,21 @@ fn take_own(block: &mut KdlDocument, index: usize, style: &Style) -> (KdlNode, S
     let gap = split_gap(block, index, nested);
     // The node's own text starts a line after a gap, which ends one.
     let started = line_start || !gap.is_empty();
-    let node = block.nodes_mut().remove(index);
-    let lead = leading(&node);
-    let ends = ends_own_line(&node);
+    let mut node = block.nodes_mut().remove(index);
     let next = index < block.nodes().len();
+    let mut ends = ends_own_line(&node);
+    if !ends && node.format().is_some_and(|f| f.terminator == ";") {
+        // kdl-rs keeps the rest of the line after a `;` in the text after the node, but it's the node's.
+        let after = after_mut(block, index, style.eol);
+        if let Some(rest) = line_rest(after).map(str::to_owned) {
+            after.replace_range(..rest.len(), "");
+            if !is_blank(&rest) {
+                fmt_mut(&mut node, style.eol).trailing.push_str(&rest);
+            }
+            ends = true;
+        }
+    }
+    let lead = leading(&node);
     if !ends && next && (started || lead.contains(NEWLINES)) {
         // The next node was on the node's line, and takes over its start.
         let start = match (started, index.checked_sub(1)) {
@@ -929,18 +1123,12 @@ fn take_own(block: &mut KdlDocument, index: usize, style: &Style) -> (KdlNode, S
     } else if !ends && !next && started && !block.nodes().is_empty() {
         close_on_own_line(block, style);
     } else if ends && !started {
-        let after = match block.nodes().get(index) {
-            Some(next) => leading(next),
-            None => block.format().map_or("", |f| &f.trailing),
-        };
-        if blank_rest(after).is_none() {
-            // What followed the node started a line, and still does. The line break goes to what came before.
-            if let Some(prev) = index.checked_sub(1) {
-                end_line(block, prev, None, style);
-            } else {
-                let ending = blank_rest(lead).unwrap_or(style.eol).to_owned();
-                after_mut(block, index, style.eol).insert_str(0, &ending);
-            }
+        // What followed the node started a line, and still does. The line break goes to what came before.
+        if let Some(prev) = index.checked_sub(1) {
+            end_line(block, prev, None, style);
+        } else {
+            let ending = blank_rest(lead).unwrap_or(style.eol).to_owned();
+            after_mut(block, index, style.eol).insert_str(0, &ending);
         }
     }
     (node, gap, line_start)
@@ -956,7 +1144,9 @@ pub fn replace(block: &mut KdlDocument, index: usize, mut node: KdlNode, style: 
     let old = block.nodes().get(index).expect("replace checks the index");
     let starts = line_start_at(block, index, nested) || leading(old).contains(NEWLINES);
     let (slot, _) = slot_and_own(old, index + 1 == block.nodes().len());
-    if starts && fits_slot(&slot_and_own(&node, true).1, &slot, node.children().is_some()) {
+    // A node carrying the comments from the end of its old line goes through `place`, which puts them after it.
+    let carries_comments = node.format().is_some_and(|f| !is_blank(&f.trailing));
+    if starts && !carries_comments && fits_slot(&slot_and_own(&node, true).1, &slot, node.children().is_some()) {
         let shift = Shift::of(&node, indent_of(leading(old)), style);
         shift.move_node(&mut node);
         let (_, mut own) = slot_and_own(&node, true);
@@ -1210,6 +1400,11 @@ mod tests {
         assert_eq!(blank_rest("\n"), Some("\n"));
         assert_eq!(blank_rest(" // c\n"), None);
         assert_eq!(blank_rest(""), None);
+        assert_eq!(line_rest(" /* a */ // b\n c"), Some(" /* a */ // b\n"));
+        assert_eq!(line_rest("\r\n"), Some("\r\n"));
+        assert_eq!(line_rest(" /* a\n */\n"), None);
+        assert_eq!(line_rest(" b\n"), None);
+        assert_eq!(line_rest(" // b"), None);
         assert!(ends_line("a\r\n  "));
         assert!(!ends_line("a;"));
         assert_eq!(indent_of("\r\n    // c\r\n  "), "  ");
@@ -1425,12 +1620,19 @@ mod tests {
     fn gaps() {
         assert_eq!(gap_len("// h\n\n// own\n", true), 6);
         assert_eq!(gap_len("// own\n  ", true), 0);
-        // The rest of the `{` line isn't a blank line of its own.
-        assert_eq!(gap_len("\n    // own\n    ", false), 0);
+        // The rest of the `{` line, or of a line after a `;`, is never the node's own.
+        assert_eq!(gap_len("\n    // own\n    ", false), 1);
+        assert_eq!(gap_len(" // a's\n// own\n", false), 8);
         assert_eq!(gap_len("\n\n    ", false), 2);
         assert_eq!(gap_len("  \r\n\r\nx", true), 6);
         assert_eq!(without_closing_blanks("// h\n\n \n", true), "// h\n");
         assert_eq!(without_closing_blanks("\n\n", false), "\n");
+        // Blank lines inside a comment or a slashdashed node don't count.
+        assert_eq!(gap_len("/* a\n\n b */\n", true), 0);
+        assert_eq!(gap_len("// h\n\n/* a /* b\n\n */ c\n\n */\n", true), 6);
+        assert_eq!(gap_len("/-x {\n\n}\n/-\n\ny\n/-z \"\"\"\n\n  \"\"\"\n", true), 0);
+        assert_eq!(gap_len("/-x #\"\"\"\n\n  }\n  \"\"\"#; /-y \"\\\"}\"\n\n", true), 33);
+        assert_eq!(gap_len("/-x /-\n\n  1\n\n// own\n", true), 13);
     }
 
     const HEADED: &str = "// header\n\n// about a\na\n\nb\n";
