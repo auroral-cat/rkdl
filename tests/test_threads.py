@@ -122,7 +122,7 @@ def test_entry_reads_while_its_node_moves_between_documents():
     assert str(second) == "c {\n    d\n}\n"
 
 
-def test_entry_positions_while_its_node_leaves_and_comes_back():
+def test_positions_while_a_node_leaves_and_comes_back():
     doc = rkdl.parse("a\nmover 1 port=2\nb\n")
     node = doc["mover"]
     arg, port = node.args.entry(0), node.props.entry("port")
@@ -138,9 +138,10 @@ def test_entry_positions_while_its_node_leaves_and_comes_back():
         finally:
             done.set()
 
-    # A reader that catches the node mid-move still finds its entries and their positions: never "entry was removed",
-    # never None.
+    # A reader that catches the node mid-move still finds the node's position and its entries' positions: never
+    # "entry was removed", never None.
     def read():
+        assert (node.line, node.column) == (2, 1)
         assert (arg.line, arg.column) == (2, 7)
         assert (port.line, port.column) == (2, 9)
 
@@ -284,6 +285,33 @@ def test_two_threads_detaching_one_node():
         assert b.parent is None
         assert str(b) == "b {\n    c\n}"
         assert c.parent is b
+
+
+def test_detach_while_another_thread_moves_the_node_to_another_block():
+    # Each thread takes the node out and puts it into its own block, so a detach can find the node under a different
+    # parent from the one it saw a moment ago. It takes the node out of wherever it is now.
+    doc = rkdl.parse("p {\n    mover\n}\nq {\n    other\n}\n")
+    p, q = doc["p"], doc["q"]
+    node = p["mover"]
+
+    def move_into(block):
+        def move():
+            for _ in range(ROUNDS):
+                assert node.detach() is node
+                try:
+                    block.children.append(node)
+                except ValueError as e:
+                    assert "already in a document" in str(e)  # the other thread put it back first
+            return ROUNDS
+
+        return move
+
+    assert run(move_into(p), move_into(q)) == [ROUNDS, ROUNDS]
+    # The node is in one block at most, the one that is its parent, and the text says the same.
+    holders = [b for b in (p, q) if any(n is node for n in b.children)]
+    assert holders == ([] if node.parent is None else [node.parent])
+    expected = {"p": ["mover"] if node.parent is p else [], "q": ["other", "mover"] if node.parent is q else ["other"]}
+    assert {n.name: [c.name for c in n.children] for n in rkdl.parse(str(doc))} == expected
 
 
 def test_parent_while_the_node_moves_between_documents():

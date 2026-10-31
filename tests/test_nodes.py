@@ -694,6 +694,26 @@ def test_children_take_int_indexes_and_nodes():
     assert str(d) == before
 
 
+class Unready:
+    """An index that fails to give its int."""
+
+    def __index__(self):
+        raise ValueError("index not ready")
+
+
+def test_children_pass_on_what_an_index_raises():
+    # Only a TypeError means "not an int": anything else `__index__` raises comes through as it is, as for a list.
+    d = doc()
+    before = str(d)
+    with pytest.raises(ValueError, match="^index not ready$"):
+        d.children[Unready()]
+    with pytest.raises(ValueError, match="^index not ready$"):
+        d.children[Unready()] = rkdl.Node("x")
+    with pytest.raises(ValueError, match="^index not ready$"):
+        del d["b"].children[Unready()]
+    assert str(d) == before
+
+
 def test_children_iadd():
     d = rkdl.parse("a { b; }\n")
     node = d["a"]
