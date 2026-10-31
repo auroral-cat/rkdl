@@ -1116,10 +1116,9 @@ def test_a_node_after_an_open_continuation(text, edit, expected):
     reads_back(expected)
 
 
-# Known bugs, as strict xfails. Each run takes the layout path the bug is in, so a fix shows as an XPASS.
+# A node's start is where its own comments start.
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="the next node takes the indent of a comment's last line")
 @pytest.mark.parametrize(
     ("text", "index", "expected"),
     [
@@ -1128,6 +1127,8 @@ def test_a_node_after_an_open_continuation(text, edit, expected):
         ("a; /* first,\n   then */ b; c\n", 1, "a; c\n"),
         ("p {\n    a; /* first,\n          then */ b; c\n}\n", 1, "p {\n    a; c\n}\n"),
         ("p { /* first,\n      then */ b; c }\n", 0, "p { c }\n"),
+        # A slashdashed node ends at its line ending, so b starts a line, and c takes that over.
+        ("a; /-x 1\n  b; c\n", 1, "a;\n  c\n"),
     ],
 )
 def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expected):
@@ -1137,15 +1138,14 @@ def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expect
     assert str(d) == expected
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="text after the last `;` before `}` stays, indented a space"
-)
+# Text between a block's last `;` and its `}` is the block's, as when a one-line block spreads
+# (test_spreading_a_one_line_block_puts_its_closing_comment_on_a_line). When `}` goes on a line of its own, that text
+# goes on the line above it, at the nodes' indent, and `}` lines up with p.
+
+
 @pytest.mark.parametrize(
     ("text", "edit", "expected"),
     [
-        # Text between b's `;` and the block's `}` is the block's, as when a one-line block spreads
-        # (test_spreading_a_one_line_block_puts_its_closing_comment_on_a_line): it goes on a line of its own at the
-        # nodes' indent, and `}` lines up with p. The module doc sentence comes with the fix (task 70).
         ("p {\n    a\n    b; /* c */ }\n", lambda d: d["p"].children.pop(1), "p {\n    a\n    /* c */\n}\n"),
         (
             "p {\n    a\n    b; /* c */ }\n",
@@ -1154,9 +1154,11 @@ def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expect
         ),
         # A `\` continuation there is the same, and so it's on a line of its own too.
         ("p {\n    a\n    b; \\\n}\n", lambda d: d["p"].children.pop(1), "p {\n    a\n    \\\n}\n"),
+        # The space before `}` stays with the block when the node before it goes.
+        ("p {\n    a; b }\n", lambda d: d["p"].children.pop(1), "p {\n    a; }\n"),
     ],
 )
-def test_a_comment_before_the_closing_brace_after_a_semicolon(text, edit, expected):
+def test_text_before_the_closing_brace_after_a_semicolon_is_the_blocks(text, edit, expected):
     reads_back(expected)
     d = rkdl.parse(text)
     edit(d)
