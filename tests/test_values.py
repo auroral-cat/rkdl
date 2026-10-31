@@ -569,18 +569,37 @@ def test_a_signaling_nan_doesnt_fit_decimal64(snan):
         from_python(decimal.Decimal(snan), "decimal64")
 
 
+# The reason the write side gives for a decimal64 or decimal128 past the f64 range; a read gives the same one.
+DECIMAL_RANGE = "out of range ±1.7976931348623157e+308"
+
+
+@pytest.mark.xfail(
+    strict=True, raises=rkdl.ReadError, reason=TASK_66 + "decimal refuses the exponent, though the value is zero"
+)
+@pytest.mark.parametrize(("text", "signed"), [("0.0e99999999999999999999", False), ("-0.0e99999999999999999999", True)])
+def test_a_decimal64_zero_with_an_exponent_past_what_decimal_takes_reads_as_zero(text, signed):
+    read = rkdl.parse(f"n (decimal64){text}\n")["n"].args[0]
+    assert read == decimal.Decimal(0)
+    assert read.is_signed() == signed
+
+
 @pytest.mark.xfail(
     strict=True, raises=AssertionError, reason=TASK_66 + "the reason is decimal's [<class 'decimal.InvalidOperation'>]"
 )
 def test_a_decimal64_exponent_past_what_decimal_takes_is_out_of_range():
-    n = rkdl.parse("n (decimal64)0.0e99999999999999999999\n")["n"]
-    assert reason(read_error(lambda n: n.args[0], n)).startswith("out of range")
+    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
+    assert reason(read_error(lambda n: n.args[0], n)) == DECIMAL_RANGE
 
 
 @pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=TASK_66 + "it reads as Decimal('Infinity')")
-def test_a_decimal64_literal_past_its_range_doesnt_fit():
-    n = rkdl.parse("n (decimal64)1e400\n")["n"]
-    assert reason(read_error(lambda n: n.args[0], n)).startswith("out of range")
+@pytest.mark.parametrize("ty", ["decimal64", "decimal128"])
+def test_a_decimal_number_literal_past_the_f64_range_doesnt_fit(ty):
+    n = rkdl.parse(f"n ({ty})1e400\n")["n"]
+    assert reason(read_error(lambda n: n.args[0], n)) == DECIMAL_RANGE
+    # The same reason as the write side's.
+    with pytest.raises(ValueError) as info:
+        from_python(decimal.Decimal("1e400"), ty)
+    assert reason(info.value) == DECIMAL_RANGE
 
 
 def test_decimal64_out_of_the_f64_range_doesnt_fit():
