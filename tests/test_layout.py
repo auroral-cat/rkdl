@@ -115,7 +115,7 @@ def test_a_block_on_a_node_ending_in_a_continuation_at_the_end_of_the_file():
     ],
 )
 def test_taking_out_the_first_of_a_shared_line_after_a_semicolon(text, expected):
-    # The line break before b goes with b; c takes over the start of the line, so a gets a line ending.
+    # a keeps its line ending, and c, now first on its line, takes over b's start.
     d = rkdl.parse(text)
     view = d["p"].children if text.startswith("p") else d.children
     view.pop(1)
@@ -433,7 +433,8 @@ def test_a_node_ending_in_a_semicolon_fits_a_one_line_block():
 
 
 def test_a_node_ending_in_a_continuation_spreads_a_one_line_block():
-    # Nothing can follow its `\` on the line, so it can't go before the `}`.
+    # Nothing can follow its `\` on the line, so it can't go before the `}`. Where the closing `;` goes isn't pinned:
+    # task 63 indents it, and then this can check the exact text.
     x = rkdl.parse("n 1 \\").children.pop()
     d = rkdl.parse("a { b }\n")
     d["a"].children.append(x)
@@ -681,26 +682,49 @@ def test_slashdashed_nodes_count_as_comments():
 # Known bugs, as strict xfails: each passes once its task fixes it.
 
 
+def _removed_a(d):
+    d.children.remove(d["a"])
+    return str(d)
+
+
+def _reversed(d):
+    d.children.reverse()
+    return str(d)
+
+
+def _x_inserted_first(d):
+    d.children.insert(0, N("x"))
+    return str(d)
+
+
+def _a_copied(d):
+    empty = rkdl.parse("")
+    empty.children.append(d["a"].copy())
+    return str(empty)
+
+
 @pytest.mark.xfail(
     strict=True,
-    raises=rkdl.ParseError,
+    raises=AssertionError,
     reason="task 62: a blank line inside a comment above a node counts as the end of the node's gap",
 )
 @pytest.mark.parametrize(
-    ("text", "edit"),
+    ("text", "edit", "expected"),
     [
-        ("/* note\n\n more */\na\nb\n", lambda d: d.children.remove(d["a"])),
-        ("/-old {\n\n}\na\nb\n", lambda d: d.children.remove(d["a"])),
-        ("h { i }\n/* x\n\n y */\nu /* c */ 2", lambda d: d.children.reverse()),
+        # No blank line between pieces: the whole comment is a's own. It goes with a, it stays above a when a node
+        # goes in front of a, and it comes with a's copy.
+        ("/* note\n\n more */\na\nb\n", _removed_a, "b\n"),
+        ("/-old {\n\n}\na\nb\n", _removed_a, "b\n"),
+        ("/* note\n\n more */\na\nb\n", _x_inserted_first, "x\n/* note\n\n more */\na\nb\n"),
+        ("/* note\n\n more */\na\nb\n", _a_copied, "/* note\n\n more */\na\n"),
+        # Each place keeps its whitespace and line end, and u moves with its whole comment.
+        ("h { i }\n/* x\n\n y */\nu /* c */ 2", _reversed, "/* x\n\n y */\nu /* c */ 2\nh { i }"),
     ],
 )
-def test_a_comment_with_a_blank_line_inside_is_one_piece(text, edit):
-    d = rkdl.parse(text)
-    edit(d)
-    reads_back(str(d))
-    if text.startswith(("/*", "/-")):
-        # No blank line between pieces: the whole comment is a's own and goes with it.
-        assert str(d) == "b\n"
+def test_a_comment_with_a_blank_line_inside_is_one_piece(text, edit, expected):
+    out = edit(rkdl.parse(text))
+    assert out == expected
+    reads_back(out)
 
 
 @pytest.mark.xfail(
@@ -735,6 +759,8 @@ def test_removing_the_second_of_a_line_keeps_the_blank_line_after_it(text, expec
         ("a\nc;\n", -1, "a\n"),
         ("a;\nb;\n", 0, "b;\n"),
         ("p {\n    a;\n    b\n}\n", 0, "p {\n    b\n}\n"),
+        # The comment on c's line is c's own and goes with it.
+        ("a {\n    b\n    c; // x\n}\n", -1, "a {\n    b\n}\n"),
     ],
 )
 def test_a_node_ending_in_a_semicolon_takes_its_line_ending(text, index, expected):
@@ -742,6 +768,14 @@ def test_a_node_ending_in_a_semicolon_takes_its_line_ending(text, index, expecte
     view = d.children[0].children if "{" in text else d.children
     view.pop(index)
     assert str(d) == expected
+
+
+def test_a_moved_node_s_multi_line_string_keeps_its_lines():
+    # Inside strings, the indentation is content: it doesn't move with the node.
+    x = rkdl.parse('x """\n  hi\n  """\n').children.pop()
+    d = rkdl.parse("a {\n    b\n}\n")
+    d["a"].children.append(x)
+    assert str(d) == 'a {\n    b\n    x """\n  hi\n  """\n}\n'
 
 
 @pytest.mark.xfail(
