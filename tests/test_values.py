@@ -340,6 +340,40 @@ def test_i128_min_round_trips():
     assert rkdl.parse(str(doc))["n"].args[0] == -(2**127)
 
 
+class Rotating(int):
+    """An 8-bit register, where >> rotates."""
+
+    def __rshift__(self, n):
+        n %= 8
+        return Rotating((int(self) >> n | int(self) << (8 - n)) & 0xFF)
+
+
+class Step(int):
+    """A numbered pipeline step, where >> chains the next step."""
+
+    def __rshift__(self, then):
+        if not callable(then):
+            raise TypeError("a step is followed by a callable")
+        return then
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(Rotating(0xA5), marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="wrong int")),
+        pytest.param(Step(7), marks=pytest.mark.xfail(strict=True, raises=TypeError, reason="its >> runs")),
+    ],
+    ids=["Rotating", "Step"],
+)
+def test_an_int_subclass_writes_its_value_whatever_its_shift_does(value):
+    # An int is written as its value; an operator the class gives its own meaning has nothing to do with that.
+    doc = rkdl.parse("n 1 (u8)1\n")
+    doc["n"].args[0] = value
+    assert str(doc) == f"n {int(value)} (u8)1\n"
+    doc["n"].args[1] = value
+    assert str(doc) == f"n {int(value)} (u8){int(value)}\n"
+
+
 def test_lone_surrogate_raises_value_error():
     with pytest.raises(ValueError):
         from_python("\ud800")
@@ -536,6 +570,29 @@ def test_decimal64_writes_a_decimals_own_digits(value, expected):
         assert str(read) == str(value) or value.is_zero()
 
 
+class Price(decimal.Decimal):
+    def __str__(self):
+        return f"${super().__str__()}"
+
+
+class Weight(decimal.Decimal):
+    def __str__(self):
+        return f"weight={super().__str__()}"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="str() of the subclass is written, not its digits")
+@pytest.mark.parametrize("cls", [Price, Weight])
+@pytest.mark.parametrize("old", ["(decimal64)1.0", '(decimal)"1.0"', "1.0"])
+def test_a_decimal_subclass_writes_its_own_digits_whatever_its_str_says(old, cls):
+    # A Decimal subclass is a Decimal: its value is written as the Decimal's would be, not as its str() displays it.
+    def written(value):
+        doc = rkdl.parse(f"n {old}\n")
+        doc["n"].args[0] = value
+        return str(doc)
+
+    assert written(cls("1.50")) == written(decimal.Decimal("1.50"))
+
+
 def test_decimal64_reads_digits_from_the_text():
     digits = "3.14159265358979323846264338327950288"
     assert to_python(f"(decimal128){digits}") == decimal.Decimal(digits)
@@ -632,6 +689,19 @@ def test_only_decimals_own_refusal_is_taken_for_the_exponent(monkeypatch):
     n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
     with pytest.raises(KeyboardInterrupt):
         n.args[0]
+
+
+def test_another_error_from_decimal_is_its_own_reason(monkeypatch):
+    # Only decimal's own refusal means the exponent is too big; any other Exception from Python's parser is the reason
+    # as it's worded.
+    def broken(*args):
+        raise ArithmeticError("decimal is broken today")
+
+    monkeypatch.setattr(decimal, "Decimal", broken)
+    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
+    err = read_error(lambda n: n.args[0], n)
+    assert type(err) is rkdl.ReadError
+    assert reason(err) == "decimal is broken today"
 
 
 def test_a_tiny_decimal_reads():

@@ -59,6 +59,7 @@ impl Type {
         let py = ty.py();
         match &ty.borrow().hooks {
             Some(hooks) => Ok(pick(hooks).bind(py).clone()),
+            // unreachable: a cleared Type is seen only on 3.11/3.12 (tested in test_gc.py); coverage runs on 3.14
             None => Err(PyRuntimeError::new_err("Type was cleared by the garbage collector")),
         }
     }
@@ -103,10 +104,12 @@ impl Type {
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        // unreachable: the false side, a cleared Type: only on 3.11/3.12 (tested in test_gc.py); coverage runs 3.14
         if let Some(hooks) = &self.hooks {
             visit.call(&hooks.cls)?;
             visit.call(&hooks.decode)?;
             visit.call(&hooks.encode)?;
+            // unreachable: a cleared Type, as above
         }
         Ok(())
     }
@@ -548,6 +551,7 @@ fn claims(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<bool> {
             Ok(is_instance(value, "re", "Pattern")? && value.getattr("pattern")?.is_instance_of::<PyString>())
         }
         Builtin::Base64 => Ok(value.is_instance_of::<PyBytes>()),
+        // unreachable: `writable` is the only caller, with the types in INFERRED, and each has an arm above
         _ => Ok(false),
     }
 }
@@ -971,6 +975,8 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
                 Ok(own) => own.getattr("flags")?.extract()?,
                 // A VERBOSE comment can hold what doesn't compile without the flag, like `# (optional`. The flag
                 // isn't inline then, or the pattern would compile alone.
+                // unreachable: `flags & verbose` false: it compiled with `flags`, and only VERBOSE changes what parses
+                // (re/_parser.py), so the flagless compile can only fail when they hold it.
                 Err(err) if err.is_instance_of::<py_re::error>(value.py()) && flags & verbose != 0 => {
                     let own: u32 = re
                         .getattr("compile")?
@@ -1152,6 +1158,7 @@ fn range_of(b: Builtin) -> Option<String> {
         Builtin::Int { min, max } => Some(int_range(min, max)),
         Builtin::F32 => Some(F32_RANGE.to_owned()),
         Builtin::F64 => Some(F64_RANGE.to_owned()),
+        // unreachable: the callers, all in `number_misfit`, pass only Int, F32 and F64
         _ => None,
     }
 }
@@ -1276,7 +1283,13 @@ pub(crate) fn _debug_from_python(
 
 #[cfg(test)]
 mod tests {
-    use super::reads_back_as;
+    use super::{Builtin, int, reads_back_as};
+
+    #[test]
+    fn int_makes_an_inclusive_range() {
+        // `int` builds the BUILTINS table, which is evaluated at compile time, so only a call here runs it.
+        assert!(matches!(int(-128, 127), Builtin::Int { min: -128, max: 127 }));
+    }
 
     #[test]
     fn a_property_doesnt_read_back_as_its_value() {
