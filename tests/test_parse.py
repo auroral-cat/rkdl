@@ -110,7 +110,7 @@ def test_parse_on_threads():
     assert run_threads(*[lambda: str(rkdl.parse(text))] * 4) == [text] * 4
 
 
-# kdl-rs drops the text between a block's `}` and the end of its line (notes/upstream.md); rkdl puts it back.
+# kdl-rs drops the text between a block's `}` and the end of its line, a known issue; rkdl puts it back.
 
 AFTER_BLOCK = ["", " ", "\t", " \t ", " /* c */", "/* c */ ", " /* } */\t", " /-{ x }", " /-{} /-{ y {} } "]
 LINE_COMMENTS = [" // c", "\t// c }", "// c"]
@@ -222,7 +222,7 @@ def test_escaped_whitespace_counts_before_dedenting(string):
 
 
 # kdl-rs reads what's inside a slashdashed block again for every level of them around it, doubling its time per
-# level (notes/upstream.md). rkdl refuses text it would spend too long on.
+# level. rkdl refuses text it would spend too long on.
 
 DASHED_SHAPES = [
     lambda n: "a /-{" * n + "}" * n,

@@ -217,7 +217,7 @@ def test_code_points_kdl_bans_are_escaped(char):
 
 
 def test_escapes_use_short_forms_where_kdl_has_them():
-    assert from_python("\b\f\n\r\t\x00 ") == ('"\\b\\f\\n\\r\\t\\u{0}\\u{2028}"', None)
+    assert from_python("\b\f\n\r\t\x00\u2028") == ('"\\b\\f\\n\\r\\t\\u{0}\\u{2028}"', None)
 
 
 @pytest.mark.parametrize(

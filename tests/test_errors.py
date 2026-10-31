@@ -183,12 +183,12 @@ LINE_COUNTING = {
             ("VT", "\x0b"),
             ("FF", "\x0c"),
             ("NEL", "\x85"),
-            ("LS", " "),
-            ("PS", " "),
+            ("LS", "\u2028"),
+            ("PS", "\u2029"),
         ]
     },
     # The byte order mark isn't a column, and é is one column of two bytes.
-    "BOM": ("﻿b é; }\n", "﻿b é; x\n", (1, 6)),
+    "BOM": ("\ufeffb é; }\n", "\ufeffb é; x\n", (1, 6)),
     "tab": ("a\n\tb 1; }\n", "a\n\tb 1; x\n", (2, 7)),
 }
 
