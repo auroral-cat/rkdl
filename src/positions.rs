@@ -116,6 +116,15 @@ mod tests {
     }
 
     #[test]
+    fn the_end_of_the_text() {
+        // An error can be reported at the end, past the last character: one column past it, counted in characters.
+        assert_eq!(at("ab", 2), (1, 3));
+        assert_eq!(at("a\nbé", 5), (2, 3));
+        assert_eq!(at("a\n", 2), (2, 1));
+        assert_eq!(at("", 0), (1, 1));
+    }
+
+    #[test]
     fn many_offsets_in_any_order() {
         let text = "a\nb c\n  d";
         let found = locate(text, vec![(8, 3), (0, 0), (4, 2), (2, 1)]);

@@ -283,18 +283,24 @@ def test_finalizer_in_a_garbage_cycle_gets_a_fresh_handle(case):
     assert result.stdout.strip() == output
 
 
+# The handle's home is freed before its weakrefs are cleared, and CPython runs the newer callback first, so the lookup
+# in this callback finds the node's slot dead and puts a new handle in it. The cache's own callback for the old handle
+# runs after, and must leave the new one's slot alone. A subprocess, as above: if the dead slot counted as taken, the
+# lookup would wait forever for the callback it's running in.
+WEAKREF_CALLBACK_LOOKUP = """
+doc = rkdl.parse("server 8080\\n")
+looked_up = []
+ref = weakref.ref(doc["server"], lambda _: looked_up.append(doc["server"]))
+(again,) = looked_up
+print(ref() is None, again.args[0], doc["server"] is again, doc.children[0] is again)
+"""
+
+
 def test_a_weakref_callback_on_a_handle_can_look_its_node_up():
-    # The handle's home is freed before its weakrefs are cleared, and CPython runs the newer callback first, so this
-    # lookup finds the node's slot dead and puts a new handle in it. The cache's own callback for the old handle runs
-    # after, and must leave the new one's slot alone.
-    doc = rkdl.parse("server 8080\n")
-    looked_up = []
-    ref = weakref.ref(doc["server"], lambda _: looked_up.append(doc["server"]))
-    assert ref() is None
-    (again,) = looked_up
-    assert again.args[0] == 8080
-    assert doc["server"] is again
-    assert doc.children[0] is again
+    command = [sys.executable, "-c", "import weakref\nimport rkdl\n" + WEAKREF_CALLBACK_LOOKUP]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "True 8080 True True"
 
 
 def weakref_count():

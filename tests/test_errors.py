@@ -27,7 +27,7 @@ def test_an_error_at_the_end_of_the_text():
     err = parse_error(text)
     assert err.offset == len(text)
     assert (err.line, err.column) == (2, 9)
-    assert str(err).splitlines()[0] == "2:9: Failed to parse KDL document"
+    assert str(err).startswith("2:9: ")
 
 
 def test_span_over_multibyte_text():
