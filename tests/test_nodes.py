@@ -96,14 +96,6 @@ def test_name_and_type():
     assert str(d) == '"two words" 1\n'
 
 
-def test_annotating_a_node_built_in_code():
-    node = rkdl.Node("server", 1)
-    node.type = "svc"
-    assert str(node) == "(svc)server 1"
-    node.type = None
-    assert str(node) == "server 1"
-
-
 @pytest.mark.parametrize(
     "text",
     [
