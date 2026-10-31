@@ -13,6 +13,13 @@ pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
 [lib]
 crate-type = ["cdylib"]
 
+# Type hooks that recurse through rkdl put its frames on the C stack at every level, and Python before 3.14 doesn't
+# count them: unoptimized, a write took ~20 kB a level and overflowed 8 MB before Python's default recursion limit of
+# 1000 (on 3.14, it overran the margin Python leaves). At opt-level 1 a level takes about what release does (~5 kB),
+# and debug assertions stay on.
+[profile.dev]
+opt-level = 1
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
