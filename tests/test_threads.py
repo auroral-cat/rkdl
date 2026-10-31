@@ -371,4 +371,3 @@ def test_removing_a_block_while_other_threads_use_it():
     assert all(counts), counts
     assert p.children is None
     assert str(doc) == "p\n"
-
