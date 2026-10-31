@@ -1136,6 +1136,8 @@ def test_props_or_and_copy_are_plain_dicts():
     assert type(copied) is dict and copied == {"a": 1, "b": 2}
     with pytest.raises(TypeError):
         _ = n.props | [("a", 1)]
+    with pytest.raises(TypeError):
+        _ = [("a", 1)] | n.props
 
 
 def test_props_update_is_all_or_nothing():
