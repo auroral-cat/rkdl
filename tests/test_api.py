@@ -573,7 +573,7 @@ def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
             "2029-01-01",
             "datetime.date(2029, 1, 1)",
             "next tuesday",
-            "Invalid isoformat string: 'next tuesday'",
+            "expected an ISO 8601 date, like 2026-01-31",
         ),
         (
             "date-time",
@@ -581,9 +581,16 @@ def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
             "2029-01-01T10:00:00",
             "datetime.datetime(2029, 1, 1, 10, 0)",
             "soon",
-            "Invalid isoformat string: 'soon'",
+            "expected an ISO 8601 date-time, like 2026-01-31T09:30:00",
         ),
-        ("time", '"09:00:00"', "10:30:00", "datetime.time(10, 30)", "half past", "Invalid isoformat string"),
+        (
+            "time",
+            '"09:00:00"',
+            "10:30:00",
+            "datetime.time(10, 30)",
+            "half past",
+            "expected an ISO 8601 time, like 09:30:00",
+        ),
         ("ipv4", '"10.0.0.1"', "10.0.0.2", "IPv4Address('10.0.0.2')", "::1", "Expected 4 octets"),
         ("ipv6", '"::1"', "::2", "IPv6Address('::2')", "10.0.0.2", "At least 3 parts expected"),
         (
@@ -592,11 +599,11 @@ def test_a_plain_write_to_a_builtin_type_keeps_it_when_it_fits():
             "12345678-1234-5678-1234-567812345678",
             "UUID('12345678-1234-5678-1234-567812345678')",
             "not-a-uuid",
-            "badly formed hexadecimal UUID string",
+            "expected 32 hex digits",
         ),
         ("regex", '"a+"', "b+", "re.compile('b+')", "(unclosed", "missing ), unterminated subpattern"),
         ("base64", '"aGk="', "aGV5", "b'hey'", "not base64!", ""),
-        ("decimal", '"1.5"', "2.25", "Decimal('2.25')", "lots", ""),
+        ("decimal", '"1.5"', "2.25", "Decimal('2.25')", "lots", "expected a decimal number, like 1.25"),
     ],
 )
 def test_a_plain_string_a_builtin_type_reads_keeps_the_annotation(ty, old, fits, read, misfit, reason):
