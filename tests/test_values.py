@@ -576,7 +576,10 @@ DECIMAL_RANGE = "out of range ±1.7976931348623157e+308"
 @pytest.mark.xfail(
     strict=True, raises=rkdl.ReadError, reason=TASK_66 + "decimal refuses the exponent, though the value is zero"
 )
-@pytest.mark.parametrize(("text", "signed"), [("0.0e99999999999999999999", False), ("-0.0e99999999999999999999", True)])
+@pytest.mark.parametrize(
+    ("text", "signed"),
+    [("0.0e99999999999999999999", False), ("-0.0e99999999999999999999", True), ("0e1000000000000000000", False)],
+)
 def test_a_decimal64_zero_with_an_exponent_past_what_decimal_takes_reads_as_zero(text, signed):
     read = rkdl.parse(f"n (decimal64){text}\n")["n"].args[0]
     assert read == decimal.Decimal(0)
@@ -586,9 +589,12 @@ def test_a_decimal64_zero_with_an_exponent_past_what_decimal_takes_reads_as_zero
 @pytest.mark.xfail(
     strict=True, raises=AssertionError, reason=TASK_66 + "the reason is decimal's [<class 'decimal.InvalidOperation'>]"
 )
-def test_a_decimal64_exponent_past_what_decimal_takes_is_out_of_range():
+def test_a_decimal64_exponent_past_what_decimal_takes_is_refused_for_it():
+    # Tiny, not past the f64 range: the reason is the exponent, in words task 66 picks.
     n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
-    assert reason(read_error(lambda n: n.args[0], n)) == DECIMAL_RANGE
+    err = read_error(lambda n: n.args[0], n)
+    assert type(err) is rkdl.ReadError
+    assert "exponent" in reason(err)
 
 
 @pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=TASK_66 + "it reads as Decimal('Infinity')")
@@ -1100,6 +1106,9 @@ MISFITS = {
     "bad date": ("date", '"May 6th"', "May 6th", "expected an ISO 8601 date, like 2026-01-31"),
     "month out of range": ("date", '"2026-13-01"', "2026-13-01", "month must be in 1..12, not 13"),
     "day out of range": ("date", '"2026-02-30"', "2026-02-30", "day must be in 1..28, not 30"),
+    # Gregorian leap years: every fourth year, except centuries, except every fourth century.
+    "Feb 29 in a century": ("date", '"2100-02-29"', "2100-02-29", "day must be in 1..28, not 29"),
+    "Feb 30 in a fourth century": ("date", '"2000-02-30"', "2000-02-30", "day must be in 1..29, not 30"),
     "year 0": ("date", '"0000-01-01"', "0000-01-01", "year must be in 1..9999, not 0"),
     "bad date-time": ("date-time", '"soon"', "soon", "expected an ISO 8601 date-time, like 2026-01-31T09:30:00"),
     "minute out of range": ("date-time", '"2026-01-01T12:60"', "2026-01-01T12:60", "minute must be in 0..59, not 60"),
@@ -1153,19 +1162,6 @@ def test_a_misfit_has_one_reason_on_every_route(ty, text, value, why):
     written = read_error(lambda n: n.args.append(rkdl.Value(value, type=ty)), n)
     over = read_error(lambda n: n.args.__setitem__(0, value), n)
     assert [reason(e) for e in (read, typed, written, over)] == [why] * 4
-
-
-@pytest.mark.parametrize(
-    ("date", "why"),
-    [
-        # Gregorian leap years: every fourth year, except centuries, except every fourth century.
-        ("2100-02-29", "day must be in 1..28, not 29"),
-        ("2000-02-30", "day must be in 1..29, not 30"),
-    ],
-)
-def test_a_day_out_of_february_follows_the_leap_year_rule(date, why):
-    n = rkdl.parse(f'n (date)"{date}"\n')["n"]
-    assert reason(read_error(lambda n: n.args[0], n)) == why
 
 
 @pytest.mark.parametrize(
