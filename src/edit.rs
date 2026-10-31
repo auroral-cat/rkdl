@@ -98,9 +98,9 @@ impl Item {
             .to_python(py, types)
             .and_then(|old| values::encode(old.bind(py), self.ty.as_deref(), types));
         match again {
-            Ok(again) => {
-                Ok(again.ty == new.ty && values::same_value(&again.value, &new.value) && again.repr == new.repr)
-            }
+            // Written back over its own annotation, which the caller checked is `new`'s, it keeps it: a decode can't
+            // return an `rkdl.Value` to change it.
+            Ok(again) => Ok(values::same_value(&again.value, &new.value) && again.repr == new.repr),
             Err(err) if err.is_instance_of::<PyException>(py) => Ok(false),
             Err(err) => Err(err),
         }

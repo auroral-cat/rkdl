@@ -344,6 +344,9 @@ pub(crate) fn to_python_spelled(
             let plain = plain_to_python(py, value)?;
             let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
             match decode.call1((plain,)) {
+                Ok(decoded) if decoded.is_instance_of::<Value>() => {
+                    Err(unreadable(py, ty, value, text, DECODE_RETURNED_VALUE, place)?)
+                }
                 Ok(decoded) => Ok(decoded.unbind()),
                 Err(err) if refused_by_hook(py, &err) => {
                     let reason = decode_raised(py, &err)?;
@@ -1065,6 +1068,7 @@ fn encode_kept_user(
         return Err(misfit(value, ty, &format!("expected a {cls}"))?);
     }
     match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
+        Ok(decoded) if decoded.is_instance_of::<Value>() => Err(misfit(value, ty, DECODE_RETURNED_VALUE)?),
         Ok(decoded) => Ok((encode_with(user, &decoded)?, None)),
         Err(err) if refused_by_hook(py, &err) => {
             let refused = misfit(value, ty, &decode_raised(py, &err)?)?;
@@ -1150,6 +1154,11 @@ const fn expected(b: Builtin) -> &'static str {
 fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
     err.is_instance_of::<PyException>(py) && !err.is_instance_of::<PyRecursionError>(py)
 }
+
+/// Why a custom Type's value doesn't fit when its decode returns an `rkdl.Value`, reading or writing. A `Value` is only
+/// for writing: read back and written, it would replace the entry's annotation, or reach encode, which refuses it as if
+/// encode were at fault.
+const DECODE_RETURNED_VALUE: &str = "its decode returned an rkdl.Value";
 
 /// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing.
 fn decode_raised(py: Python<'_>, err: &PyErr) -> PyResult<String> {

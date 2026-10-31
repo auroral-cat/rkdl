@@ -1081,6 +1081,30 @@ def test_a_decode_that_raises_a_base_exception_propagates():
     assert str(doc) == "t (celsius)1\n"
 
 
+# A decode returns a Python value; an rkdl.Value is only for writing. Read back and written, it would replace the
+# entry's annotation, or reach encode, which would be blamed for it (task 72).
+def test_a_decode_that_returns_an_rkdl_value_is_refused():
+    kelvin = rkdl.Type(
+        "kelvin", Celsius, decode=lambda k: rkdl.Value(k - 273, type="celsius"), encode=lambda c: c.degrees + 273
+    )
+    doc = rkdl.Parser(types=[kelvin]).parse("oven (kelvin)300 27\n")
+    err = read_error(lambda n: n.args[0], doc["oven"])
+    assert isinstance(err, rkdl.ReadError)
+    assert str(err) == "1:6: oven arg 0: 300 doesn't fit (kelvin): its decode returned an rkdl.Value"
+    assert err.__cause__ is None
+    # A plain value written over the annotation must be one decode accepts: the same reason.
+    with pytest.raises(ValueError) as info:
+        doc["oven"].args[0] = 27
+    assert str(info.value) == "27 doesn't fit (kelvin): its decode returned an rkdl.Value"
+    with pytest.raises(ValueError) as info:
+        doc["oven"].args.entry(1).type = "kelvin"
+    assert str(info.value) == "27 doesn't fit (kelvin): its decode returned an rkdl.Value"
+    assert str(doc) == "oven (kelvin)300 27\n"
+    # An instance of the Type's class goes through encode alone.
+    doc["oven"].args[0] = Celsius(30)
+    assert str(doc) == "oven (kelvin)303 27\n"
+
+
 def test_a_recursion_error_from_decode_isnt_wrapped():
     def decode(value):
         raise RecursionError("deep")
