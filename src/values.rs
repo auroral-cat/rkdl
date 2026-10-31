@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fmt;
 
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
@@ -358,6 +359,31 @@ impl fmt::Display for Place<'_> {
     }
 }
 
+thread_local! {
+    /// How many Type hooks are running on this thread, each inside the one before.
+    static HOOKS_RUNNING: Cell<u32> = const { Cell::new(0) };
+}
+
+/// How deep hooks may nest on one thread. Every level puts rkdl's frames on the C stack: up to 20 kB in a debug build
+/// (writing; 9 kB reading), 2 to 5 kB in release. Python before 3.14 doesn't count them, so at its default limit of
+/// 1000 a debug build overflowed 8 MB; 3.14 does, but one debug level writing, or the error built at the deepest
+/// level, overran the margin it leaves. 200 levels stay under 4 MB.
+const HOOK_DEPTH: u32 = 200;
+
+/// Calls a Type's hook, or raises `RecursionError` if `HOOK_DEPTH` hooks are running on this thread already.
+fn call_hook<'py>(hook: &Bound<'py, PyAny>, arg: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let running = HOOKS_RUNNING.get();
+    if running >= HOOK_DEPTH {
+        return Err(PyRecursionError::new_err(format!(
+            "maximum recursion depth exceeded: {HOOK_DEPTH} rkdl Type hooks running, each inside the one before"
+        )));
+    }
+    HOOKS_RUNNING.set(running + 1);
+    let result = hook.call1((arg,));
+    HOOKS_RUNNING.set(running);
+    result
+}
+
 /// KDL value plus its entry's type annotation -> Python object, given the value's text in the file too, if there is
 /// one, and where the entry is, for the error. `decimal64` and `decimal128` read their digits from the text, since the
 /// parsed value is only an f64.
@@ -383,7 +409,7 @@ pub(crate) fn to_python_spelled(
         Some(Converter::User(user)) => {
             let plain = plain_to_python(py, value)?;
             let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
-            match decode.call1((plain,)) {
+            match call_hook(&decode, plain.bind(py)) {
                 Ok(decoded) if decoded.is_instance_of::<Value>() => {
                     Err(unreadable(py, ty, value, text, DECODE_RETURNED_VALUE, place)?)
                 }
@@ -763,7 +789,7 @@ fn encode_user(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<Option<Kdl
 /// The Type's encode, called on `value` whatever its class, checked to return a plain value. An exception from encode
 /// propagates unchanged.
 fn encode_with(user: &UserType, value: &Bound<'_, PyAny>) -> PyResult<KdlValue> {
-    let plain = Type::hook(user.ty.bind(value.py()), |h| &h.encode)?.call1((value,))?;
+    let plain = call_hook(&Type::hook(user.ty.bind(value.py()), |h| &h.encode)?, value)?;
     match plain_to_kdl(&plain)? {
         Some(kdl) => Ok(kdl),
         None => Err(PyTypeError::new_err(format!(
@@ -1144,7 +1170,7 @@ fn encode_kept_user(
         let cls = Type::hook(user.ty.bind(py), |h| &h.cls)?.qualname()?;
         return Err(misfit(value, ty, &format!("expected a {cls}"))?);
     }
-    match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
+    match call_hook(&Type::hook(user.ty.bind(py), |h| &h.decode)?, value) {
         Ok(decoded) if decoded.is_instance_of::<Value>() => Err(misfit(value, ty, DECODE_RETURNED_VALUE)?),
         Ok(decoded) => Ok((encode_with(user, &decoded)?, None)),
         Err(err) if refused_by_hook(py, &err) => {
