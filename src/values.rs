@@ -789,9 +789,9 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
             call(py, "decimal", "Decimal", digits)
         }
         Builtin::DecimalString => call(py, "decimal", "Decimal", string()?),
-        Builtin::DateTime => from_iso(py, "datetime", string()?),
-        Builtin::Date => from_iso(py, "date", string()?),
-        Builtin::Time => from_iso(py, "time", string()?),
+        Builtin::DateTime => from_iso(py, Iso::DateTime, string()?),
+        Builtin::Date => from_iso(py, Iso::Date, string()?),
+        Builtin::Time => from_iso(py, Iso::Time, string()?),
         Builtin::Ipv4 => call(py, "ipaddress", "IPv4Address", string()?),
         Builtin::Ipv6 => call(py, "ipaddress", "IPv6Address", string()?),
         Builtin::Uuid => call(py, "uuid", "UUID", string()?),
@@ -836,7 +836,17 @@ fn decimal_digits(text: &str) -> Option<String> {
         .then_some(digits)
 }
 
-fn from_iso<'py>(py: Python<'py>, class: &str, text: &str) -> PyResult<Bound<'py, PyAny>> {
+/// `fromisoformat`, except for hour 24, which Python 3.14 reads and earlier Pythons don't. `own_reason` words the
+/// refusal.
+fn from_iso<'py>(py: Python<'py>, kind: Iso, text: &str) -> PyResult<Bound<'py, PyAny>> {
+    if iso::hour_24(kind, text) {
+        return Err(PyValueError::new_err("hour 24"));
+    }
+    let class = match kind {
+        Iso::Date => "date",
+        Iso::Time => "time",
+        Iso::DateTime => "datetime",
+    };
     py.import("datetime")?
         .getattr(class)?
         .call_method1("fromisoformat", (text,))

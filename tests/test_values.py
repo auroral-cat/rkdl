@@ -1030,6 +1030,21 @@ MISFITS = {
     "minute out of range": ("date-time", '"2026-01-01T12:60"', "2026-01-01T12:60", "minute must be in 0..59, not 60"),
     "bad time": ("time", '"half past"', "half past", "expected an ISO 8601 time, like 09:30:00"),
     "hour out of range": ("time", '"25:00"', "25:00", "hour must be in 0..23, not 25"),
+    # Python 3.14 reads hour 24 as the end of the day; rkdl refuses it on every Python (task 59).
+    "hour 24": ("time", '"24:00"', "24:00", "hour must be in 0..23, not 24"),
+    "hour 24 with seconds": ("time", '"24:00:00"', "24:00:00", "hour must be in 0..23, not 24"),
+    "hour 24 in a date-time": (
+        "date-time",
+        '"2026-01-31T24:00:00"',
+        "2026-01-31T24:00:00",
+        "hour must be in 0..23, not 24",
+    ),
+    "hour 24 after a week date": (
+        "date-time",
+        '"2026-W05-6T24:00"',
+        "2026-W05-6T24:00",
+        "hour must be in 0..23, not 24",
+    ),
     "second out of range": ("time", '"12:00:61"', "12:00:61", "second must be in 0..59, not 61"),
     "offset out of range": ("time", '"12:00+25:00"', "12:00+25:00", "offset must be under 24 hours, not +25:00"),
     "bad decimal": ("decimal", '"lots"', "lots", "expected a decimal number, like 1.25"),
