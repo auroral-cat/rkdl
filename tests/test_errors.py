@@ -1,4 +1,5 @@
 import io
+import os
 import pickle
 
 import pytest
@@ -160,12 +161,38 @@ def test_a_parse_error_from_text_has_no_path(load):
     assert load_error(io.BytesIO(BAD.encode()), load).path is None
 
 
+def stdin_with(text):
+    # A pipe read the way Python reads sys.stdin: a FileIO named "<stdin>", buffered and decoded.
+    read, write = os.pipe()
+    os.write(write, text.encode())
+    os.close(write)
+    raw = io.FileIO(read, "r")
+    raw.name = "<stdin>"
+    return io.TextIOWrapper(io.BufferedReader(raw), encoding="utf-8")
+
+
+@LOADERS
+def test_stdin_is_not_a_path(load):
+    with stdin_with(BAD) as stdin:
+        err = load_error(stdin, load)
+    assert err.path is None
+    assert str(err).startswith("2:3: ")
+    with stdin_with("a 1\n") as stdin:
+        assert load(stdin).path is None
+
+
 def test_diagnostics_compare_by_value():
     first = parse_error("a {").diagnostics[0]
     same = rkdl.Diagnostic(first.message, first.label, first.help, first.offset, first.length, first.line, first.column)
     assert same == first
     assert hash(same) == hash(first)
     assert pickle.loads(pickle.dumps(first)) == first
+
+
+def test_diagnostic_repr_shows_where_and_what():
+    # A diagnostic a program builds for its own check, as a ParseError's would read.
+    diagnostic = rkdl.Diagnostic("unknown setting", "not a setting", None, 14, 7, 2, 5)
+    assert repr(diagnostic) == '<Diagnostic 2:5 "unknown setting">'
 
 
 def lines(eol, last):
@@ -269,10 +296,19 @@ def test_a_long_or_multiline_raw_string_gets_the_rule_instead_of_the_v2_form():
     assert multiline.help.splitlines()[0] == long.help.splitlines()[0]
 
 
+def test_an_unfinished_string_gets_the_rule_instead_of_the_v2_form():
+    # A file cut off inside a string, which has no v2 form to show; once right after a backslash.
+    for text in ['out "build\\/', 'out "build\\/\\']:
+        first = parse_error(text).diagnostics[0]
+        assert first.help.splitlines()[0] == "this looks like KDL v1: in KDL v2 / isn't escaped: write \\/ as /"
+
+
 @pytest.mark.parametrize(
     "text",
     [
         "true 1",  # a node name: v1 didn't allow it either
+        "term true-color#true",  # an identifier starting with true-, with a missing space after it
+        "retries 3) true",  # after a stray ): kdl-rs reads true as a node name, which #true isn't either
         "node true=1",  # a property key
         "node (true)1",  # a type annotation
         "node { null; }",
