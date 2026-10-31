@@ -340,6 +340,43 @@ def test_i128_min_round_trips():
     assert rkdl.parse(str(doc))["n"].args[0] == -(2**127)
 
 
+class Rotating(int):
+    """An 8-bit register, where >> rotates."""
+
+    def __rshift__(self, n):
+        n %= 8
+        return Rotating((int(self) >> n | int(self) << (8 - n)) & 0xFF)
+
+
+class Step(int):
+    """A numbered pipeline step, where >> chains the next step."""
+
+    def __rshift__(self, then):
+        if not callable(then):
+            raise TypeError("a step is followed by a callable")
+        return then
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(
+            Rotating(0xA5),
+            marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 69: its >> gives a wrong int"),
+        ),
+        pytest.param(Step(7), marks=pytest.mark.xfail(strict=True, raises=TypeError, reason="task 69: its >> runs")),
+    ],
+    ids=["Rotating", "Step"],
+)
+def test_an_int_subclass_writes_its_value_whatever_its_shift_does(value):
+    # An int is written as its value; an operator the class gives its own meaning has nothing to do with that.
+    doc = rkdl.parse("n 1 (u8)1\n")
+    doc["n"].args[0] = value
+    assert str(doc) == f"n {int(value)} (u8)1\n"
+    doc["n"].args[1] = value
+    assert str(doc) == f"n {int(value)} (u8){int(value)}\n"
+
+
 def test_lone_surrogate_raises_value_error():
     with pytest.raises(ValueError):
         from_python("\ud800")
@@ -534,6 +571,70 @@ def test_decimal64_writes_a_decimals_own_digits(value, expected):
     for read in (n.args[0], rkdl.parse(str(doc))["n"].args[0]):
         assert read == value or (read.is_nan() and value.is_nan())
         assert str(read) == str(value) or value.is_zero()
+
+
+class Price(decimal.Decimal):
+    def __str__(self):
+        return f"${super().__str__()}"
+
+
+class Ninety(int):
+    def __float__(self):
+        return 99.0
+
+
+class FloatPrice(decimal.Decimal):
+    def __float__(self):
+        return 99.0
+
+
+class Stamp(datetime.date):
+    def isoformat(self):
+        return self.strftime("%d/%m/%Y")
+
+
+def task69(row, *, ids, why):
+    return pytest.param(
+        *row, id=ids, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"task 69: {why}")
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "value", "base"),
+    [
+        task69(("(f64)1.0", Ninety(1), 1), ids="int __float__", why="its __float__ is called"),
+        task69(
+            ("(decimal64)1.0", FloatPrice("1.50"), decimal.Decimal("1.50")),
+            ids="Decimal __float__",
+            why="its __float__ is called",
+        ),
+        task69(
+            ("(decimal64)1.0", Price("1.50"), decimal.Decimal("1.50")),
+            ids="Decimal __str__ over decimal64",
+            why="its __str__ is written",
+        ),
+        task69(
+            ('(decimal)"1.0"', Price("1.50"), decimal.Decimal("1.50")),
+            ids="Decimal __str__ over decimal",
+            why="its __str__ is written",
+        ),
+        task69(("1.0", Price("1.50"), decimal.Decimal("1.50")), ids="Decimal __str__", why="its __str__ is written"),
+        task69(
+            ('(date)"2026-01-01"', Stamp(2026, 10, 31), datetime.date(2026, 10, 31)),
+            ids="date isoformat",
+            why="its isoformat is called",
+        ),
+    ],
+)
+def test_a_subclass_is_written_as_its_base_types_value(old, value, base):
+    # A subclass of a built-in type is written by its base type's value; methods it overrides don't change that.
+    def written(value):
+        doc = rkdl.parse(f"n {old}\n")
+        doc["n"].args[0] = value
+        return str(doc)
+
+    assert written(value) == written(base)
+    assert rkdl.parse(written(value))["n"].args[0] == base
 
 
 def test_decimal64_reads_digits_from_the_text():

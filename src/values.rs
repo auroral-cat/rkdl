@@ -59,6 +59,7 @@ impl Type {
         let py = ty.py();
         match &ty.borrow().hooks {
             Some(hooks) => Ok(pick(hooks).bind(py).clone()),
+            // unreachable: a cleared Type is seen only on 3.11/3.12 (tested in test_gc.py); coverage runs on 3.14
             None => Err(PyRuntimeError::new_err("Type was cleared by the garbage collector")),
         }
     }
@@ -103,10 +104,12 @@ impl Type {
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        // unreachable: the false side, a cleared Type: only on 3.11/3.12 (tested in test_gc.py); coverage runs 3.14
         if let Some(hooks) = &self.hooks {
             visit.call(&hooks.cls)?;
             visit.call(&hooks.decode)?;
             visit.call(&hooks.encode)?;
+            // unreachable: the `if let`'s implicit else: a cleared Type, as above
         }
         Ok(())
     }
@@ -1276,7 +1279,13 @@ pub(crate) fn _debug_from_python(
 
 #[cfg(test)]
 mod tests {
-    use super::reads_back_as;
+    use super::{Builtin, int, reads_back_as};
+
+    #[test]
+    fn int_builds_an_int_type_with_its_min_and_max() {
+        // `int` builds the BUILTINS table, which is evaluated at compile time, so only a call here runs it.
+        assert!(matches!(int(-128, 127), Builtin::Int { min: -128, max: 127 }));
+    }
 
     #[test]
     fn a_property_doesnt_read_back_as_its_value() {
