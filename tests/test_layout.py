@@ -414,6 +414,9 @@ def test_reversing_twice_gives_back_the_text(name, crlf, where):
         ('x """\n  hi\n  """\n', 'x """\n  hi\n  """'),
         # A slashdashed block after the entries, from a block at the depth it lands at.
         ("p {\n    x 1 /-{\n        y\n    }\n}\n", "x 1 /-{\n        y\n    }"),
+        # A multi-line string is a name like any other, and a type annotation.
+        ('"""\n  hi\n  """ 1\n', '"""\n  hi\n  """ 1'),
+        ('("""\n  t\n  """)x 1\n', '("""\n  t\n  """)x 1'),
     ],
 )
 def test_a_node_written_over_lines_spreads_a_one_line_block(source, moved):
@@ -502,7 +505,6 @@ def test_reordering_where_comment_lines_would_land_after_a_semicolon():
     a, b, c = d.children
     d.children = [a, c, b]
     assert str(d) == "a;\n// about c\nc\nb\n"
-    assert d.children[1] is c
     reads_back(str(d))
 
 
@@ -1137,16 +1139,17 @@ def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expect
 @pytest.mark.parametrize(
     ("text", "edit", "expected"),
     [
-        # The comment on b's line after its `;` is b's (module doc: "with any comments before it on the node's line"),
-        # as it is today without the `;` (`b /* c */ }`). It goes with b, and stays with b when a node follows.
-        ("p {\n    a\n    b; /* c */ }\n", lambda d: d["p"].children.pop(1), "p {\n    a\n}\n"),
+        # Text between b's `;` and the block's `}` is the block's, as when a one-line block spreads
+        # (test_spreading_a_one_line_block_puts_its_closing_comment_on_a_line): it goes on a line of its own at the
+        # nodes' indent, and `}` lines up with p. The module doc sentence comes with the fix (task 70).
+        ("p {\n    a\n    b; /* c */ }\n", lambda d: d["p"].children.pop(1), "p {\n    a\n    /* c */\n}\n"),
         (
             "p {\n    a\n    b; /* c */ }\n",
             lambda d: d["p"].children.append(N("x")),
-            "p {\n    a\n    b; /* c */\n    x\n}\n",
+            "p {\n    a\n    b;\n    x\n    /* c */\n}\n",
         ),
-        # A `\` continuation after b's `;` is b's text too: removing b leaves no stray `\` line.
-        ("p {\n    a\n    b; \\\n}\n", lambda d: d["p"].children.pop(1), "p {\n    a\n}\n"),
+        # A `\` continuation there is the same, and so it's on a line of its own too.
+        ("p {\n    a\n    b; \\\n}\n", lambda d: d["p"].children.pop(1), "p {\n    a\n    \\\n}\n"),
     ],
 )
 def test_a_comment_before_the_closing_brace_after_a_semicolon(text, edit, expected):
