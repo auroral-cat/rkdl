@@ -1066,8 +1066,10 @@ fn fit_inline(node: &mut KdlNode, space: &str, closing: &str, terminator: String
 /// would sit right after its own `}`, which kdl-rs drops when it reads the text back. After the
 /// `;`, the space belongs to the block.
 fn semicolon_after_block(block: &mut KdlDocument, index: usize) {
-    let node =
-        (block.nodes_mut().get_mut(index)).expect("the caller just put a node at the index, or a path leads to it");
+    let node = block
+        .nodes_mut()
+        .get_mut(index)
+        .expect("the caller just put a node at the index, or a path leads to it");
     if node.children().is_none() || !ends_open(node) {
         return;
     }
@@ -1629,7 +1631,10 @@ fn permute_in(block: &mut KdlDocument, places: &[usize], from: &[usize], top: bo
         .unzip();
     let mut source: Vec<usize> = (0..count).collect();
     for (&to, &from) in places.iter().zip(from) {
-        let fits = (slots.get(to).zip(owns.get(from).and_then(Option::as_ref))).zip(block.nodes().get(from));
+        let fits = slots
+            .get(to)
+            .zip(owns.get(from).and_then(Option::as_ref))
+            .zip(block.nodes().get(from));
         let ((slot, own), node) = fits.expect(PLACES);
         if to != from && !fits_slot(own, slot, node.children().is_some()) {
             return false;
