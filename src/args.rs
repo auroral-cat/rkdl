@@ -377,22 +377,17 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::Home;
-    use crate::props::Props;
-    use crate::testing::{empty_doc, stray_id, with_python};
+    use crate::testing::{repr, unreadable_node, with_python};
 
-    // Reprs never raise. A node out of step with its document (an rkdl bug) can't be read, and its repr and its views'
-    // reprs say so rather than raise.
+    // Reprs never raise. A node out of step with its document (an rkdl bug) can't be read, and its repr and the args
+    // view's say so rather than raise.
     #[test]
     fn reprs_of_a_node_that_cant_be_read() {
         with_python(|py| {
-            let node = Py::new(py, Node::new(stray_id(), Home::new(empty_doc(py)))).expect("allocates");
-            let repr = |object: Bound<'_, PyAny>| object.repr().expect("never raises").to_string();
-            assert_eq!(repr(node.bind(py).clone().into_any()), "<Node (unreadable)>");
-            let args = Bound::new(py, Args::new(node.clone_ref(py))).expect("allocates");
-            assert_eq!(repr(args.into_any()), "Args(<unreadable>)");
-            let props = Bound::new(py, Props::new(node)).expect("allocates");
-            assert_eq!(repr(props.into_any()), "Props(<unreadable>)");
+            let node = unreadable_node(py);
+            assert_eq!(repr(node.bind(py).as_any()), "<Node (unreadable)>");
+            let args = Bound::new(py, Args::new(node)).expect("allocates");
+            assert_eq!(repr(args.as_any()), "Args(<unreadable>)");
         });
     }
 }

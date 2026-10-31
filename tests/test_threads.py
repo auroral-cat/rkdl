@@ -292,7 +292,9 @@ def test_detach_while_other_threads_move_the_node_to_other_blocks():
     # parent from the one it saw a moment ago (about a hundred times in 3000 rounds of three threads; the window is
     # narrow, hence the rounds). What this checks: a racing detach never raises or panics, and the document ends with
     # the node in one block at most, its parent's. It can't check which block a racing detach took the node out of:
-    # every check after `detach()` returns races with the other threads too.
+    # every check after `detach()` returns races with the other threads too. So a detach that silently does nothing
+    # when the parent changed isn't caught: the thread's append then fails with "already in a document", which a race
+    # can also cause, and the end state is still consistent.
     doc = rkdl.parse("p {\n    mover\n}\nq {\n    x\n}\nr {\n    y\n}\n")
     blocks = [doc["p"], doc["q"], doc["r"]]
     node = doc["p"]["mover"]

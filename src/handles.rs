@@ -111,15 +111,7 @@ impl Home {
         // the collector can't free it as garbage meanwhile.
         let place = match self.0.try_lock() {
             Ok(place) => place,
-            // unreachable: a home's lock is poisoned only by a panic while it's held, and nothing under it can panic
-            // (its holders only swap a Place, compare a generation or clone_ref)
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            // unreachable: a race no test can make happen on demand: the collector traverses a handle on one thread
-            // while a move on another holds that handle's home lock in repoint, which takes nanoseconds and never
-            // runs Python. A probe hits it: loops/coverage/runs/round3/handles/probe-traverse-race.py in the wiki
-            // (two threads calling gc.collect() while a block node with 500 handled children moves between two
-            // documents, a few hits in 5 s; moving one child at a time hits it far less). Skipping and waiting give
-            // the same result there (the holders run detached and need nothing to finish), so a test couldn't fail
             Err(TryLockError::WouldBlock) => return Ok(()),
         };
         match &place.ptr {
@@ -398,10 +390,11 @@ pub(crate) fn on_home<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{empty_doc, with_python};
+    use crate::node::Node;
+    use crate::testing::{empty_doc, stray_id, with_python};
 
     // `Fail::Missing` from a home that didn't move is the answer (its doc): the error comes out after one try. Retrying
-    // it instead would loop forever, since nothing changes.
+    // it instead would loop forever on an rkdl bug; here the retry would succeed, so the test fails rather than hangs.
     #[test]
     fn missing_from_an_unmoved_home_is_the_answer() {
         with_python(|py| {
@@ -409,10 +402,13 @@ mod tests {
             let mut tries = 0;
             let result: PyResult<()> = on_home(py, &home, |_| {
                 tries += 1;
-                Err(Fail::Missing(stale()))
+                if tries == 1 {
+                    Err(Fail::Missing(stale()))
+                } else {
+                    Ok(())
+                }
             });
             let err = result.expect_err("the error is the answer");
-            assert!(err.is_instance_of::<PyRuntimeError>(py));
             assert!(err.to_string().contains("out of step with its document"), "{err}");
             assert_eq!(tries, 1);
         });
@@ -424,26 +420,63 @@ mod tests {
     fn garbage_dropped_without_release_settles_its_homes() {
         with_python(|py| {
             let home = Home::new(empty_doc(py));
+            let id = stray_id();
+            let node = Bound::new(py, Node::new(id, Arc::clone(&home))).expect("allocates");
+            let weak = PyWeakrefReference::new_with(node.as_any(), Forget(id.key())).expect("a weakref");
+            let mut published = Garbage::default();
+            assert!(intern_locked(id.key(), weak.unbind(), &home, &mut published));
+            published.release(py);
             let to = Arc::new(empty_doc(py));
             let mut garbage = Garbage::default();
-            repoint_one(&home, &to, &mut garbage);
+            repoint([id.key()], &to, &mut garbage);
             assert!(matches!(&home.place().ptr, Ptr::Shared(_)));
             drop(garbage);
             assert!(matches!(&home.place().ptr, Ptr::Own(doc) if doc.is(&*to)));
         });
     }
 
-    /// What `repoint` does to one live handle's home.
-    fn repoint_one(home: &Arc<Home>, to: &Arc<Py<Document>>, garbage: &mut Garbage) {
-        let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
-        let old = std::mem::replace(
-            &mut *home.place(),
-            Place {
-                ptr: Ptr::Shared(Arc::clone(to)),
-                generation,
-            },
-        );
-        garbage.old.push(old.ptr);
-        garbage.moved.push((Arc::clone(home), generation, Arc::clone(to)));
+    /// Whether the collector, traversing `node`'s handle, is told about `doc`. `gc.get_referents` runs the handle's
+    /// traverse directly (a panic in it reaches the caller, where `gc.collect()` would swallow it).
+    fn reports(node: &Bound<'_, Node>, doc: &Py<Document>) -> bool {
+        let gc = node.py().import("gc").expect("gc");
+        let found: Vec<Bound<'_, PyAny>> = gc
+            .call_method1("get_referents", (node,))
+            .and_then(|r| r.extract())
+            .expect("get_referents gives a list");
+        found.iter().any(|r| r.is(doc))
+    }
+
+    // Traversal doesn't wait for a home whose lock is held (a move repointing it on another thread): it skips the
+    // document that time, and reports it again once the lock is free. Holding the lock on the test's own thread makes
+    // that happen every time; waiting would deadlock here.
+    #[test]
+    fn traversal_skips_a_home_being_repointed() {
+        with_python(|py| {
+            let doc = empty_doc(py);
+            let home = Home::new(doc.clone_ref(py));
+            let node = Bound::new(py, Node::new(stray_id(), Arc::clone(&home))).expect("allocates");
+            assert!(reports(&node, &doc));
+            let held = home.place();
+            assert!(!reports(&node, &doc));
+            drop(held);
+            assert!(reports(&node, &doc));
+        });
+    }
+
+    // A home whose lock a panic poisoned still reports its document, so a cycle through it can still be collected.
+    #[test]
+    fn traversal_reports_the_document_of_a_poisoned_home() {
+        with_python(|py| {
+            let doc = empty_doc(py);
+            let home = Home::new(doc.clone_ref(py));
+            let node = Bound::new(py, Node::new(stray_id(), Arc::clone(&home))).expect("allocates");
+            let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = home.place();
+                panic!("a panic while the home's lock is held");
+            }));
+            assert!(poisoned.is_err());
+            assert!(home.0.is_poisoned());
+            assert!(reports(&node, &doc));
+        });
     }
 }

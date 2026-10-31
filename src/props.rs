@@ -502,3 +502,18 @@ fn abc_view<'py>(props: &Bound<'py, Props>, view: &str) -> PyResult<Bound<'py, P
     let py = props.py();
     py.import("collections.abc")?.getattr(view)?.call1((props,))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{repr, unreadable_node, with_python};
+
+    // Reprs never raise: the props view of a node that can't be read (an rkdl bug state) says so.
+    #[test]
+    fn repr_of_a_node_that_cant_be_read() {
+        with_python(|py| {
+            let props = Bound::new(py, Props::new(unreadable_node(py))).expect("allocates");
+            assert_eq!(repr(props.as_any()), "Props(<unreadable>)");
+        });
+    }
+}

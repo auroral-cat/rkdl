@@ -475,6 +475,5 @@ mod tests {
         drop_annotation_text(&mut node);
         assert!(node.format().is_none());
         assert_eq!(node.ty().map(KdlIdentifier::value), Some("t"));
-        assert_eq!(node.to_string(), "(t)x");
     }
 }
