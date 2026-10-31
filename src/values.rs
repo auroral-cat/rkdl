@@ -2,7 +2,7 @@ use std::fmt;
 
 use kdl::{KdlEntry, KdlEntryFormat, KdlIdentifier, KdlValue};
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyException, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyException, PyOverflowError, PyRecursionError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -323,7 +323,7 @@ impl fmt::Display for Place<'_> {
 /// `config.kdl:2:9: server prop retries: 300 doesn't fit (u8): out of range 0..=255`, starting the way `ParseError`'s
 /// first line does, and whose attributes say where `place` is. With no place, as when `entry.type` is set, it's a
 /// plain `ValueError`: the program asked for the annotation. An `Exception` from a custom decode is its `__cause__`.
-/// Anything else a decode raises, such as `KeyboardInterrupt`, propagates.
+/// Anything else a decode raises, such as `KeyboardInterrupt` or `RecursionError`, propagates.
 pub(crate) fn to_python_spelled(
     py: Python<'_>,
     value: &KdlValue,
@@ -342,7 +342,7 @@ pub(crate) fn to_python_spelled(
             let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
             match decode.call1((plain,)) {
                 Ok(decoded) => Ok(decoded.unbind()),
-                Err(err) if err.is_instance_of::<PyException>(py) => {
+                Err(err) if refused_by_hook(py, &err) => {
                     let reason = decode_raised(py, &err)?;
                     let refused = unreadable(py, ty, value, text, &reason, place)?;
                     refused.set_cause(py, Some(err));
@@ -1061,10 +1061,9 @@ fn encode_kept_user(
         let cls = Type::hook(user.ty.bind(py), |h| &h.cls)?.qualname()?;
         return Err(misfit(value, ty, &format!("expected a {cls}"))?);
     }
-    // Only an `Exception` from decode means "doesn't fit"; anything else, such as `KeyboardInterrupt`, propagates.
     match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
         Ok(decoded) => Ok((encode_with(user, &decoded)?, None)),
-        Err(err) if err.is_instance_of::<PyException>(py) => {
+        Err(err) if refused_by_hook(py, &err) => {
             let refused = misfit(value, ty, &decode_raised(py, &err)?)?;
             refused.set_cause(py, Some(err));
             Err(refused)
@@ -1138,6 +1137,15 @@ const fn expected(b: Builtin) -> &'static str {
         Builtin::Base64 => "expected base64 data",
         Builtin::PlainString => "expected a string",
     }
+}
+
+/// Whether what a custom decode raised means "doesn't fit". Anything else, such as `KeyboardInterrupt`, propagates.
+///
+/// A `RecursionError` propagates too: a decode that reads its own entry again recurses through rkdl, and wrapping the
+/// error at every level would double the message each time (each level quotes the one below), and on 3.14 the wrapping
+/// itself runs on the last few kB of stack Python leaves when it raises.
+fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
+    err.is_instance_of::<PyException>(py) && !err.is_instance_of::<PyRecursionError>(py)
 }
 
 /// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing.
