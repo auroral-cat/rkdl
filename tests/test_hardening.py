@@ -131,6 +131,23 @@ def test_one_change_during_an_edit_just_retries():
     assert str(doc) == "n 1"
 
 
+def test_a_rename_during_an_edit_plans_it_again():
+    # Setting k plans an append, since the node has no k. The encode renames j to k first, so the plan no longer fits:
+    # applying it would give the node two k's. Planned again, the write goes over the renamed entry.
+    holder = {"armed": True}
+
+    def rename():
+        if holder["armed"]:
+            holder["armed"] = False
+            holder["n"].props.entry("j").name = "k"
+
+    doc = box_parser(encode=rename).parse("n j=1 2\n")
+    holder["n"] = doc["n"]
+    doc["n"].props["k"] = Box(5)
+    assert str(doc) == "n k=(box)5 2\n"
+    assert doc["n"].props["k"].value == 5
+
+
 # Plans that return or match a value check it again when they apply, so a value written meanwhile isn't lost.
 
 

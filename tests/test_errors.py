@@ -20,6 +20,16 @@ def test_position_counts_code_points():
     assert (first.line, first.column, first.offset) == (2, 4, 9)
 
 
+def test_an_error_at_the_end_of_the_text():
+    # The annotation has no node after it, which kdl-rs reports at the end of the text: one column past the last
+    # character of the last line.
+    text = "server {\n    (u8)"
+    err = parse_error(text)
+    assert err.offset == len(text)
+    assert (err.line, err.column) == (2, 9)
+    assert str(err).startswith("2:9: ")
+
+
 def test_span_over_multibyte_text():
     # The bad number "1日本x" is 8 bytes but 4 code points, after a 2-byte "é".
     err = parse_error("é 1日本x")
