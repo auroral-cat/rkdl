@@ -881,6 +881,7 @@ mod tests {
     /// allowance.
     #[test]
     fn breaks() {
+        const EQ: &str = "Unexpected `=`: it goes between a property's key and its value";
         let tail = "a{".repeat(MAX_UNCHECKED_STEPS / LEVEL_STEPS + 1);
         for (text, at, what) in [
             ("a \"\\q \"", 3, "Invalid escape in a string"),
@@ -898,26 +899,10 @@ mod tests {
             ),
             ("}", 0, "Unexpected `}`: no block is open"),
             ("a )", 2, "Unexpected `)`: no type annotation is open"),
-            (
-                "a =1",
-                2,
-                "Unexpected `=`: it goes between a property's key and its value",
-            ),
-            (
-                "a 1=2",
-                3,
-                "Unexpected `=`: it goes between a property's key and its value",
-            ),
-            (
-                "a (t)k=2",
-                6,
-                "Unexpected `=`: it goes between a property's key and its value",
-            ),
-            (
-                "a k=v=w",
-                5,
-                "Unexpected `=`: it goes between a property's key and its value",
-            ),
+            ("a =1", 2, EQ),
+            ("a 1=2", 3, EQ),
+            ("a (t)k=2", 6, EQ),
+            ("a k=v=w", 5, EQ),
             ("a {} b", 5, "Expected `;` or a line break after this block"),
             // A node has one block of children; only slashdashed ones can come before it.
             ("a {} {}", 5, "Expected `;` or a line break after this block"),
@@ -1030,6 +1015,7 @@ mod tests {
         ] {
             let scan = scan(text);
             assert_eq!(scan.broke_at, None, "{:?}", short(text));
+            assert!(scan.refusal.is_none(), "{:?}", short(text));
         }
     }
 
