@@ -542,6 +542,38 @@ def test_view_follows_node_and_block():
         len(e_view)
 
 
+def test_a_view_of_a_removed_block_refuses_reads_and_edits():
+    d = doc()
+    b = d["b"]
+    view = b.children
+    b.children = None
+    stray = rkdl.Node("stray")
+    for use in (
+        list,
+        reversed,
+        lambda v: v[0],
+        lambda v: stray in v,
+        lambda v: v == [],
+        lambda v: v.index(stray),
+        lambda v: v.count(stray),
+        lambda v: v.append(stray),
+        lambda v: v.insert(0, stray),
+        lambda v: v.extend([stray]),
+        lambda v: v.__setitem__(0, stray),
+        lambda v: v.__setitem__(slice(None), [stray]),
+        lambda v: v.pop(),
+        lambda v: v.__delitem__(0),
+        lambda v: v.clear(),
+        lambda v: v.reverse(),
+    ):
+        with pytest.raises(ValueError, match="no children block"):
+            use(view)
+    # Nothing went in, and the block is still gone: an edit doesn't open one.
+    assert stray.parent is None
+    assert b.children is None
+    assert str(d) == "// header\na 1\nb\ne {}\n"
+
+
 # children = None / []
 
 
@@ -600,6 +632,26 @@ def test_children_assignment_errors():
     assert str(d) == before
 
 
+def test_children_take_int_indexes_and_nodes():
+    d = doc()
+    before = str(d)
+    # By name is doc["a"], not doc.children["a"].
+    with pytest.raises(TypeError):
+        d.children["a"]
+    with pytest.raises(TypeError):
+        d.children["a"] = rkdl.Node("x")
+    with pytest.raises(TypeError):
+        del d.children["a"]
+    with pytest.raises(TypeError, match="'str' object is not an instance of 'Node'"):
+        d.children[0] = "x"
+    # A string is an iterable, of strings.
+    with pytest.raises(TypeError, match="slice assignment to children takes an iterable of Nodes"):
+        d.children[0:1] = "x"
+    with pytest.raises(TypeError, match="children.extend takes an iterable of Nodes"):
+        d.children.extend("x")
+    assert str(d) == before
+
+
 def test_children_iadd():
     d = rkdl.parse("a { b; }\n")
     node = d["a"]
@@ -642,6 +694,11 @@ def test_lookups():
         d[("x", "a")]
     with pytest.raises(TypeError):
         d[0]
+    # get and iter take the same keys: a list isn't one.
+    with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
+        d.get(["t", "a"])
+    with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
+        d.iter(["t", "a"])
 
 
 def test_node_lookups():

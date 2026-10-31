@@ -1184,6 +1184,12 @@ def test_args_and_children_equal_lists():
     assert n.children != [n["b"], n["a"]]
     assert n.children != (n["a"], n["b"])
     assert n.children != [1, 2]
+    # A view equals another view the way a list equals a list.
+    assert n.children == n.children
+    assert n.children != [n["a"]]
+    assert n.children != doc.children
+    doc = rkdl.parse("x {}\ny {}\n")
+    assert doc["x"].children == doc["y"].children
 
 
 # A6: parent and detach
@@ -1287,6 +1293,13 @@ def test_reprs_of_removed_and_blockless_things():
     n.children = None
     assert repr(children) == "Children(<no children block>)"
     assert repr(doc) == "<Document with 1 nodes>"
+
+
+def test_children_repr_lists_the_nodes():
+    doc = rkdl.parse('server { listen; "log level" }\nempty {}\n')
+    assert repr(doc.children) == "Children([<Node server>, <Node empty>])"
+    assert repr(doc["server"].children) == 'Children([<Node listen>, <Node "log level">])'
+    assert repr(doc["empty"].children) == "Children([])"
 
 
 def test_reprs_survive_a_raising_repr():

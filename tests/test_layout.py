@@ -390,6 +390,16 @@ def test_sorting_keeps_each_place_s_whitespace_and_each_node_s_comments():
     reads_back(str(d))
 
 
+def test_sorting_where_a_comment_would_lose_its_line_end():
+    # The last place has no line ending, and b's `//` comment needs one, so b can't just take that place's whitespace.
+    d = rkdl.parse("b // about b\na")
+    b = d["b"]
+    d.children[:] = sorted(d.children, key=lambda n: n.name)
+    assert str(d) == "a\nb // about b\n"
+    assert d.children[1] is b
+    reads_back(str(d))
+
+
 def test_sorting_nested_blocks():
     d = rkdl.parse("pkg {\n    z {\n        x\n    }\n    b {}\n}\n")
     pkg = d["pkg"]
