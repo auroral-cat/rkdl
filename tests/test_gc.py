@@ -283,6 +283,19 @@ def test_finalizer_in_a_garbage_cycle_gets_a_fresh_handle(case):
     assert result.stdout.strip() == output
 
 
+def test_a_weakref_callback_on_a_handle_can_look_its_node_up():
+    # The cache's own callback on the dying handle runs after this one, and finds the slot already holds the new
+    # handle, which it leaves alone: the new handle stays the node's one handle.
+    doc = rkdl.parse("server 8080\n")
+    looked_up = []
+    ref = weakref.ref(doc["server"], lambda _: looked_up.append(doc["server"]))
+    assert ref() is None
+    (again,) = looked_up
+    assert again.args[0] == 8080
+    assert doc["server"] is again
+    assert doc.children[0] is again
+
+
 def weakref_count():
     return sum(isinstance(o, weakref.ReferenceType) for o in gc.get_objects())
 

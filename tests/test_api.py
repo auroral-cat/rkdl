@@ -368,6 +368,13 @@ def test_node_rejects_a_key_given_twice():
         rkdl.Node("x", props={"a": 1}, a=2)
 
 
+def test_node_property_keys_must_be_strings():
+    with pytest.raises(TypeError, match="^property keys must be str$"):
+        rkdl.Node("listen", props={8080: "http"})
+    with pytest.raises(TypeError, match="^property keys must be str$"):
+        rkdl.parse("").node("listen", props={8080: "http"})
+
+
 def test_node_children_must_be_nodes():
     with pytest.raises(TypeError, match=r'props=\{"children"'):
         rkdl.Node("x", children=5)
@@ -1339,6 +1346,11 @@ def test_reprs_survive_a_raising_repr():
     assert repr(n.args) == "Args([<kdl: (loud)1>])"
     assert repr(n.props) == "Props({'k': <kdl: (loud)2>})"
     assert repr(n.args.entry(0)) == "<Entry <kdl: (loud)1>>"
+    # Values written in code have no text from a file, so they show as rkdl writes them.
+    n.args.append(Loud())
+    n.props["j"] = Loud()
+    assert repr(n.args) == "Args([<kdl: (loud)1>, <kdl: (loud)1>])"
+    assert repr(n.props.entry("j")) == "<Entry j=<kdl: (loud)1>>"
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
