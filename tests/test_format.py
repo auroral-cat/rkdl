@@ -159,3 +159,10 @@ def test_fmt_keeps_the_line_ending_style(eol):
     assert str(doc) == "a 1 {\n    b\n    c\n}\n// d\ne\n".replace("\n", eol)
     parsed = rkdl.Parser(formatter=rkdl.Formatter()).parse(text)
     assert str(parsed) == str(doc)
+
+
+def test_fmt_a_document_built_from_scratch():
+    doc = rkdl.Document()
+    doc.children.append(rkdl.Node("a", 1, children=[rkdl.Node("b")]))
+    doc.fmt()
+    assert str(doc) == "a 1 {\n    b\n}\n"

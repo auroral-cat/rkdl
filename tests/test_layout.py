@@ -98,6 +98,38 @@ def test_a_block_on_a_node_that_used_to_be_last():
     assert str(d) == "a {\n    b {}\n    x\n}\n"
 
 
+def test_a_block_on_a_node_ending_in_a_continuation_at_the_end_of_the_file():
+    # The continuation's line ending was the last thing in the file. The block goes in front of it, so the line
+    # ending goes after the block.
+    d = rkdl.parse("x 1 \\\n")
+    d["x"].children = [N("y")]
+    assert str(d) == "x 1 \\\n{\n    y\n}\n"
+    reads_back(str(d))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a;\nb; c\n", "a;\nc\n"),
+        ("p {\n    a;\n    b; c\n}\n", "p {\n    a;\n    c\n}\n"),
+    ],
+)
+def test_taking_out_the_first_of_a_shared_line_after_a_semicolon(text, expected):
+    # a keeps its line ending, and c, now first on its line, takes over b's start.
+    d = rkdl.parse(text)
+    view = d["p"].children if text.startswith("p") else d.children
+    view.pop(1)
+    assert str(d) == expected
+
+
+def test_a_comment_at_the_end_of_an_emptied_block_stays_at_the_end():
+    d = rkdl.parse("a {\n    b\n    // end\n}\n")
+    d["a"].children.pop()
+    assert str(d) == "a {\n    // end\n}\n"
+    d["a"].children.append(N("x"))
+    assert str(d) == "a {\n    x\n    // end\n}\n"
+
+
 def test_taking_the_last_node_off_a_shared_line():
     d = rkdl.parse("a {\n    b\n    c }\n")
     d["a"].children.pop()
@@ -138,7 +170,11 @@ def test_a_continuation_closed_with_a_semicolon_moves_whole():
 # Line ending style lives on the document
 
 
-@pytest.mark.parametrize("text", ["\n", "\n\n", "  \n", "\ufeff\n", "// c\n", "\r\n", "\r\n\r\n", "\ufeff\r\n"])
+@pytest.mark.parametrize(
+    "text",
+    # A document of spaces: its start starts a line, and spaces don't end it, so the node goes on that line.
+    ["\n", "\n\n", "  \n", "\ufeff\n", "// c\n", "\r\n", "\r\n\r\n", "\ufeff\r\n", "   ", "\t", "\ufeff  "],
+)
 def test_appending_keeps_the_users_text(text):
     d = rkdl.parse(text)
     d.children.append(N("x"))
@@ -368,6 +404,65 @@ def test_reversing_twice_gives_back_the_text(name, crlf, where):
     assert str(doc) == before
 
 
+# A block written on one line stays on one line while what goes in fits on one line. Otherwise it spreads over lines.
+
+
+@pytest.mark.parametrize(
+    ("source", "moved"),
+    [
+        # A multi-line string argument. Strings keep their own lines.
+        ('x """\n  hi\n  """\n', 'x """\n  hi\n  """'),
+        # A slashdashed block after the entries, from a block at the depth it lands at.
+        ("p {\n    x 1 /-{\n        y\n    }\n}\n", "x 1 /-{\n        y\n    }"),
+    ],
+)
+def test_a_node_written_over_lines_spreads_a_one_line_block(source, moved):
+    src = rkdl.parse(source)
+    x = (src["p"] if source.startswith("p") else src).children.pop()
+    d = rkdl.parse("a { b }\n")
+    d["a"].children.append(x)
+    assert str(d) == f"a {{\n    b\n    {moved}\n}}\n"
+    reads_back(str(d))
+
+
+def test_a_node_ending_in_a_semicolon_fits_a_one_line_block():
+    x = rkdl.parse("x 1;").children.pop()
+    d = rkdl.parse("a { b }\n")
+    d["a"].children.append(x)
+    assert str(d) == "a { b; x 1 }\n"
+
+
+def test_a_node_ending_in_a_continuation_spreads_a_one_line_block():
+    # Nothing can follow its `\` on the line, so it can't go before the `}`. Where the closing `;` goes isn't pinned:
+    # task 63 indents it, and then this can check the exact text.
+    x = rkdl.parse("n 1 \\").children.pop()
+    d = rkdl.parse("a { b }\n")
+    d["a"].children.append(x)
+    out = str(d)
+    assert out.startswith("a {\n    b\n    n 1 \\\n")
+    assert out.endswith("\n}\n")
+    assert [n.name for n in rkdl.parse(out)["a"].children] == ["b", "n"]
+
+
+def test_a_block_with_a_multi_line_string_is_not_one_line():
+    d = rkdl.parse('a { b """\n  hi\n  """ }\n')
+    d["a"].children.append(N("x"))
+    assert str(d) == 'a { b """\n  hi\n  """\n    x\n}\n'
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [
+        (0, "a {\n    x {\n        y\n    }\n    c\n}\n"),
+        (1, "a {\n    b\n    x {\n        y\n    }\n}\n"),
+    ],
+)
+def test_a_replacement_that_does_not_fit_spreads_a_one_line_block(index, expected):
+    d = rkdl.parse("a { b; c }\n")
+    d["a"].children[index] = N("x", children=[N("y")])
+    assert str(d) == expected
+
+
 # Reordering by assignment: nodes from the replaced range may go back in, moved, as with a list. Each place keeps its
 # whitespace, as with reverse().
 
@@ -519,6 +614,12 @@ def test_removing_between_two_blank_lines_leaves_one():
     assert str(d) == "a\n"
 
 
+def test_removing_the_last_node_keeps_the_blank_line_above_a_closing_comment():
+    d = rkdl.parse("a\n\nb\n// end\n")
+    d.children.remove(d["b"])
+    assert str(d) == "a\n\n// end\n"
+
+
 def test_insert_before_the_first_goes_under_the_header():
     d = rkdl.parse(HEADED)
     d.children.insert(0, N("x"))
@@ -576,3 +677,132 @@ def test_slashdashed_nodes_count_as_comments():
     other = rkdl.parse("")
     other.children.append(a)
     assert str(other) == "/- older 2\na\n"
+
+
+# Known bugs, as strict xfails: each passes once its task fixes it.
+
+
+def _removed_a(d):
+    d.children.remove(d["a"])
+    return str(d)
+
+
+def _reversed(d):
+    d.children.reverse()
+    return str(d)
+
+
+def _x_inserted_first(d):
+    d.children.insert(0, N("x"))
+    return str(d)
+
+
+def _a_copied(d):
+    empty = rkdl.parse("")
+    empty.children.append(d["a"].copy())
+    return str(empty)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="task 62: a blank line inside a comment above a node counts as the end of the node's gap",
+)
+@pytest.mark.parametrize(
+    ("text", "edit", "expected"),
+    [
+        # No blank line between pieces: the whole comment is a's own. It goes with a, it stays above a when a node
+        # goes in front of a, and it comes with a's copy.
+        ("/* note\n\n more */\na\nb\n", _removed_a, "b\n"),
+        ("/-old {\n\n}\na\nb\n", _removed_a, "b\n"),
+        ("/* note\n\n more */\na\nb\n", _x_inserted_first, "x\n/* note\n\n more */\na\nb\n"),
+        ("/* note\n\n more */\na\nb\n", _a_copied, "/* note\n\n more */\na\n"),
+        # Each place keeps its whitespace and line end, and u moves with its whole comment.
+        ("h { i }\n/* x\n\n y */\nu /* c */ 2", _reversed, "/* x\n\n y */\nu /* c */ 2\nh { i }"),
+    ],
+)
+def test_a_comment_with_a_blank_line_inside_is_one_piece(text, edit, expected):
+    out = edit(rkdl.parse(text))
+    assert out == expected
+    reads_back(out)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="task 62: removing the second node on a line takes the blank line after it as the first one's line ending",
+)
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a; b\n\nc\n", "a;\n\nc\n"),
+        ("p {\n    a; b\n\n    c\n}\n", "p {\n    a;\n\n    c\n}\n"),
+        ("a; b\n\n// about c\nc\n", "a;\n\n// about c\nc\n"),
+    ],
+)
+def test_removing_the_second_of_a_line_keeps_the_blank_line_after_it(text, expected):
+    d = rkdl.parse(text)
+    view = d["p"].children if text.startswith("p") else d.children
+    view.pop(1)
+    assert str(d) == expected
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="task 62: the line ending after a `;` is kept outside the node, and stays behind when the node goes",
+)
+@pytest.mark.parametrize(
+    ("text", "index", "expected"),
+    [
+        ("a {\n    b\n    c;\n}\n", -1, "a {\n    b\n}\n"),
+        ("a\nc;\n", -1, "a\n"),
+        ("a;\nb;\n", 0, "b;\n"),
+        ("p {\n    a;\n    b\n}\n", 0, "p {\n    b\n}\n"),
+        # The comment on c's line is c's own and goes with it.
+        ("a {\n    b\n    c; // x\n}\n", -1, "a {\n    b\n}\n"),
+    ],
+)
+def test_a_node_ending_in_a_semicolon_takes_its_line_ending(text, index, expected):
+    d = rkdl.parse(text)
+    view = d.children[0].children if "{" in text else d.children
+    view.pop(index)
+    assert str(d) == expected
+
+
+def test_a_moved_node_s_multi_line_string_keeps_its_lines():
+    # Inside strings, the indentation is content: it doesn't move with the node.
+    x = rkdl.parse('x """\n  hi\n  """\n').children.pop()
+    d = rkdl.parse("a {\n    b\n}\n")
+    d["a"].children.append(x)
+    assert str(d) == 'a {\n    b\n    x """\n  hi\n  """\n}\n'
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="task 63: lines inside a moved node's own text (continuations, slashdashed blocks) keep their old indent",
+)
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("x 1 /-{\n    y\n}\n", "a {\n    b\n    x 1 /-{\n        y\n    }\n}\n"),
+        ("x \\\n    1\n", "a {\n    b\n    x \\\n        1\n}\n"),
+    ],
+)
+def test_a_moved_node_s_own_lines_take_the_new_indent(source, expected):
+    x = rkdl.parse(source).children.pop()
+    d = rkdl.parse("a {\n    b\n}\n")
+    d["a"].children.append(x)
+    assert str(d) == expected
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="task 63: spreading a one-line block leaves `}` after the comment before it, off the parent's indent",
+)
+def test_spreading_a_one_line_block_puts_its_closing_comment_on_a_line():
+    d = rkdl.parse("a { b; /* c */ }\n")
+    d["a"].children.append(N("x", children=[N("y")]))
+    assert str(d) == "a {\n    b\n    x {\n        y\n    }\n    /* c */\n}\n"
