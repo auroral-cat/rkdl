@@ -1194,8 +1194,9 @@ def test_children_views_equal_by_their_nodes():
     assert n.children == n.children
     assert n.children == doc["n"].children
     assert n.children != doc["x"].children
-    # Same length, different nodes, even where the names match.
+    # Same length, different nodes.
     assert doc["x"].children != doc["y"].children
+    # Different nodes even where the names match.
     assert doc["x"].children != rkdl.parse("x { a }\n")["x"].children
     assert doc["empty"].children == doc["also-empty"].children
 

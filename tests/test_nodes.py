@@ -546,7 +546,7 @@ def test_view_follows_node_and_block():
 # (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.)
 REMOVED_BLOCK_USES = {
     "list": lambda v, stray: list(v),
-    "reversed": lambda v, stray: reversed(v),
+    "reversed": lambda v, stray: list(reversed(v)),
     "getitem": lambda v, stray: v[0],
     "in": lambda v, stray: stray in v,
     "eq": lambda v, stray: v == [],
@@ -578,6 +578,19 @@ def test_a_view_of_a_removed_block_refuses_reads_and_edits(use):
     assert stray.parent is None
     assert b.children is None
     assert str(d) == "// header\na 1\nb\ne {}\n"
+
+
+def test_a_view_works_again_once_its_node_has_a_new_block():
+    # The view belongs to the node, not to one block.
+    d = doc()
+    b = d["b"]
+    view = b.children
+    b.children = None
+    b.children = [rkdl.Node("x")]
+    assert [n.name for n in view] == ["x"]
+    view.append(rkdl.Node("y"))
+    assert view == b.children
+    assert str(d) == "// header\na 1\nb {\n    x\n    y\n}\ne {}\n"
 
 
 # children = None / []
