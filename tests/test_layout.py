@@ -98,6 +98,46 @@ def test_a_block_on_a_node_that_used_to_be_last():
     assert str(d) == "a {\n    b {}\n    x\n}\n"
 
 
+def test_a_block_on_a_node_ending_in_a_continuation_at_the_end_of_the_file():
+    # The continuation's line ending was the last thing in the file. The block goes in front of it, so the line
+    # ending goes after the block.
+    d = rkdl.parse("x 1 \\\n")
+    d["x"].children = [N("y")]
+    assert str(d) == "x 1 \\\n{\n    y\n}\n"
+    reads_back(str(d))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a;\nb; c\n", "a;\nc\n"),
+        ("p {\n    a;\n    b; c\n}\n", "p {\n    a;\n    c\n}\n"),
+    ],
+)
+def test_taking_out_the_first_of_a_shared_line_after_a_semicolon(text, expected):
+    # The line break before b goes with b; c takes over the start of the line, so a gets a line ending.
+    d = rkdl.parse(text)
+    view = d["p"].children if text.startswith("p") else d.children
+    view.pop(1)
+    assert str(d) == expected
+
+
+@pytest.mark.parametrize("text", ["   ", "\t", "﻿  "])
+def test_appending_to_a_document_of_spaces(text):
+    # The start of the document starts a line, and spaces don't end it: the node goes on that line.
+    d = rkdl.parse(text)
+    d.children.append(N("x"))
+    assert str(d) == text + "x\n"
+
+
+def test_a_comment_at_the_end_of_an_emptied_block_stays_at_the_end():
+    d = rkdl.parse("a {\n    b\n    // end\n}\n")
+    d["a"].children.pop()
+    assert str(d) == "a {\n    // end\n}\n"
+    d["a"].children.append(N("x"))
+    assert str(d) == "a {\n    x\n    // end\n}\n"
+
+
 def test_taking_the_last_node_off_a_shared_line():
     d = rkdl.parse("a {\n    b\n    c }\n")
     d["a"].children.pop()
@@ -368,6 +408,65 @@ def test_reversing_twice_gives_back_the_text(name, crlf, where):
     assert str(doc) == before
 
 
+# A block written on one line stays on one line while what goes in fits on one line. Otherwise it spreads over lines.
+
+
+@pytest.mark.parametrize(
+    ("source", "moved"),
+    [
+        # A multi-line string argument, as a name and as a type annotation. Strings keep their own lines.
+        ('x """\n  hi\n  """\n', 'x """\n  hi\n  """'),
+        ('"""\n  n\n  """ 1\n', '"""\n  n\n  """ 1'),
+        ('("""\n  t\n  """)x\n', '("""\n  t\n  """)x'),
+        # A slashdashed block after the entries. Already at the indent it lands at.
+        ("    x 1 /-{\n        y\n    }\n", "x 1 /-{\n        y\n    }"),
+    ],
+)
+def test_a_node_written_over_lines_spreads_a_one_line_block(source, moved):
+    x = rkdl.parse(source).children.pop()
+    d = rkdl.parse("a { b }\n")
+    d["a"].children.append(x)
+    assert str(d) == f"a {{\n    b\n    {moved}\n}}\n"
+    reads_back(str(d))
+
+
+def test_a_node_ending_in_a_semicolon_fits_a_one_line_block():
+    x = rkdl.parse("x 1;").children.pop()
+    d = rkdl.parse("a { b }\n")
+    d["a"].children.append(x)
+    assert str(d) == "a { b; x 1 }\n"
+
+
+def test_a_node_ending_in_a_continuation_spreads_a_one_line_block():
+    # Nothing can follow its `\` on the line, so it can't go before the `}`.
+    x = rkdl.parse("n 1 \\").children.pop()
+    d = rkdl.parse("a { b }\n")
+    d["a"].children.append(x)
+    out = str(d)
+    assert out.startswith("a {\n    b\n    n 1 \\\n")
+    assert out.endswith("\n}\n")
+    assert [n.name for n in rkdl.parse(out)["a"].children] == ["b", "n"]
+
+
+def test_a_block_with_a_multi_line_string_is_not_one_line():
+    d = rkdl.parse('a { b """\n  hi\n  """ }\n')
+    d["a"].children.append(N("x"))
+    assert str(d) == 'a { b """\n  hi\n  """\n    x\n}\n'
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [
+        (0, "a {\n    x {\n        y\n    }\n    c\n}\n"),
+        (1, "a {\n    b\n    x {\n        y\n    }\n}\n"),
+    ],
+)
+def test_a_replacement_that_does_not_fit_spreads_a_one_line_block(index, expected):
+    d = rkdl.parse("a { b; c }\n")
+    d["a"].children[index] = N("x", children=[N("y")])
+    assert str(d) == expected
+
+
 # Reordering by assignment: nodes from the replaced range may go back in, moved, as with a list. Each place keeps its
 # whitespace, as with reverse().
 
@@ -517,6 +616,12 @@ def test_removing_between_two_blank_lines_leaves_one():
     # At the end, no blank line is left over.
     d.children.remove(d["c"])
     assert str(d) == "a\n"
+
+
+def test_removing_the_last_node_keeps_the_blank_line_above_a_closing_comment():
+    d = rkdl.parse("a\n\nb\n// end\n")
+    d.children.remove(d["b"])
+    assert str(d) == "a\n\n// end\n"
 
 
 def test_insert_before_the_first_goes_under_the_header():
