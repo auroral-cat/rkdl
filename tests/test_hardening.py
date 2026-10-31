@@ -194,6 +194,24 @@ def test_remove_matches_the_value_it_removes():
     assert list(node.args) == [7, 3]
 
 
+def test_entry_type_checks_the_value_it_annotates():
+    holder = {"armed": True}
+
+    def decode(value):
+        if holder["armed"]:
+            holder["armed"] = False
+            holder["entry"].value = 3  # replaces the value being checked with one that doesn't fit
+        if value % 2:
+            raise ValueError("odd")
+        return value
+
+    doc = rkdl.Parser(types=[rkdl.Type("even", int, decode=decode, encode=int)]).parse("n 4")
+    holder["entry"] = doc["n"].args.entry(0)
+    with pytest.raises(ValueError, match=r"doesn't fit \(even\)"):
+        holder["entry"].type = "even"
+    assert str(doc) == "n 3"
+
+
 def test_pop_of_a_nan_doesnt_retry_forever():
     # NaN isn't equal to itself, so the apply-time check compares values by their bits instead.
     node = rkdl.parse("n #nan 1")["n"]

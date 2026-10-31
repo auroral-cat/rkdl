@@ -60,6 +60,21 @@ def test_entries_in_file_order():
     assert n.entries.index(n.args.entry(1)) == 2
     assert n.args.entry(0) in n.entries
     assert list(reversed(n.entries)) == entries[::-1]
+    assert n.entries[1:] == entries[1:]
+    assert n.entries[::-2] == [entries[2], entries[0]]
+    assert type(n.entries[:1]) is list
+
+
+def test_entries_hold_only_entries():
+    _, n = node("n 1 a=2 3\n")
+    one = n.args.entry(0)
+    # The values the entries hold aren't entries.
+    assert 1 not in n.entries
+    assert ("a", 2) not in n.entries
+    assert n.entries.count(one) == 1
+    assert n.entries.count(1) == 0
+    del n.args[0]
+    assert n.entries.count(one) == 0
 
 
 def test_entries_index_takes_a_range_like_a_list():
@@ -116,6 +131,32 @@ def test_props_mapping_methods():
     assert str(d) == "n a=10 b=20 c=3\n"
     with pytest.raises(TypeError):
         n.props[1] = 2
+
+
+def test_props_keys_are_str():
+    d, n = node("n a=1 b=2\n")
+    # Like a dict's missing key, a key that isn't a str is simply not there.
+    with pytest.raises(KeyError) as missing:
+        n.props[1]
+    assert missing.value.args == (1,)
+    with pytest.raises(KeyError) as missing:
+        del n.props[1]
+    assert missing.value.args == (1,)
+    with pytest.raises(KeyError) as missing:
+        n.props.pop(1)
+    assert missing.value.args == (1,)
+    assert 1 not in n.props
+    assert n.props.get(1) is None
+    assert n.props.get(1, "default") == "default"
+    assert n.props.pop(1, "default") == "default"
+    assert str(d) == "n a=1 b=2\n"
+
+
+def test_props_pop_takes_one_default():
+    d, n = node("n a=1\n")
+    with pytest.raises(TypeError, match="pop expected at most 2 arguments"):
+        n.props.pop("a", 1, 2)
+    assert str(d) == "n a=1\n"
 
 
 def test_props_clear():
@@ -437,6 +478,12 @@ def test_entry_repr_quotes_keys_and_types():
     assert repr(n.props.entry("+.7")) == '<Entry "+.7"=2>'
 
 
+def test_entries_repr_lists_the_entries():
+    _, n = node('n "web" port=(u16)0x1F90\n')
+    assert repr(n.entries) == "Entries([<Entry 'web'>, <Entry port=(u16)8080>])"
+    assert repr(rkdl.Node("n").entries) == "Entries([])"
+
+
 def test_entries_equality_is_by_identity():
     _, n = node("n 1 a=1\n")
     _, m = node("n 1 a=1\n")
@@ -445,6 +492,8 @@ def test_entries_equality_is_by_identity():
     assert n.entries != m.entries
     assert n.entries != list(n.entries)[::-1]
     assert n.entries != [1, 1]
+    assert n.entries != list(n.entries)[:1]
+    assert n.entries != [*n.entries, n.entries[0]]
     assert n.entries != tuple(n.entries)
     with pytest.raises(TypeError):
         hash(n.entries)

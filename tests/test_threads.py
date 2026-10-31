@@ -122,6 +122,31 @@ def test_entry_reads_while_its_node_moves_between_documents():
     assert str(second) == "c {\n    d\n}\n"
 
 
+def test_entry_positions_while_its_node_leaves_and_comes_back():
+    doc = rkdl.parse("a\nmover 1 port=2\nb\n")
+    node = doc["mover"]
+    arg, port = node.args.entry(0), node.props.entry("port")
+    done = threading.Event()
+
+    def leave_and_come_back():
+        try:
+            for _ in range(ROUNDS):
+                # A detached node keeps the positions of its document, and gets them back there.
+                doc.children.remove(node)
+                doc.children.insert(1, node)
+            return ROUNDS
+        finally:
+            done.set()
+
+    def read():
+        assert (arg.line, arg.column) == (2, 7)
+        assert (port.line, port.column) == (2, 9)
+
+    counts = run(leave_and_come_back, *[until(done, read)] * 3)
+    assert all(counts), counts
+    assert str(doc) == "a\nmover 1 port=2\nb\n"
+
+
 def test_nodes_moving_both_ways_between_two_documents():
     first = rkdl.parse("x 1 {\n    deep\n}\nstay\n")
     second = rkdl.parse("y 2\nother {\n    z\n}\n")
