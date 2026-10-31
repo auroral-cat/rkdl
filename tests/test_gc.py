@@ -334,3 +334,39 @@ def test_removed_entry_lets_go_of_its_document():
         with pytest.raises(RuntimeError, match="entry was removed"):
             entry.value  # noqa: B018
         assert not [o for o in gc.get_referents(entry) if isinstance(o, rkdl.Document)]
+
+
+# On 3.11 and 3.12 the collector runs weakref callbacks that finalizers create while it clears the cycle (3.13 doesn't).
+# Here the callback fires when the Type's own decode dies, which happens inside `Type.__clear__`: reading the Type from
+# it used to panic, since the Type was still mutably borrowed. A subprocess, so a panic fails only this test.
+DECODE_DIES_IN_CLEAR = """
+log, keep = [], []
+class Holder:
+    pass
+class Decode:
+    def __call__(self, v):
+        return v
+class Finalizer:
+    def __del__(self):
+        keep.append(weakref.ref(self.holder))
+        keep.append(weakref.ref(self.holder.t.decode, on_decode_gone))
+def on_decode_gone(_):
+    try:
+        keep[0]().t.decode
+    except BaseException as e:
+        log.append(repr(e))
+t = rkdl.Type("x", int, decode=Decode(), encode=int)
+f, h = Finalizer(), Holder()
+h.t, h.f, f.holder = t, f, h
+del t, f, h
+gc.collect()
+print(log)
+"""
+
+
+@pytest.mark.skipif(sys.version_info >= (3, 13), reason="the collector runs no such callback during clearing on 3.13+")
+def test_a_type_read_while_its_hooks_die_in_clear_raises():
+    command = [sys.executable, "-c", "import gc\nimport weakref\nimport rkdl\n" + DECODE_DIES_IN_CLEAR]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[\"RuntimeError('Type was cleared by the garbage collector')\"]"
