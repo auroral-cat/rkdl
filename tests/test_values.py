@@ -360,8 +360,11 @@ class Step(int):
 @pytest.mark.parametrize(
     "value",
     [
-        pytest.param(Rotating(0xA5), marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="wrong int")),
-        pytest.param(Step(7), marks=pytest.mark.xfail(strict=True, raises=TypeError, reason="its >> runs")),
+        pytest.param(
+            Rotating(0xA5),
+            marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 69: its >> gives a wrong int"),
+        ),
+        pytest.param(Step(7), marks=pytest.mark.xfail(strict=True, raises=TypeError, reason="task 69: its >> runs")),
     ],
     ids=["Rotating", "Step"],
 )
