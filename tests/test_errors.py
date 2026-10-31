@@ -171,14 +171,14 @@ def stdin_with(text):
     return io.TextIOWrapper(io.BufferedReader(raw), encoding="utf-8")
 
 
-@LOADERS
-def test_stdin_is_not_a_path(load):
+# Parser.load reads through the same `_read` as rkdl.load, so one loader is enough here.
+def test_stdin_is_not_a_path():
     with stdin_with(BAD) as stdin:
-        err = load_error(stdin, load)
+        err = load_error(stdin)
     assert err.path is None
     assert str(err).startswith("2:3: ")
     with stdin_with("a 1\n") as stdin:
-        assert load(stdin).path is None
+        assert rkdl.load(stdin).path is None
 
 
 def test_diagnostics_compare_by_value():
@@ -189,15 +189,21 @@ def test_diagnostics_compare_by_value():
     assert pickle.loads(pickle.dumps(first)) == first
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 64: Diagnostic repr uses Python's quoting")
 def test_diagnostic_repr_shows_where_and_what():
-    # Diagnostics a program builds for its own checks. The message is a Python str, shown as rkdl's other reprs show
-    # one: with Python's repr.
-    diagnostic = rkdl.Diagnostic("unknown setting", "not a setting", None, 14, 7, 2, 5)
-    assert repr(diagnostic) == "<Diagnostic 2:5 'unknown setting'>"
-    # Where Python's repr and Rust's quoting differ: double quotes in the message.
-    quoted = rkdl.Diagnostic('mode is "on" or "off"', None, None, 30, 4, 3, 10)
-    assert repr(quoted) == """<Diagnostic 3:10 'mode is "on" or "off"'>"""
+    # A diagnostic a program builds for its own check: its position, then its message, not the label.
+    shown = repr(rkdl.Diagnostic("unknown setting", "not a setting", None, 14, 7, 2, 5))
+    assert shown.startswith("<Diagnostic 2:5 ")
+    assert shown.endswith(">")
+    assert "unknown setting" in shown
+    assert "not a setting" not in shown
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 64: Diagnostic repr uses Python's quoting")
+def test_diagnostic_repr_quotes_the_message_as_python_does():
+    # The message is a Python str, so it's shown with Python's repr, as `<Entry 'web'>` shows its value. Double
+    # quotes in it are where that differs from Rust's quoting.
+    diagnostic = rkdl.Diagnostic('mode is "on" or "off"', None, None, 30, 4, 3, 10)
+    assert repr(diagnostic) == """<Diagnostic 3:10 'mode is "on" or "off"'>"""
 
 
 def lines(eol, last):
@@ -301,11 +307,11 @@ def test_a_long_or_multiline_raw_string_gets_the_rule_instead_of_the_v2_form():
     assert multiline.help.splitlines()[0] == long.help.splitlines()[0]
 
 
-def test_an_unfinished_string_gets_the_rule_instead_of_the_v2_form():
-    # A file cut off inside a string, which has no v2 form to show; once right after a backslash.
-    for text in ['out "build\\/', 'out "build\\/\\']:
-        first = parse_error(text).diagnostics[0]
-        assert first.help.splitlines()[0] == "this looks like KDL v1: in KDL v2 / isn't escaped: write \\/ as /"
+# A file cut off inside a string has no v2 form to show.
+@pytest.mark.parametrize("text", ['out "build\\/', 'out "build\\/\\'], ids=["inside", "after a backslash"])
+def test_an_unfinished_string_gets_the_rule_instead_of_the_v2_form(text):
+    first = parse_error(text).diagnostics[0]
+    assert first.help.splitlines()[0] == "this looks like KDL v1: in KDL v2 / isn't escaped: write \\/ as /"
 
 
 @pytest.mark.parametrize(

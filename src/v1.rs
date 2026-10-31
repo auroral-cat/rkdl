@@ -130,6 +130,9 @@ mod tests {
         assert_eq!(at("node (true)1", "true"), None);
         assert_eq!(at("node { true; }", "true"), None);
         assert_eq!(at("node truex", "true"), None);
+        // An identifier that starts with true-, and true after a stray `)` with no `(`.
+        assert_eq!(at("term true-color#true", "true"), None);
+        assert_eq!(at("retries 3) true", "true"), None);
     }
 
     #[test]
