@@ -573,6 +573,22 @@ def test_an_inline_verbose_flag_is_part_of_the_pattern():
     assert rkdl.parse(str(doc))["n"].args[0] == re.compile(pattern)
 
 
+def test_only_a_regex_error_is_taken_for_a_verbose_comment(monkeypatch):
+    compiled = re.compile(r"\d+  # digits (optional", re.VERBOSE)
+    calls = []
+
+    def interrupted_once(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return compile_(*args)
+
+    compile_ = re.compile
+    monkeypatch.setattr(re, "compile", interrupted_once)
+    with pytest.raises(KeyboardInterrupt):
+        from_python(compiled)
+
+
 # KDL has no signaling NaN, and writing #nan would change the value without a word.
 
 
@@ -606,6 +622,16 @@ def test_a_decimal_exponent_past_what_decimal_takes_is_refused_for_it(ty):
     err = read_error(lambda n: n.args[0], n)
     assert type(err) is rkdl.ReadError
     assert reason(err) == "exponent past what Python's decimal takes"
+
+
+def test_only_decimals_own_refusal_is_taken_for_the_exponent(monkeypatch):
+    def interrupted(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(decimal, "Decimal", interrupted)
+    n = rkdl.parse("n (decimal64)1e-99999999999999999999\n")["n"]
+    with pytest.raises(KeyboardInterrupt):
+        n.args[0]
 
 
 def test_a_tiny_decimal_reads():

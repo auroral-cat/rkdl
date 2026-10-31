@@ -14,6 +14,12 @@ use crate::errors::{ReadError, parse_error};
 use crate::iso::{self, Iso};
 use crate::positions::Pos;
 
+pyo3::import_exception!(decimal, InvalidOperation);
+// The macro names the type after the class, so `re.error` gets a module to keep `error` from reading as anything else.
+mod py_re {
+    pyo3::import_exception!(re, error);
+}
+
 // Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
 // reference cycle.
 /// A custom type annotation: how to read and write the values annotated with it.
@@ -345,7 +351,7 @@ pub(crate) fn to_python_spelled(
                 Err(err) => Err(err),
             }
         }
-        Some(Converter::Builtin(b)) => match decode_builtin(py, b, value, text) {
+        Some(Converter::Builtin(b)) => match decode_builtin(py, b, value, text)? {
             Ok(decoded) => Ok(decoded),
             Err(reason) => {
                 let refused = unreadable(py, ty, value, text, &reason, place)?;
@@ -748,17 +754,41 @@ fn is_instance(value: &Bound<'_, PyAny>, module: &str, attr: &str) -> PyResult<b
     value.is_instance(&value.py().import(module)?.getattr(attr)?)
 }
 
-/// The Err is the reason the value doesn't fit, for the caller's message.
+/// The inner Err is the reason the value doesn't fit, for the caller's message. An `Exception` from Python's parser
+/// is a reason too; anything else, such as `KeyboardInterrupt`, propagates.
+fn decode_builtin(
+    py: Python<'_>,
+    b: Builtin,
+    value: &KdlValue,
+    text: Option<&str>,
+) -> PyResult<Result<Py<PyAny>, String>> {
+    match parse_builtin(py, b, value, text) {
+        Ok(Ok(decoded)) => Ok(Ok(decoded.unbind())),
+        Ok(Err(err)) if err.is_instance_of::<PyException>(py) => {
+            Ok(Err(own_reason(b, value).unwrap_or_else(|| err.value(py).to_string())))
+        }
+        Ok(Err(err)) => Err(err),
+        Err(reason) => Ok(Err(reason)),
+    }
+}
+
+/// `decode_builtin`'s work: the Err is a reason rkdl gives itself, and the inner result is what Python's parser made
+/// of the value.
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "each type accepts one or two kinds of value and rejects the rest"
 )]
-fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&str>) -> Result<Py<PyAny>, String> {
+fn parse_builtin<'py>(
+    py: Python<'py>,
+    b: Builtin,
+    value: &KdlValue,
+    text: Option<&str>,
+) -> Result<PyResult<Bound<'py, PyAny>>, String> {
     let string = || match value {
         KdlValue::String(s) => Ok(s.as_str()),
         _ => Err(expected(b).to_owned()),
     };
-    let decoded = match b {
+    Ok(match b {
         Builtin::Int { min, max } => {
             let KdlValue::Integer(i) = value else {
                 return Err(expected(b).to_owned());
@@ -799,11 +829,11 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
             // The only literal `decimal` refuses is one whose exponent is past about ±10^18, which kdl-rs reads.
             // Zero fits whatever its exponent.
             match call(py, "decimal", "Decimal", &digits) {
-                Ok(decimal) => Ok(decimal),
-                Err(_) => match zero_sign(&digits) {
+                Err(err) if err.is_instance_of::<InvalidOperation>(py) => match zero_sign(&digits) {
                     Some(sign) => call(py, "decimal", "Decimal", format!("{sign}0")),
                     None => return Err(DECIMAL_EXPONENT.to_owned()),
                 },
+                decimal => decimal,
             }
         }
         Builtin::DecimalString => call(py, "decimal", "Decimal", string()?),
@@ -816,10 +846,7 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
         Builtin::Regex => call(py, "re", "compile", string()?),
         Builtin::Base64 => b64decode(py, string()?),
         Builtin::PlainString => string()?.into_bound_py_any(py),
-    };
-    decoded
-        .map(Bound::unbind)
-        .map_err(|e| own_reason(b, value).unwrap_or_else(|| e.value(py).to_string()))
+    })
 }
 
 /// rkdl's own reason a string doesn't fit `b`, where Python's message would change with the Python version or isn't
@@ -944,7 +971,7 @@ fn encode_builtin(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<(KdlV
                 Ok(own) => own.getattr("flags")?.extract()?,
                 // A VERBOSE comment can hold what doesn't compile without the flag, like `# (optional`. The flag
                 // isn't inline then, or the pattern would compile alone.
-                Err(_) if flags & verbose != 0 => {
+                Err(err) if err.is_instance_of::<py_re::error>(value.py()) && flags & verbose != 0 => {
                     let own: u32 = re
                         .getattr("compile")?
                         .call1((&pattern, verbose))?
@@ -1003,7 +1030,7 @@ fn encode_kept_builtin(
     } else if is_exact_plain(value) {
         // A plain value fits if the annotation reads it, and if it doesn't, the reason is the one reading it gives.
         let kdl = plain_to_kdl(value)?.expect("exact plain types always convert");
-        match decode_builtin(value.py(), b, &kdl, None) {
+        match decode_builtin(value.py(), b, &kdl, None)? {
             Ok(_) => return Ok((kdl, None)),
             Err(reason) => reason,
         }
