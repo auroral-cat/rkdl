@@ -553,6 +553,7 @@ def test_a_view_of_a_removed_block_refuses_reads_and_edits():
         reversed,
         lambda v: v[0],
         lambda v: stray in v,
+        lambda v: v == [],
         lambda v: v.index(stray),
         lambda v: v.count(stray),
         lambda v: v.append(stray),
