@@ -160,8 +160,6 @@ pub(crate) fn parse_error_in(py: Python<'_>, err: &KdlError, path: Option<&str>)
         .and_then(|()| value.setattr("path", path));
     match set {
         Ok(()) => exc,
-        // unreachable: setting an int, a list, a str or None on a fresh ParseError (a ValueError subclass with a
-        // __dict__) fails only on memory errors
         Err(e) => e,
     }
 }
@@ -181,11 +179,8 @@ fn help(input: &str, diag: &KdlDiagnostic) -> Option<String> {
 fn report(err: &KdlError, helps: &[Option<String>], path: Option<&str>, first: Option<(usize, usize)>) -> String {
     let at = match (path, first) {
         (Some(path), Some((line, column))) => format!("{path}:{line}:{column}: "),
-        // unreachable: every KdlError has a diagnostic: rkdl's refusals carry one, and kdl-rs gave one for every error
-        // probed (all spec-input prefixes, 4164 entry texts through KdlEntry::parse)
         (Some(path), None) => format!("{path}: "),
         (None, Some((line, column))) => format!("{line}:{column}: "),
-        // unreachable: as (Some(path), None) above, a KdlError always has a diagnostic
         (None, None) => String::new(),
     };
     let source = Source::new(err, path);
@@ -206,8 +201,9 @@ fn render(diagnostic: &dyn miette::Diagnostic) -> String {
     let mut out = String::new();
     match handler.render_report(&mut out, diagnostic) {
         Ok(()) => out.trim_end().to_owned(),
-        // unreachable: rendering into a String fails only if a span can't be read, and kdl-rs's spans and rkdl's
-        // refusals' lie inside the text they point into
+        // unreachable: writing to a String can't fail, and miette prints a line for a label it can't read instead
+        // of failing; it errs only if a span reads once and fails on reading again, and Source's reads depend only
+        // on the text
         Err(_) => diagnostic.to_string(),
     }
 }
@@ -291,5 +287,25 @@ impl miette::Diagnostic for Located<'_> {
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
         miette::Diagnostic::labels(self.diagnostic)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No KdlError rkdl sees has no diagnostics (its refusals carry one, and kdl-rs gave one for every error probed),
+    /// but if one did, the summary has no position to name: only the file, if any, then the error itself.
+    #[test]
+    fn a_report_without_diagnostics_names_no_position() {
+        let err = KdlError {
+            input: Arc::new("a {".to_owned()),
+            diagnostics: vec![],
+        };
+        assert_eq!(
+            report(&err, &[], Some("config.kdl"), None),
+            format!("config.kdl: {err}")
+        );
+        assert_eq!(report(&err, &[], None, None), err.to_string());
     }
 }

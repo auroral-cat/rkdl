@@ -140,8 +140,10 @@ mod tests {
 
     #[test]
     fn an_annotation_dropped_without_unfolding_leaves_the_name_plain() {
-        // The padding stays on the node, but folding only touches a node with an annotation, and unfolding strips the
-        // name's padding all the same. `(t)  n` without its annotation is `n` (node.rs, `set_type`).
+        // No current caller produces this state: `set_type` and `fmt()`'s `requote` both clear the padding with the
+        // annotation. This pins the module's documented guard for when one doesn't: the padding stays on the node, but
+        // folding only touches a node with an annotation, and unfolding strips the name's padding all the same.
+        // `(t)  n` without its annotation is `n` (node.rs, `set_type`).
         let mut doc: KdlDocument = "( t )  n 1".parse().expect("parses");
         restore(&mut doc);
         *doc.nodes_mut()[0].ty_mut() = None;
