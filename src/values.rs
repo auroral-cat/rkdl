@@ -11,6 +11,7 @@ use pyo3::{PyTraverseError, PyTypeInfo};
 
 use crate::annotated::Value;
 use crate::errors::{ReadError, parse_error};
+use crate::iso::{self, Iso};
 use crate::positions::Pos;
 
 // Not frozen: `__clear__` has to drop the hooks, since a hook that refers to a document using this Type is a
@@ -798,7 +799,31 @@ fn decode_builtin(py: Python<'_>, b: Builtin, value: &KdlValue, text: Option<&st
         Builtin::Base64 => b64decode(py, string()?),
         Builtin::PlainString => string()?.into_bound_py_any(py),
     };
-    decoded.map(Bound::unbind).map_err(|e| e.value(py).to_string())
+    decoded
+        .map(Bound::unbind)
+        .map_err(|e| own_reason(b, value).unwrap_or_else(|| e.value(py).to_string()))
+}
+
+/// rkdl's own reason a string doesn't fit `b`, where Python's message would change with the Python version or isn't
+/// meant for the file's author. None where Python's is stable and plain: the IP addresses, regex and base64.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "only the types that parse a string have their own reasons"
+)]
+fn own_reason(b: Builtin, value: &KdlValue) -> Option<String> {
+    let KdlValue::String(text) = value else {
+        return None;
+    };
+    match b {
+        Builtin::DateTime => Some(iso::reason(Iso::DateTime, text)),
+        Builtin::Date => Some(iso::reason(Iso::Date, text)),
+        Builtin::Time => Some(iso::reason(Iso::Time, text)),
+        // Python's is `[<class 'decimal.ConversionSyntax'>]`.
+        Builtin::DecimalString => Some("expected a decimal number, like 1.25".to_owned()),
+        // Python's is either "badly formed hexadecimal UUID string" or int()'s, depending on what's wrong.
+        Builtin::Uuid => Some("expected 32 hex digits".to_owned()),
+        _ => None,
+    }
 }
 
 /// A decimal float literal's digits as `Decimal` reads them, without the `_` separators. KDL's decimal syntax is a
