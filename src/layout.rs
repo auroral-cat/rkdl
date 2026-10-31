@@ -2174,7 +2174,7 @@ mod tests {
         let style = Style::of(&doc, Some(&[0]), "\n");
         let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
         assert_eq!(unplace(block, 0, &style).name().value(), "y");
-        assert!(block.nodes().is_empty());
+        assert_eq!(block.nodes().len(), 0);
         assert_eq!(names(&parse(&doc.to_string())), ["p"]);
         // `unplace`'s doc: an emptied children block prints as `{}`. Without a record, kdl-rs prints `{\n}` today.
         known_bug(&doc.to_string(), "p {}\n", "task 71 (`block_fmt_mut` in `unplace`)");
