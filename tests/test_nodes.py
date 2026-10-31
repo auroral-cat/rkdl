@@ -542,32 +542,38 @@ def test_view_follows_node_and_block():
         len(e_view)
 
 
-def test_a_view_of_a_removed_block_refuses_reads_and_edits():
+# Every read or edit through a view of a removed block raises, even where a list would answer (`in`) or do nothing
+# (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.)
+REMOVED_BLOCK_USES = {
+    "list": lambda v, stray: list(v),
+    "reversed": lambda v, stray: reversed(v),
+    "getitem": lambda v, stray: v[0],
+    "in": lambda v, stray: stray in v,
+    "eq": lambda v, stray: v == [],
+    "index": lambda v, stray: v.index(stray),
+    "count": lambda v, stray: v.count(stray),
+    "append": lambda v, stray: v.append(stray),
+    "insert": lambda v, stray: v.insert(0, stray),
+    "extend": lambda v, stray: v.extend([stray]),
+    "setitem": lambda v, stray: v.__setitem__(0, stray),
+    "set slice": lambda v, stray: v.__setitem__(slice(None), [stray]),
+    "pop": lambda v, stray: v.pop(),
+    "delitem": lambda v, stray: v.__delitem__(0),
+    "remove": lambda v, stray: v.remove(stray),
+    "clear": lambda v, stray: v.clear(),
+    "reverse": lambda v, stray: v.reverse(),
+}
+
+
+@pytest.mark.parametrize("use", REMOVED_BLOCK_USES.values(), ids=REMOVED_BLOCK_USES.keys())
+def test_a_view_of_a_removed_block_refuses_reads_and_edits(use):
     d = doc()
     b = d["b"]
     view = b.children
     b.children = None
     stray = rkdl.Node("stray")
-    for use in (
-        list,
-        reversed,
-        lambda v: v[0],
-        lambda v: stray in v,
-        lambda v: v == [],
-        lambda v: v.index(stray),
-        lambda v: v.count(stray),
-        lambda v: v.append(stray),
-        lambda v: v.insert(0, stray),
-        lambda v: v.extend([stray]),
-        lambda v: v.__setitem__(0, stray),
-        lambda v: v.__setitem__(slice(None), [stray]),
-        lambda v: v.pop(),
-        lambda v: v.__delitem__(0),
-        lambda v: v.clear(),
-        lambda v: v.reverse(),
-    ):
-        with pytest.raises(ValueError, match="no children block"):
-            use(view)
+    with pytest.raises(ValueError, match="no children block"):
+        use(view, stray)
     # Nothing went in, and the block is still gone: an edit doesn't open one.
     assert stray.parent is None
     assert b.children is None
@@ -694,6 +700,8 @@ def test_lookups():
         d[("x", "a")]
     with pytest.raises(TypeError):
         d[0]
+    with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
+        d[["t", "a"]]
     # get and iter take the same keys: a list isn't one.
     with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
         d.get(["t", "a"])

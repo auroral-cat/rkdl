@@ -1184,12 +1184,20 @@ def test_args_and_children_equal_lists():
     assert n.children != [n["b"], n["a"]]
     assert n.children != (n["a"], n["b"])
     assert n.children != [1, 2]
-    # A view equals another view the way a list equals a list.
-    assert n.children == n.children
     assert n.children != [n["a"]]
-    assert n.children != doc.children
-    doc = rkdl.parse("x {}\ny {}\n")
-    assert doc["x"].children == doc["y"].children
+
+
+def test_children_views_equal_by_their_nodes():
+    # As two lists are: the same nodes in the same order.
+    doc = rkdl.parse("n { a; b }\nx { a }\ny { b }\nempty {}\nalso-empty {}\n")
+    n = doc["n"]
+    assert n.children == n.children
+    assert n.children == doc["n"].children
+    assert n.children != doc["x"].children
+    # Same length, different nodes, even where the names match.
+    assert doc["x"].children != doc["y"].children
+    assert doc["x"].children != rkdl.parse("x { a }\n")["x"].children
+    assert doc["empty"].children == doc["also-empty"].children
 
 
 # A6: parent and detach

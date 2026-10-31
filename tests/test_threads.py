@@ -250,7 +250,9 @@ def test_two_threads_detaching_one_node():
         doc = rkdl.parse("a\nb {\n    c\n}\nd\n")
         b = doc["b"]
         c = b["c"]
-        run(b.detach, b.detach)
+        # Both calls return the node, whichever of them took it out.
+        returned = run(b.detach, b.detach)
+        assert returned[0] is b and returned[1] is b
         assert str(doc) == "a\nd\n"
         assert b.parent is None
         assert str(b) == "b {\n    c\n}"
