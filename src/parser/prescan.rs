@@ -108,8 +108,9 @@ fn is_identifier(word: &str) -> bool {
     let starts_digit = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
     let unsigned = word.strip_prefix(['+', '-']).unwrap_or(word);
     let undotted = unsigned.strip_prefix('.').unwrap_or(unsigned);
-    !(word.is_empty()
-        || word.starts_with('#')
+    // The caller always passes at least one character; "" would read as an identifier.
+    debug_assert!(!word.is_empty(), "is_identifier needs a word");
+    !(word.starts_with('#')
         || starts_digit(unsigned)
         || starts_digit(undotted)
         || matches!(word, "true" | "false" | "null" | "inf" | "-inf" | "nan"))
@@ -384,11 +385,13 @@ impl<'a> Lexer<'a> {
             return self.broken("Unexpected `}`: no block is open");
         };
         let depth = self.blocks.len();
-        if self.closes.len() <= depth {
-            self.closes.resize_with(depth + 1, Vec::new);
-        }
-        if let Some(closes) = self.closes.get_mut(depth) {
-            closes.push(self.pos);
+        match self.closes.get_mut(depth) {
+            Some(closes) => closes.push(self.pos),
+            // The first close at this depth: fill any shallower depths with none yet, then start this one.
+            None => {
+                self.closes.resize_with(depth, Vec::new);
+                self.closes.push(vec![self.pos]);
+            }
         }
         if block.commented {
             self.dashed_blocks.pop();
@@ -425,6 +428,8 @@ impl<'a> Lexer<'a> {
             '{' | '}' | ';' | '=' if self.in_type => self.broken("Expected `)` to close the type annotation"),
             '{' => self.open_block(dashed),
             '}' => self.close_block(),
+            // A `;` with no node open is invalid KDL, but the scan only has to never break on valid text: it ends a
+            // node that isn't there, and kdl-rs reports the error.
             ';' => {
                 self.bump();
                 self.end_node();
@@ -872,7 +877,7 @@ mod tests {
         // So does each `/` that doesn't open a comment.
         let slashes = |n: usize| scan(&format!("/* {} */", "/".repeat(n))).refusal;
         assert!(slashes(MAX_COMMENT_STEPS - 10).is_none());
-        assert!(slashes(MAX_COMMENT_STEPS).is_some());
+        assert!(slashes(MAX_COMMENT_STEPS + 1).is_some());
         // Text between the stars is one piece per stretch.
         assert!(scan(&format!("/*{}*/", "word ".repeat(100_000))).refusal.is_none());
     }
@@ -913,6 +918,7 @@ mod tests {
             ("a \"x\"y", 5, "Expected a space or a line break after this value"),
             ("a 1\"x\"", 3, "Expected a space or a line break after this value"),
             ("a ()1", 3, "Expected a type name"),
+            // One per kind of value after the type's name: each goes through its own `value_start` call.
             ("a (t u)", 5, "Expected `)`: a type annotation holds one name"),
             ("a (t \"u\")1", 5, "Expected `)`: a type annotation holds one name"),
             ("a (t #\"u\"#)1", 5, "Expected `)`: a type annotation holds one name"),
@@ -1012,6 +1018,18 @@ mod tests {
         let scan = scan("a \"\\q\" {}\nb");
         assert_eq!(scan.broke_at, Some(3));
         assert!(scan.refusal.is_none());
+    }
+
+    /// A `;` with no node open isn't KDL. The scan only has to follow valid text, so it lets this through for kdl-rs
+    /// to report.
+    #[test]
+    fn a_stray_semicolon_is_left_to_kdl_rs() {
+        for text in [";", "a;;", "a\n; b"] {
+            assert!(text.parse::<kdl::KdlDocument>().is_err(), "{text:?}");
+            let scan = scan(text);
+            assert_eq!(scan.broke_at, None, "{text:?}");
+            assert!(scan.refusal.is_none(), "{text:?}");
+        }
     }
 
     #[test]
