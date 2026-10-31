@@ -5,6 +5,8 @@ import ipaddress
 import math
 import pickle
 import re
+import subprocess
+import sys
 import uuid
 
 import pytest
@@ -1077,6 +1079,51 @@ def test_a_decode_that_raises_a_base_exception_propagates():
     with pytest.raises(Stop):
         doc["t"].args.append(rkdl.Value(2, type="celsius"))
     assert str(doc) == "t (celsius)1\n"
+
+
+def test_a_recursion_error_from_decode_isnt_wrapped():
+    def decode(value):
+        raise RecursionError("deep")
+
+    deep = rkdl.Type("celsius", Celsius, decode=decode, encode=lambda c: c.degrees)
+    doc = rkdl.Parser(types=[deep]).parse("t (celsius)1\n")
+    with pytest.raises(RecursionError, match="^deep$"):
+        doc["t"].args[0]
+    with pytest.raises(RecursionError, match="^deep$"):
+        doc["t"].args[0] = 2
+    assert str(doc) == "t (celsius)1\n"
+
+
+# A decode that reads its own entry recurses through rkdl until Python stops it. Wrapping each level's RecursionError
+# in a ReadError doubled the message per level, until memory ran out; on 3.14 the wrapping also overflowed the C stack
+# of a debug build. A subprocess, with its memory capped, so a crash fails only this test. Before 3.14 Python doesn't
+# watch the C stack, and a debug build's round trip through rkdl takes about 9 kB of it, so 1000 levels don't fit in
+# 8 MB: the limit comes down there.
+ENDLESS_DECODE = """
+import sys
+try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (2_000_000_000, 2_000_000_000))
+except ImportError:
+    pass
+import rkdl
+if sys.version_info < (3, 14):
+    sys.setrecursionlimit(500)
+def decode(value):
+    return doc["n"].args[0]
+doc = rkdl.Parser(types=[rkdl.Type("loop", object, decode=decode, encode=lambda v: v)]).parse("n (loop)1\\n")
+try:
+    doc["n"].args[0]
+except RecursionError:
+    print("RecursionError")
+"""
+
+
+def test_a_decode_that_recurses_without_end_raises_recursion_error():
+    command = [sys.executable, "-c", ENDLESS_DECODE]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout == "RecursionError\n"
 
 
 def test_setting_a_type_the_value_doesnt_fit_says_so_without_a_place():
