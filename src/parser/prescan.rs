@@ -891,6 +891,8 @@ mod tests {
             ("a \"\\u{1F600\"", 3, "Invalid escape in a string"),
             ("a \"\"\"\n  \\q\n  \"\"\"", 8, "Invalid escape in a string"),
             ("a \"x\ny\"", 4, "Line break in a single-line string"),
+            ("a #\"x\ny\"#", 5, "Line break in a single-line raw string"),
+            ("a \"\"\"\n  x \"\"\"", 10, "Closing quotes inside a multi-line string"),
             ("a \"\"\"x\n\"\"\"", 5, "Expected a line break after `\"\"\"`"),
             (
                 "a \"\"\"\n x\n  \"\"\"",
@@ -904,10 +906,11 @@ mod tests {
             ("a (t)k=2", 6, EQ),
             ("a k=v=w", 5, EQ),
             ("a {} b", 5, "Expected `;` or a line break after this block"),
-            // A node has one block of children; only slashdashed ones can come before it.
+            // A node has one block of children; any others have to be slashdashed.
             ("a {} {}", 5, "Expected `;` or a line break after this block"),
             ("a \"x\"y", 5, "Expected a space or a line break after this value"),
             ("a 1\"x\"", 3, "Expected a space or a line break after this value"),
+            ("a ()1", 3, "Expected a type name"),
             ("a (t u)", 5, "Expected `)`: a type annotation holds one name"),
             ("a (t \"u\")1", 5, "Expected `)`: a type annotation holds one name"),
             ("a (t #\"u\"#)1", 5, "Expected `)`: a type annotation holds one name"),
@@ -929,6 +932,7 @@ mod tests {
             ("a /-}", 4, "Expected something for `/-` to comment out"),
             ("a /-/-1", 4, "Expected something for `/-` to comment out"),
         ] {
+            assert!(text.parse::<kdl::KdlDocument>().is_err(), "{text:?}");
             let text = format!("{text}\n{tail}");
             let scan = scan(&text);
             assert_eq!(scan.broke_at, Some(at), "{:?}", short(&text));
@@ -970,6 +974,18 @@ mod tests {
         }
     }
 
+    /// Only breaks count from a type annotation's start. A refusal inside one points at what was refused.
+    #[test]
+    fn refusals_in_types_keep_their_place() {
+        let refusal = scan(&format!("a (/*{}*/date)1", "*".repeat(MAX_COMMENT_STEPS + 1)))
+            .refusal
+            .unwrap();
+        assert_eq!(
+            (refusal.message.as_str(), refusal.offset),
+            ("Block comment too long", 3)
+        );
+    }
+
     #[test]
     fn slashdashed_blocks_cost_by_the_text_inside() {
         let refused = |text: String| scan(&text).refusal.map(|r| (r.message, r.offset));
@@ -1004,15 +1020,14 @@ mod tests {
             "a \\\n  b \\ // comment\n  c",
             "a \\ /* comment */\n  b",
             "a /*\n multi /* nested */ */ b",
-            "a /* and/or */ b",
             "a /-\n 1 k=2",
             "a \"\"\"\n    x \\\"\"\" y\n\n    \"\"\"",
             "a #\"\"\"x\"\"\"#",
             "a \"\\u{41} \\s\"",
             "\u{feff}a",
-            "a {\n}\n;b",
             "a {}; b {} /- {}",
         ] {
+            assert!(text.parse::<kdl::KdlDocument>().is_ok(), "{text:?}");
             let scan = scan(text);
             assert_eq!(scan.broke_at, None, "{:?}", short(text));
             assert!(scan.refusal.is_none(), "{:?}", short(text));

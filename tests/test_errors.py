@@ -83,14 +83,6 @@ def test_rkdl_refusals_are_reported_like_kdl_rs_errors():
     assert "recurses once per piece" in report
 
 
-def test_a_long_block_comment_inside_a_type_annotation_is_refused():
-    # A type annotation can hold comments. The refusal stands, rather than counting as an error kdl-rs might read past.
-    err = parse_error("a (/*" + "*" * 20_000 + "*/date)1")
-    assert (err.line, err.column, err.offset) == (1, 4, 3)
-    [diagnostic] = err.diagnostics
-    assert diagnostic.message == "Block comment too long"
-
-
 def test_a_long_document_after_an_error_reports_the_first_error():
     # After an error kdl-rs's parser might misread the rest, so rkdl reports the first error itself rather than
     # letting kdl-rs try a long document. A short one still gets kdl-rs's report.
