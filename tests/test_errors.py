@@ -189,10 +189,15 @@ def test_diagnostics_compare_by_value():
     assert pickle.loads(pickle.dumps(first)) == first
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 64: Diagnostic repr uses Python's quoting")
 def test_diagnostic_repr_shows_where_and_what():
-    # A diagnostic a program builds for its own check, as a ParseError's would read.
+    # Diagnostics a program builds for its own checks. The message is a Python str, shown as rkdl's other reprs show
+    # one: with Python's repr.
     diagnostic = rkdl.Diagnostic("unknown setting", "not a setting", None, 14, 7, 2, 5)
-    assert repr(diagnostic) == '<Diagnostic 2:5 "unknown setting">'
+    assert repr(diagnostic) == "<Diagnostic 2:5 'unknown setting'>"
+    # Where Python's repr and Rust's quoting differ: double quotes in the message.
+    quoted = rkdl.Diagnostic('mode is "on" or "off"', None, None, 30, 4, 3, 10)
+    assert repr(quoted) == """<Diagnostic 3:10 'mode is "on" or "off"'>"""
 
 
 def lines(eol, last):
