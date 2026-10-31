@@ -2019,6 +2019,11 @@ mod tests {
         assert_eq!(gap_len("/-x {\n\n}\n/-\n\ny\n/-z \"\"\"\n\n  \"\"\"\n", true), 0);
         assert_eq!(gap_len("/-x #\"\"\"\n\n  }\n  \"\"\"#; /-y \"\\\"}\"\n\n", true), 33);
         assert_eq!(gap_len("/-x /-\n\n  1\n\n// own\n", true), 13);
+        // A slashdashed node also ends at the `}` of the block it's last in, or at the end of the text, as a final
+        // node in a block or a document does. A node's leading text never ends in one, but the scanner doesn't rely
+        // on that.
+        assert_eq!(multi_line_pieces("/-x 1 }"), vec![0..6]);
+        assert_eq!(multi_line_pieces("/-x {\n\n}"), vec![0..8]);
     }
 
     const HEADED: &str = "// header\n\n// about a\na\n\nb\n";
@@ -2097,5 +2102,120 @@ mod tests {
         let mut copy = doc.nodes()[0].clone();
         drop_gap(&doc, &[0], &mut copy);
         assert_eq!(leading(&copy), "// about a\n");
+    }
+    /// `x 1` with a children block `{ y }` that has no format record, which kdl-rs prints with a line ending after
+    /// `{`. rkdl never builds one: parsed blocks and `open_node_block`'s have a record.
+    fn with_bare_block() -> KdlNode {
+        let mut x = node("x 1");
+        let mut block = KdlDocument::new();
+        block.nodes_mut().push(node("y"));
+        x.set_children(block);
+        x
+    }
+
+    /// The names of a document's nodes and their children's, in order.
+    fn names(doc: &KdlDocument) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut pending: Vec<&KdlNode> = doc.nodes().iter().rev().collect();
+        while let Some(n) = pending.pop() {
+            out.push(n.name().value().to_owned());
+            pending.extend(n.children().into_iter().flat_map(|b| b.nodes().iter().rev()));
+        }
+        out
+    }
+
+    #[test]
+    fn a_block_without_a_format_record_is_not_one_line() {
+        // kdl-rs starts a line after its `{`, so it doesn't fit in a one-line block, and a block holding it isn't one.
+        assert!(with_bare_block().to_string().contains('\n'));
+        assert!(!fits_on_a_line(&with_bare_block()));
+        let mut doc = parse("a { b }\n");
+        let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
+        block.nodes_mut().push(with_bare_block());
+        assert!(!is_single_line(block));
+    }
+
+    /// A strict xfail for a cargo test: `out` should be `expected`, and isn't yet. Once a fix makes it so, this
+    /// fails, and the call becomes an `assert_eq!`.
+    fn known_bug(out: &str, expected: &str, task: &str) {
+        assert_ne!(out, expected, "{task} fixed this: make it an assert_eq!");
+    }
+
+    #[test]
+    fn a_node_with_a_block_without_a_format_record_moves() {
+        // Placed in a nested block, and in a one-line one (which spreads). It reads back with every node where it
+        // went. The module doc also has its children take the new indent and its `}` line up with it, which a block
+        // without a record doesn't get yet: today y stays at column 0 and `}` follows it on its line.
+        for text in ["a {\n    b\n}\n", "a { b }\n"] {
+            let mut x = with_bare_block();
+            x.format_mut().unwrap().before_children = " ".into();
+            let mut doc = parse(text);
+            let style = Style::of(&doc, Some(&[0]), "\n");
+            let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
+            place(block, 1, x, &style);
+            assert!(!is_single_line(block));
+            let out = doc.to_string();
+            assert_eq!(names(&parse(&out)), ["a", "b", "x", "y"], "{out:?}");
+            known_bug(
+                &out,
+                "a {\n    b\n    x 1 {\n        y\n    }\n}\n",
+                "task 71 (the node-format rewrite)",
+            );
+        }
+    }
+
+    #[test]
+    fn emptying_a_block_without_a_format_record() {
+        let mut doc = parse("p\n");
+        let mut bare = KdlDocument::new();
+        bare.nodes_mut().push(node("y"));
+        doc.nodes_mut()[0].set_children(bare);
+        doc.nodes_mut()[0].format_mut().unwrap().before_children = " ".into();
+        let style = Style::of(&doc, Some(&[0]), "\n");
+        let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
+        assert_eq!(unplace(block, 0, &style).name().value(), "y");
+        assert_eq!(block.nodes().len(), 0);
+        assert_eq!(names(&parse(&doc.to_string())), ["p"]);
+        // `unplace`'s doc: an emptied children block prints as `{}`. Without a record, kdl-rs prints `{\n}` today.
+        known_bug(&doc.to_string(), "p {}\n", "task 71 (`block_fmt_mut` in `unplace`)");
+    }
+
+    #[test]
+    fn spreading_keeps_a_comment_before_the_first_node() {
+        // kdl-rs keeps text before a one-line block's first node in that node's leading, so the block's own leading
+        // is blank there. If it isn't, spreading doesn't drop what's in it.
+        let mut doc = parse("a { b }\n");
+        let style = Style::of(&doc, Some(&[0]), "\n");
+        let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
+        block.format_mut().unwrap().leading = " /* c */".into();
+        assert_eq!(doc.to_string(), "a { /* c */ b }\n");
+        let block = node_at_mut(&mut doc, &[0]).children_mut().as_mut().unwrap();
+        place(block, 1, node("x {\n    y\n}"), &style);
+        assert_eq!(doc.to_string(), "a { /* c */\n    b\n    x {\n        y\n    }\n}\n");
+    }
+
+    #[test]
+    fn a_closing_brace_on_its_own_line_stays_there() {
+        // The blank line above p's `}` is p's block's trailing text. `}` is on a line of its own already.
+        let text = "q {\n    p {\n        a\n\n    }\n}\n";
+        let mut doc = parse(text);
+        let style = Style::of(&doc, Some(&[0, 0]), "\n");
+        let block = node_at_mut(&mut doc, &[0, 0]).children_mut().as_mut().unwrap();
+        close_on_own_line(block, &style);
+        assert_eq!(doc.to_string(), text);
+    }
+
+    #[test]
+    fn placing_a_node_keeps_a_comment_after_it() {
+        // Only a `;` node carries comments in its trailing text when rkdl moves it, and `place` puts those after the
+        // `;`. Any other node's are kept where they are, and the node's line ends after them.
+        let mut x = node("x");
+        let f = x.format_mut().unwrap();
+        f.terminator = String::new();
+        f.trailing = " /* c */".into();
+        let mut doc = parse("a\n");
+        let style = Style::of(&doc, None, "\n");
+        place(&mut doc, 1, x, &style);
+        assert_eq!(doc.to_string(), "a\nx /* c */\n");
     }
 }

@@ -161,6 +161,19 @@ def test_fmt_keeps_the_line_ending_style(eol):
     assert str(parsed) == str(doc)
 
 
+def test_fmt_keeps_the_line_endings_inside_a_string():
+    # A CRLF file with a commented-out multi-line string written with LF line endings: those are the string's.
+    # Slashdashed, because fmt keeps the line endings of commented-out text (it does dedent it); an argument's string
+    # is rewritten from its value.
+    doc = rkdl.parse('a 1\r\n/-b """\n  keep\n  """\r\nc\r\n')
+    doc.fmt()
+    out = str(doc)
+    assert out.startswith('a 1\r\n/-b """\n')
+    assert out.endswith('"""\r\nc\r\n')
+    assert out.count("\r") == 3
+    assert [n.name for n in rkdl.parse(out).children] == ["a", "c"]
+
+
 def test_fmt_a_document_built_from_scratch():
     doc = rkdl.Document()
     doc.children.append(rkdl.Node("a", 1, children=[rkdl.Node("b")]))
