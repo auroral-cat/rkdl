@@ -14,7 +14,8 @@
 //! one, at its indent. If the node before ends in a `\` continuation, which would carry it onto the new node, it ends
 //! with `;` on the next line instead, at its indent. A line ending rkdl adds after `{` and the comments on its line
 //! comes right after them, without spaces. Taking a node out takes its own line ending with it, and whatever followed
-//! it keeps starting a line if it did: a node that was second on a line takes over its start. Replacing a node and
+//! it keeps starting a line if it did: a node that was second on a line takes over its start. A node starts where its
+//! own comments do: one whose comment runs over lines starts on the line that comment starts on. Replacing a node and
 //! reversing a block keep the layout by position instead: each place keeps the whitespace before it and the end of its
 //! line, its `;` and line ending included, and the nodes move with their own comments, the ones at the end of their
 //! line too. A `//` comment that lands at the end of a line takes the place of the spaces there.
@@ -35,6 +36,9 @@
 //! The exception is a children block written on one line (`a { b; c }`). It stays on one line, with `;` between
 //! nodes, as long as the new node fits on one line. One that doesn't spreads the block over lines first, with the
 //! comments before its `}` on a line of their own and `}` lined up with the parent. An empty block prints as `{}`.
+//! Text between a block's last `;` and its `}`, comments or a `\` continuation, is the block's, over lines too: when
+//! `}` goes on a line of its own, that text goes on a line of its own above it, at the nodes' indent, as when a
+//! one-line block spreads. The space before `}` is the block's too, and stays when the node before it goes.
 //!
 //! rkdl never writes whitespace right after a `}`: kdl-rs drops it when reading, a known issue. rkdl's own
 //! parse puts it back (`parser/blocks.rs`), but what rkdl writes stays readable by kdl-rs alone. After a `}` rkdl
@@ -1148,14 +1152,24 @@ fn sibling_indent(block: &KdlDocument, index: usize) -> Option<String> {
 }
 
 /// Puts the block's `}` on a line of its own, lined up with the parent, if it was on the line of a node that now
-/// ends its line.
+/// ends its line. Text before it there, after a `;`, goes on a line of its own above it, at the nodes' indent.
 fn close_on_own_line(block: &mut KdlDocument, style: &Style) {
-    if let Some(parent) = &style.parent {
-        let f = block_fmt_mut(block);
-        if is_blank(&f.trailing) && !f.trailing.contains(NEWLINES) {
-            parent.clone_into(&mut f.trailing);
-        }
+    let Some(parent) = &style.parent else {
+        return;
+    };
+    let indent = sibling_indent(block, block.nodes().len()).unwrap_or_else(|| format!("{parent}{}", style.unit));
+    let f = block_fmt_mut(block);
+    let text = f.trailing.trim_start_matches(is_space);
+    if eol_at(text).is_some() {
+        return;
     }
+    f.trailing = if text.is_empty() {
+        parent.clone()
+    } else if ends_line(text) {
+        format!("{indent}{text}")
+    } else {
+        format!("{indent}{}{}{parent}", text.trim_end_matches(is_space), style.eol)
+    };
 }
 
 /// Ends the line of the node at `index`: with `rest`, the rest of its line taken from the text after it, or else with
@@ -1345,8 +1359,15 @@ fn take_own(block: &mut KdlDocument, index: usize, style: &Style) -> (KdlNode, S
         }
         ends = true;
     }
+    if nested && !next && ends_open(&node) {
+        // The space before `}` belongs to the block, so it stays behind.
+        let closing = split_closing(&mut node);
+        block_fmt_mut(block).trailing.insert_str(0, &closing);
+    }
     let lead = leading(&node);
-    if !ends && next && (started || lead.contains(NEWLINES)) {
+    // A node's start is where its own comments start, so it only starts a line in its leading text if nothing but
+    // spaces follows the last line ending there: not after a comment over lines.
+    if !ends && next && (started || ends_line(lead)) {
         // The next node was on the node's line, and takes over its start.
         let start = match (started, index.checked_sub(1)) {
             (true, _) => "",
