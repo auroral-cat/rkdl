@@ -713,7 +713,7 @@ program to read; on a file people edit, it deletes their notes.
 ## Reference
 
 Every class and function has a docstring, which `help()` shows, and the type stub
-[`python/rkdl/__init__.pyi`](python/rkdl/__init__.pyi) has them all with full signatures. `Args`, `Props` and
+[`python/rkdl/__init__.pyi`](https://github.com/auroral-cat/rkdl/blob/main/python/rkdl/__init__.pyi) has them all with full signatures. `Args`, `Props` and
 `children` support the rest of the list and dict methods, such as `extend`, `update` and `setdefault`.
 
 ## Stability
@@ -737,4 +737,4 @@ error messages, `ParseError`'s diagnostics, and what `fmt()` produces.
 
 ## License
 
-MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+MIT OR Apache-2.0, at your option. See [LICENSE-MIT](https://github.com/auroral-cat/rkdl/blob/main/LICENSE-MIT) and [LICENSE-APACHE](https://github.com/auroral-cat/rkdl/blob/main/LICENSE-APACHE).
