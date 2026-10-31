@@ -869,6 +869,10 @@ mod tests {
         assert!(stars(MAX_COMMENT_STEPS - 10).is_none());
         assert_eq!(stars(MAX_COMMENT_STEPS + 1).unwrap().message, "Block comment too long");
         assert!(scan(&"/*".repeat(MAX_COMMENT_STEPS / 3 + 1)).refusal.is_some());
+        // So does each `/` that doesn't open a comment.
+        let slashes = |n: usize| scan(&format!("/* {} */", "/".repeat(n))).refusal;
+        assert!(slashes(MAX_COMMENT_STEPS - 10).is_none());
+        assert!(slashes(MAX_COMMENT_STEPS).is_some());
         // Text between the stars is one piece per stretch.
         assert!(scan(&format!("/*{}*/", "word ".repeat(100_000))).refusal.is_none());
     }
@@ -877,34 +881,69 @@ mod tests {
     /// allowance.
     #[test]
     fn breaks() {
+        const EQ: &str = "Unexpected `=`: it goes between a property's key and its value";
         let tail = "a{".repeat(MAX_UNCHECKED_STEPS / LEVEL_STEPS + 1);
-        for (text, at) in [
-            ("a \"\\q \"", 3),
-            ("a \"x\ny\"", 4),
-            ("a \"\"\"x\n\"\"\"", 5),
-            ("a \"\"\"\n x\n  \"\"\"", 6),
-            ("}", 0),
-            ("a )", 2),
-            ("a =1", 2),
-            ("a 1=2", 3),
-            ("a (t)k=2", 6),
-            ("a k=v=w", 5),
-            ("a {} b", 5),
-            ("a \"x\"y", 5),
-            ("a 1\"x\"", 3),
-            ("a (t u)", 5),
-            ("a \\ b", 4),
-            ("a #\"\"\"#", 2),
-            ("a \u{1}", 2),
-            ("a (t)(t)b", 5),
-            ("a (t)\n1", 5),
-            ("a /-}", 4),
-            ("a /-/-1", 4),
+        for (text, at, what) in [
+            ("a \"\\q \"", 3, "Invalid escape in a string"),
+            // `\u` takes braces round its digits, and the digits have to make a Unicode scalar value.
+            ("a \"\\u41}\"", 3, "Invalid escape in a string"),
+            ("a \"\\u{d800}\"", 3, "Invalid escape in a string"),
+            ("a \"\\u{1F600\"", 3, "Invalid escape in a string"),
+            // At most six digits, though seven could still spell U+0041.
+            ("a \"\\u{0000041}\"", 3, "Invalid escape in a string"),
+            ("a \"\"\"\n  \\q\n  \"\"\"", 8, "Invalid escape in a string"),
+            ("a \"x\ny\"", 4, "Line break in a single-line string"),
+            ("a #\"x\ny\"#", 5, "Line break in a single-line raw string"),
+            ("a \"\"\"\n  x \"\"\"", 10, "Closing quotes inside a multi-line string"),
+            ("a \"\"\"x\n\"\"\"", 5, "Expected a line break after `\"\"\"`"),
+            (
+                "a \"\"\"\n x\n  \"\"\"",
+                6,
+                "Line doesn't start with the indentation of the closing quotes",
+            ),
+            ("}", 0, "Unexpected `}`: no block is open"),
+            ("a )", 2, "Unexpected `)`: no type annotation is open"),
+            ("a =1", 2, EQ),
+            ("a 1=2", 3, EQ),
+            ("a (t)k=2", 6, EQ),
+            ("a k=v=w", 5, EQ),
+            ("a {} b", 5, "Expected `;` or a line break after this block"),
+            // A node has one block of children; any others have to be slashdashed.
+            ("a {} {}", 5, "Expected `;` or a line break after this block"),
+            ("a \"x\"y", 5, "Expected a space or a line break after this value"),
+            ("a 1\"x\"", 3, "Expected a space or a line break after this value"),
+            ("a ()1", 3, "Expected a type name"),
+            ("a (t u)", 5, "Expected `)`: a type annotation holds one name"),
+            ("a (t \"u\")1", 5, "Expected `)`: a type annotation holds one name"),
+            ("a (t #\"u\"#)1", 5, "Expected `)`: a type annotation holds one name"),
+            ("a (t\n)1", 4, "Line break inside a type annotation"),
+            ("a (t // c\n)1", 5, "Line break inside a type annotation"),
+            ("a (t{}", 4, "Expected `)` to close the type annotation"),
+            ("a ((t))1", 3, "Unexpected `(` inside a type annotation"),
+            ("a \\ b", 4, "Expected a line break after `\\`"),
+            ("a ##true", 4, "Expected `\"` after the `#`s of a raw string"),
+            ("a #\"\"\"#", 2, "A single-line raw string can't be just `\"`"),
+            ("a \u{1}", 2, "Unexpected character"),
+            // Direction overrides can make text read differently from how it parses, so the spec bans them
+            // everywhere, strings included.
+            ("a \"\u{202e}\"", 3, "Character not allowed in KDL"),
+            ("a #\"\u{202e}\"#", 4, "Character not allowed in KDL"),
+            ("a \"\"\"\n  \u{202e}\n  \"\"\"", 8, "Character not allowed in KDL"),
+            ("a (t)(t)b", 5, "Expected a value after the type annotation"),
+            ("a (t)\n1", 5, "Expected a value after the type annotation"),
+            ("a /-}", 4, "Expected something for `/-` to comment out"),
+            ("a /-/-1", 4, "Expected something for `/-` to comment out"),
         ] {
+            assert!(text.parse::<kdl::KdlDocument>().is_err(), "{text:?}");
             let text = format!("{text}\n{tail}");
             let scan = scan(&text);
             assert_eq!(scan.broke_at, Some(at), "{:?}", short(&text));
-            assert!(scan.refusal.is_some(), "{:?}", short(&text));
+            assert_eq!(
+                scan.refusal.map(|r| r.message).as_deref(),
+                Some(what),
+                "{:?}",
+                short(&text)
+            );
         }
     }
 
@@ -935,6 +974,18 @@ mod tests {
             assert_eq!(scan.broke_at, Some(at), "{:?}", short(&text));
             assert!(scan.refusal.is_some(), "{:?}", short(&text));
         }
+    }
+
+    /// Only breaks count from a type annotation's start. A refusal inside one points at what was refused.
+    #[test]
+    fn refusals_in_types_keep_their_place() {
+        let refusal = scan(&format!("a (/*{}*/date)1", "*".repeat(MAX_COMMENT_STEPS + 1)))
+            .refusal
+            .unwrap();
+        assert_eq!(
+            (refusal.message.as_str(), refusal.offset),
+            ("Block comment too long", 3)
+        );
     }
 
     #[test]
@@ -969,17 +1020,20 @@ mod tests {
             "a k=v k2 = \"v\" (t)1 k3=(t)#true",
             "(t)a; b {\n c\n} /-{ d }; e",
             "a \\\n  b \\ // comment\n  c",
+            "a \\ /* comment */\n  b",
             "a /*\n multi /* nested */ */ b",
             "a /-\n 1 k=2",
             "a \"\"\"\n    x \\\"\"\" y\n\n    \"\"\"",
             "a #\"\"\"x\"\"\"#",
             "a \"\\u{41} \\s\"",
             "\u{feff}a",
-            "a {\n}\n;b",
             "a {}; b {} /- {}",
+            "a {\n}\nb",
         ] {
+            assert!(text.parse::<kdl::KdlDocument>().is_ok(), "{text:?}");
             let scan = scan(text);
             assert_eq!(scan.broke_at, None, "{:?}", short(text));
+            assert!(scan.refusal.is_none(), "{:?}", short(text));
         }
     }
 
