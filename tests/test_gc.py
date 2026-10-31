@@ -385,7 +385,6 @@ def test_a_type_read_while_its_hooks_die_in_clear_raises():
 
 
 @pytest.mark.skipif(sys.version_info >= (3, 13), reason="the collector runs no such callback during clearing on 3.13+")
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 74: a cleared Type's repr raises")
 def test_a_cleared_types_repr_still_names_it():
     # repr never raises (task 30), a cleared Type's included.
     assert what_the_callback_saw()["repr"] == "\"Type('celsius', <cleared>)\""

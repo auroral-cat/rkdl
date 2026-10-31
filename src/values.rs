@@ -98,8 +98,15 @@ impl Type {
     }
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let cls = Type::hook(slf, |h| &h.cls)?.qualname()?;
-        let name = PyString::new(slf.py(), &slf.borrow().name).repr()?;
+        let py = slf.py();
+        let ty = slf.borrow();
+        let name = PyString::new(py, &ty.name).repr()?;
+        let cls = match &ty.hooks {
+            Some(hooks) => hooks.cls.bind(py).qualname()?.to_string(),
+            // A repr doesn't raise (task 30), and clearing leaves the name.
+            // unreachable: a cleared Type is seen only on 3.11/3.12 (tested in test_gc.py); coverage runs on 3.14
+            None => "<cleared>".to_owned(),
+        };
         Ok(format!("Type({name}, {cls})"))
     }
 
@@ -344,6 +351,9 @@ pub(crate) fn to_python_spelled(
             let plain = plain_to_python(py, value)?;
             let decode = Type::hook(user.ty.bind(py), |h| &h.decode)?;
             match decode.call1((plain,)) {
+                Ok(decoded) if decoded.is_instance_of::<Value>() => {
+                    Err(unreadable(py, ty, value, text, DECODE_RETURNED_VALUE, place)?)
+                }
                 Ok(decoded) => Ok(decoded.unbind()),
                 Err(err) if refused_by_hook(py, &err) => {
                     let reason = decode_raised(py, &err)?;
@@ -1114,6 +1124,7 @@ fn encode_kept_user(
         return Err(misfit(value, ty, &format!("expected a {cls}"))?);
     }
     match Type::hook(user.ty.bind(py), |h| &h.decode)?.call1((value,)) {
+        Ok(decoded) if decoded.is_instance_of::<Value>() => Err(misfit(value, ty, DECODE_RETURNED_VALUE)?),
         Ok(decoded) => Ok((encode_with(user, &decoded)?, None)),
         Err(err) if refused_by_hook(py, &err) => {
             let refused = misfit(value, ty, &decode_raised(py, &err)?)?;
@@ -1193,17 +1204,43 @@ const fn expected(b: Builtin) -> &'static str {
 }
 
 /// Whether what a custom decode raised means "doesn't fit". Anything else, such as `KeyboardInterrupt`, propagates.
+/// The same goes for what an entry's repr and a no-op write check catch from reading a value (`edit.rs`).
 ///
-/// A `RecursionError` propagates too: a decode that reads its own entry again recurses through rkdl, and wrapping the
-/// error at every level would double the message each time (each level quotes the one below), and on 3.14 the wrapping
-/// itself runs on the last few kB of stack Python leaves when it raises.
-fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
+/// A `RecursionError` propagates too: a hook that reads its own entry again recurses through rkdl, and catching the
+/// error lets the recursion carry on from the level above (the repr of a node's args did, until memory ran out); on
+/// 3.14 the wrapping itself runs on the last few kB of stack Python leaves when it raises.
+pub(crate) fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
     err.is_instance_of::<PyException>(py) && !err.is_instance_of::<PyRecursionError>(py)
 }
 
-/// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing.
+/// Why a custom Type's value doesn't fit when its decode returns an `rkdl.Value`, reading or writing. A `Value` is only
+/// for writing: read back and written, it would replace the entry's annotation, or reach encode, which refuses it as if
+/// encode were at fault.
+const DECODE_RETURNED_VALUE: &str = "its decode returned an rkdl.Value";
+
+/// How much of a decode's exception message `decode_raised` quotes, in characters.
+const QUOTED: usize = 200;
+
+/// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing: `its decode raised
+/// ValueError('too hot')`, the exception's message cut at `QUOTED` characters, with `…`. Not the exception's repr: a
+/// decode that reads another entry that doesn't fit raises a `ReadError` that already quotes the one below, and the
+/// repr escapes that again, so a chain of them doubled the message at every level. The whole exception is the
+/// `__cause__`.
 fn decode_raised(py: Python<'_>, err: &PyErr) -> PyResult<String> {
-    Ok(format!("its decode raised {}", err.value(py).repr()?))
+    let exc = err.value(py);
+    let name = exc.get_type().name()?;
+    let message = exc.str()?.to_string();
+    if message.is_empty() {
+        return Ok(format!("its decode raised {name}()"));
+    }
+    let mut quoted: String = message.chars().take(QUOTED).collect();
+    if quoted.len() < message.len() {
+        quoted.push('…');
+    }
+    Ok(format!(
+        "its decode raised {name}({})",
+        PyString::new(py, &quoted).repr()?
+    ))
 }
 
 /// "out of range ..." for a numeric built-in type, reading or writing.
