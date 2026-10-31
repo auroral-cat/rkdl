@@ -47,7 +47,8 @@ struct Hooks {
 }
 
 impl Type {
-    /// One of the hooks. Only a finalizer running during cycle collection can see a cleared Type.
+    /// One of the hooks. Only a weakref callback created by a finalizer, on Python 3.11 and 3.12, can see a cleared
+    /// Type: those versions run such callbacks while the collector is still clearing the cycle.
     fn hook<'py, T: PyTypeInfo>(ty: &Bound<'py, Type>, pick: impl FnOnce(&Hooks) -> &Py<T>) -> PyResult<Bound<'py, T>> {
         let py = ty.py();
         match &ty.borrow().hooks {
@@ -104,8 +105,12 @@ impl Type {
         Ok(())
     }
 
-    fn __clear__(&mut self) {
-        self.hooks = None;
+    fn __clear__(slf: &Bound<'_, Self>) {
+        // Dropped after the borrow ends: a hook's death can run Python (a weakref callback, on 3.11 and 3.12) that
+        // reads this Type, and it has to find it cleared, not borrowed. The collector only clears a Type that nothing
+        // outside the cycle refers to, so nothing holds a borrow; if something ever did, a leak beats a panic.
+        let hooks = slf.try_borrow_mut().ok().and_then(|mut ty| ty.hooks.take());
+        drop(hooks);
     }
 }
 
