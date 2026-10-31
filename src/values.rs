@@ -98,8 +98,15 @@ impl Type {
     }
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let cls = Type::hook(slf, |h| &h.cls)?.qualname()?;
-        let name = PyString::new(slf.py(), &slf.borrow().name).repr()?;
+        let py = slf.py();
+        let ty = slf.borrow();
+        let name = PyString::new(py, &ty.name).repr()?;
+        let cls = match &ty.hooks {
+            Some(hooks) => hooks.cls.bind(py).qualname()?.to_string(),
+            // A repr doesn't raise (task 30), and clearing leaves the name.
+            // unreachable: a cleared Type is seen only on 3.11/3.12 (tested in test_gc.py); coverage runs on 3.14
+            None => "<cleared>".to_owned(),
+        };
         Ok(format!("Type({name}, {cls})"))
     }
 
