@@ -91,7 +91,8 @@ impl Type {
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
         let cls = Type::hook(slf, |h| &h.cls)?.qualname()?;
-        Ok(format!("Type({:?}, {cls})", slf.borrow().name))
+        let name = PyString::new(slf.py(), &slf.borrow().name).repr()?;
+        Ok(format!("Type({name}, {cls})"))
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {

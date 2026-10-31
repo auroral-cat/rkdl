@@ -9,6 +9,7 @@ use miette::{
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyString;
 
 use crate::positions::locate_one;
 use crate::v1;
@@ -108,8 +109,9 @@ impl Diagnostic {
         (d.message, d.label, d.help, d.offset, d.length, d.line, d.column)
     }
 
-    fn __repr__(&self) -> String {
-        format!("<Diagnostic {}:{} {:?}>", self.line, self.column, self.message)
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let message = PyString::new(py, &self.message).repr()?;
+        Ok(format!("<Diagnostic {}:{} {message}>", self.line, self.column))
     }
 }
 

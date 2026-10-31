@@ -903,6 +903,14 @@ def test_a_whole_float_over_an_integer_type_converts():
     assert type(n.args[0]) is int
 
 
+def test_type_repr_quotes_its_name_as_python_does():
+    # The name is a Python str: double quotes and non-ASCII show as Python's repr shows them, not Rust's.
+    quoted = rkdl.Type('my "type"', Celsius, decode=Celsius, encode=lambda c: c.degrees)
+    assert repr(quoted) == """Type('my "type"', Celsius)"""
+    wide = rkdl.Type("°c\u200b", Celsius, decode=Celsius, encode=lambda c: c.degrees)
+    assert repr(wide) == "Type('°c\\u200b', Celsius)"
+
+
 def test_a_type_whose_decode_raises_is_named_as_written():
     def refuse(value):
         raise LookupError("no")
