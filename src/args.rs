@@ -54,10 +54,8 @@ fn remove_args(py: Python<'_>, node: &Node, pick: impl Fn(&[EntryId]) -> PyResul
 /// The first argument equal to `value` by Python's `==` among arguments `start..stop`, with its position.
 fn find(snapshot: &Snapshot, value: &Bound<'_, PyAny>, start: Index, stop: Index) -> PyResult<Option<(usize, Item)>> {
     let args = args(&snapshot.items);
-    for position in search_range(args.len(), start, stop) {
-        let Some(&(_, item)) = args.get(position) else {
-            break;
-        };
+    let range = search_range(args.len(), start, stop);
+    for (position, &(_, item)) in args.iter().enumerate().skip(range.start).take(range.len()) {
         if item
             .to_python(value.py(), snapshot.types())?
             .bind(value.py())

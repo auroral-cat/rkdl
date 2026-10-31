@@ -141,15 +141,12 @@ pub(crate) fn lock_all<R: Send>(
     f: impl FnOnce(&mut [&mut DocState]) -> R + Send,
 ) -> R {
     py.detach(|| {
-        let mut order: Vec<usize> = (0..docs.len()).collect();
-        order.sort_by_key(|&i| docs.get(i).map(|&d| std::ptr::from_ref(d)));
-        let mut guards: Vec<Option<MutexGuard<'_, DocState>>> = docs.iter().map(|_| None).collect();
-        for i in order {
-            if let (Some(doc), Some(guard)) = (docs.get(i), guards.get_mut(i)) {
-                *guard = Some(doc.lock());
-            }
-        }
-        let mut states: Vec<&mut DocState> = guards.iter_mut().flatten().map(|guard| &mut **guard).collect();
+        let mut order: Vec<(usize, &Document)> = docs.iter().copied().enumerate().collect();
+        order.sort_by_key(|&(_, d)| std::ptr::from_ref(d));
+        let mut guards: Vec<(usize, MutexGuard<'_, DocState>)> =
+            order.into_iter().map(|(i, d)| (i, d.lock())).collect();
+        guards.sort_by_key(|&(i, _)| i);
+        let mut states: Vec<&mut DocState> = guards.iter_mut().map(|(_, guard)| &mut **guard).collect();
         let result = f(&mut states);
         for state in &states {
             state.check();
