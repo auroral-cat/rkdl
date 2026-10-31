@@ -1182,8 +1182,14 @@ fn number_misfit(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<Option<String
             })
         }
         Builtin::Int { min, max } if is_int => Some(int_range(min, max)),
-        Builtin::F32 if is_int || is_float => Some(F32_RANGE.to_owned()),
-        Builtin::F64 if is_int || is_float => Some(F64_RANGE.to_owned()),
+        Builtin::F32 | Builtin::F64 if is_int || is_float => {
+            let range = if matches!(b, Builtin::F32) {
+                F32_RANGE
+            } else {
+                F64_RANGE
+            };
+            Some(range.to_owned())
+        }
         // Writing `#nan` would quietly drop the signal.
         Builtin::DecimalNumber
             if is_instance(value, "decimal", "Decimal")?
