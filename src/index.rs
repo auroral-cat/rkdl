@@ -1,7 +1,7 @@
 //! Python's index rules, shared by every list-like view. `view` names the view in errors: `children`, `args` or
 //! `entries`.
 
-use pyo3::exceptions::{PyIndexError, PyOverflowError, PyValueError};
+use pyo3::exceptions::{PyException, PyIndexError, PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySlice;
 
@@ -115,10 +115,14 @@ pub(crate) fn insert_at(len: usize, index: isize) -> usize {
     }
 }
 
-/// The `ValueError` for a `remove` or `index` that found nothing.
+/// The `ValueError` for a `remove` or `index` that found nothing. A value whose repr raises still gets one, as
+/// `list.index` gives, unless what the repr raised isn't an `Exception`.
 pub(crate) fn not_in(value: &Bound<'_, PyAny>, view: &str) -> PyErr {
     match value.repr() {
         Ok(repr) => PyValueError::new_err(format!("{repr} not in {view}")),
+        Err(err) if err.is_instance_of::<PyException>(value.py()) => {
+            PyValueError::new_err(format!("value not in {view}"))
+        }
         Err(err) => err,
     }
 }
