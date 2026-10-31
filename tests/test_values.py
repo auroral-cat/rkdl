@@ -2,6 +2,7 @@ import datetime
 import decimal
 import enum
 import ipaddress
+import json
 import math
 import pickle
 import re
@@ -1115,6 +1116,11 @@ def test_a_recursion_error_from_decode_isnt_wrapped():
         doc["t"].args[0]
     with pytest.raises(RecursionError, match="^deep$"):
         doc["t"].args[0] = 2
+    # Showing the value, and checking whether a write would change it, read it too (task 75).
+    with pytest.raises(RecursionError, match="^deep$"):
+        repr(doc["t"].args)
+    with pytest.raises(RecursionError, match="^deep$"):
+        doc["t"].args[0] = Celsius(2)
     assert str(doc) == "t (celsius)1\n"
 
 
@@ -1145,6 +1151,103 @@ except RecursionError:
 
 def test_a_decode_that_recurses_without_end_raises_recursion_error():
     command = [sys.executable, "-c", ENDLESS_DECODE]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout == "RecursionError\n"
+
+
+# A decode's exception is quoted by its message, at most 200 characters of it; the whole exception is the __cause__
+# (task 75).
+@pytest.mark.parametrize(
+    ("raised", "reason"),
+    [
+        (ValueError("x" * 200), "ValueError('" + "x" * 200 + "')"),
+        (ValueError("x" * 201), "ValueError('" + "x" * 200 + "…')"),
+        (ValueError("é" * 201), "ValueError('" + "é" * 200 + "…')"),
+        (ValueError(), "ValueError()"),
+        (ValueError('say "hi"\nthere'), """ValueError('say "hi"\\nthere')"""),
+    ],
+)
+def test_a_decodes_exception_is_quoted_by_its_message_cut_short(raised, reason):
+    def decode(value):
+        raise raised
+
+    n = rkdl.Parser(types=[rkdl.Type("t", object, decode=decode, encode=str)]).parse("n (t)1\n")["n"]
+    err = read_error(lambda n: n.args[0], n)
+    assert str(err) == f"1:3: n arg 0: 1 doesn't fit (t): its decode raised {reason}"
+    assert err.__cause__ is raised
+
+
+# Decodes that read their own entry, where the deepest catches the RecursionError and raises a ValueError: every level
+# above fails, each with a ReadError quoting the one below. Quoting each one's repr doubled the message per level, so
+# memory ran out long before the top. Its message stays short; the chain is all there as __cause__s. A subprocess with
+# its memory capped, so a crash fails only this test. The limit is lowered on every Python: at the default, a debug
+# build on 3.14 runs out of C stack first, and the deepest wrapping, which runs kdl-rs's parser, overflows it (a release
+# build doesn't).
+FAILING_DECODE_CHAIN = """
+import json
+import sys
+try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (2_000_000_000, 2_000_000_000))
+except ImportError:
+    pass
+import rkdl
+sys.setrecursionlimit(500)
+def decode(value):
+    try:
+        return doc["n"].args[0]
+    except RecursionError:
+        raise ValueError("too deep")
+doc = rkdl.Parser(types=[rkdl.Type("loop", object, decode=decode, encode=lambda v: v)]).parse("n (loop)1\\n")
+try:
+    doc["n"].args[0]
+except rkdl.ReadError as err:
+    chain = [err]
+    while chain[-1].__cause__ is not None:
+        chain.append(chain[-1].__cause__)
+    shown = [[type(e).__name__, str(e)] for e in chain[:2] + chain[-2:]]
+    print(json.dumps({"chain": shown, "depth": len(chain)}))
+"""
+
+
+def test_a_chain_of_failing_decodes_ends_in_a_short_message():
+    command = [sys.executable, "-c", FAILING_DECODE_CHAIN]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-2000:]
+    seen = json.loads(result.stdout)
+    place = "1:3: n arg 0: 1 doesn't fit (loop): its decode raised "
+    (top_type, top), (below_type, below), last_two = seen["chain"][0], seen["chain"][1], seen["chain"][2:]
+    assert top_type == below_type == "ReadError"
+    assert top == place + "ReadError(" + repr(below[:200] + "…") + ")"
+    assert last_two == [["ReadError", place + "ValueError('too deep')"], ["ValueError", "too deep"]]
+    assert seen["depth"] > 100
+
+
+# A decode that reprs its own node's args: catching the RecursionError there kept the recursion going until the
+# process ran out of memory. A subprocess with its memory capped, as above; the limit as in ENDLESS_DECODE.
+ENDLESS_REPR = """
+import sys
+try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (2_000_000_000, 2_000_000_000))
+except ImportError:
+    pass
+import rkdl
+if sys.version_info < (3, 14):
+    sys.setrecursionlimit(500)
+def decode(value):
+    return repr(doc["n"].args)
+doc = rkdl.Parser(types=[rkdl.Type("loop", object, decode=decode, encode=lambda v: v)]).parse("n (loop)1 (loop)2\\n")
+try:
+    repr(doc["n"].args)
+except RecursionError:
+    print("RecursionError")
+"""
+
+
+def test_a_repr_that_recurses_through_decode_raises_recursion_error():
+    command = [sys.executable, "-c", ENDLESS_REPR]
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout == "RecursionError\n"

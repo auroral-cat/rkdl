@@ -1154,11 +1154,12 @@ const fn expected(b: Builtin) -> &'static str {
 }
 
 /// Whether what a custom decode raised means "doesn't fit". Anything else, such as `KeyboardInterrupt`, propagates.
+/// The same goes for what an entry's repr and a no-op write check catch from reading a value (`edit.rs`).
 ///
-/// A `RecursionError` propagates too: a decode that reads its own entry again recurses through rkdl, and wrapping the
-/// error at every level would double the message each time (each level quotes the one below), and on 3.14 the wrapping
-/// itself runs on the last few kB of stack Python leaves when it raises.
-fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
+/// A `RecursionError` propagates too: a hook that reads its own entry again recurses through rkdl, and catching the
+/// error lets the recursion carry on from the level above (the repr of a node's args did, until memory ran out); on
+/// 3.14 the wrapping itself runs on the last few kB of stack Python leaves when it raises.
+pub(crate) fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
     err.is_instance_of::<PyException>(py) && !err.is_instance_of::<PyRecursionError>(py)
 }
 
@@ -1167,9 +1168,29 @@ fn refused_by_hook(py: Python<'_>, err: &PyErr) -> bool {
 /// encode were at fault.
 const DECODE_RETURNED_VALUE: &str = "its decode returned an rkdl.Value";
 
-/// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing.
+/// How much of a decode's exception message `decode_raised` quotes, in characters.
+const QUOTED: usize = 200;
+
+/// Why a custom Type's value doesn't fit, when its decode raised `err`, reading or writing: `its decode raised
+/// ValueError('too hot')`, the exception's message cut at `QUOTED` characters, with `…`. Not the exception's repr: a
+/// decode that reads another entry that doesn't fit raises a `ReadError` that already quotes the one below, and the
+/// repr escapes that again, so a chain of them doubled the message at every level. The whole exception is the
+/// `__cause__`.
 fn decode_raised(py: Python<'_>, err: &PyErr) -> PyResult<String> {
-    Ok(format!("its decode raised {}", err.value(py).repr()?))
+    let exc = err.value(py);
+    let name = exc.get_type().name()?;
+    let message = exc.str()?.to_string();
+    if message.is_empty() {
+        return Ok(format!("its decode raised {name}()"));
+    }
+    let mut quoted: String = message.chars().take(QUOTED).collect();
+    if quoted.len() < message.len() {
+        quoted.push('…');
+    }
+    Ok(format!(
+        "its decode raised {name}({})",
+        PyString::new(py, &quoted).repr()?
+    ))
 }
 
 /// "out of range ..." for a numeric built-in type, reading or writing.

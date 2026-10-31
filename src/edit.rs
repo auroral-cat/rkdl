@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use kdl::{KdlEntry, KdlIdentifier, KdlNode, KdlValue};
-use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
 use crate::document::{DocState, Document};
@@ -91,8 +90,8 @@ impl Item {
     }
 
     /// Whether reading this entry and writing the result back would store `new`. A value that can't be read or
-    /// written back (an `Exception` from a conversion) isn't `new`; anything else, such as `KeyboardInterrupt`,
-    /// propagates.
+    /// written back (an `Exception` from a conversion) isn't `new`; anything else, such as `KeyboardInterrupt` or
+    /// `RecursionError`, propagates.
     fn rewrites_as(&self, py: Python<'_>, new: &Encoded, types: &TypeRegistry) -> PyResult<bool> {
         let again = self
             .to_python(py, types)
@@ -101,7 +100,7 @@ impl Item {
             // Written back over its own annotation, which the caller checked is `new`'s, it keeps it: a decode can't
             // return an `rkdl.Value` to change it.
             Ok(again) => Ok(values::same_value(&again.value, &new.value) && again.repr == new.repr),
-            Err(err) if err.is_instance_of::<PyException>(py) => Ok(false),
+            Err(err) if values::refused_by_hook(py, &err) => Ok(false),
             Err(err) => Err(err),
         }
     }
@@ -119,20 +118,27 @@ impl Item {
 
     /// The value's Python repr, for the reprs of entries and views, which don't raise an `Exception`. A value that
     /// doesn't fit its type, or whose Python repr raises one, shows as its KDL text, marked as such: `<kdl: (u8)300>`.
-    /// Anything else a decode hook raises, such as `KeyboardInterrupt`, propagates.
+    /// Anything else, such as `KeyboardInterrupt` or `RecursionError`, propagates.
     ///
     /// With `ty`, a value that reads shows its annotation in front, as `(u8)7`.
     pub(crate) fn repr(&self, py: Python<'_>, types: &TypeRegistry, ty: bool) -> PyResult<String> {
-        let annotation = self.ty.as_deref().map(|t| format!("({})", values::identifier(t)));
         let shown = self
             .to_python(py, types)
             .and_then(|value| Ok(value.bind(py).repr()?.to_string()));
+        // Spelled only once the value is shown: spelling it runs kdl-rs's parser, which in a debug build takes more
+        // stack than Python leaves when a decode that reprs its own entry recurses down to its limit.
+        let annotation = || {
+            self.ty
+                .as_deref()
+                .map(|t| format!("({})", values::identifier(t)))
+                .unwrap_or_default()
+        };
         match shown {
-            Ok(shown) if ty => Ok(format!("{}{shown}", annotation.unwrap_or_default())),
+            Ok(shown) if ty => Ok(format!("{}{shown}", annotation())),
             Ok(shown) => Ok(shown),
-            Err(err) if err.is_instance_of::<PyException>(py) => {
+            Err(err) if values::refused_by_hook(py, &err) => {
                 let text = self.text.clone().unwrap_or_else(|| values::canonical_repr(&self.value));
-                Ok(format!("<kdl: {}{text}>", annotation.unwrap_or_default()))
+                Ok(format!("<kdl: {}{text}>", annotation()))
             }
             Err(err) => Err(err),
         }
