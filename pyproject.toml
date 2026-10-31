@@ -25,7 +25,11 @@ dev = [
 python-source = "python"
 module-name = "rkdl._rkdl"
 # The kdl-org/kdl submodule is CC BY-SA 4.0, and the sdist doesn't ship it. The spec tests skip without it.
-exclude = [{ path = "tests/kdl-spec/**/*", format = "sdist" }]
+# .github/ is the README's images and, on release branches, the release workflow: not needed to build.
+exclude = [
+    { path = "tests/kdl-spec/**/*", format = "sdist" },
+    { path = ".github/**/*", format = "sdist" },
+]
 
 [tool.ruff]
 line-length = 120
