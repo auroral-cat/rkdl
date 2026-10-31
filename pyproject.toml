@@ -8,6 +8,9 @@ description = "Format-preserving KDL for Python, backed by kdl-rs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT OR Apache-2.0"
+# LICENSE-MIT, LICENSE-APACHE, and LICENSE-THIRD-PARTY when it's been generated (scripts/third_party_licenses.py;
+# the release workflow always generates it).
+license-files = ["LICENSE-*"]
 dynamic = ["version"]
 
 [dependency-groups]

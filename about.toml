@@ -1,0 +1,8 @@
+# cargo-about config for LICENSE-THIRD-PARTY, the license file the wheels carry for the Rust crates linked into the
+# extension. scripts/third_party_licenses.py runs it; the release workflow generates the file before every build.
+# A dependency whose license expression can't be satisfied from this list fails the generation, and so the build.
+# Order is preference: a crate under "MIT OR Apache-2.0" is listed under MIT.
+accepted = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# Build scripts and proc-macro crates' build dependencies aren't in the extension.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
