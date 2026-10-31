@@ -373,3 +373,21 @@ impl Args {
         visit.call(&self.node)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{repr, unreadable_node, with_python};
+
+    // Reprs never raise. A node out of step with its document (an rkdl bug) can't be read, and its repr and the args
+    // view's say so rather than raise.
+    #[test]
+    fn reprs_of_a_node_that_cant_be_read() {
+        with_python(|py| {
+            let node = unreadable_node(py);
+            assert_eq!(repr(node.bind(py).as_any()), "<Node (unreadable)>");
+            let args = Bound::new(py, Args::new(node)).expect("allocates");
+            assert_eq!(repr(args.as_any()), "Args(<unreadable>)");
+        });
+    }
+}

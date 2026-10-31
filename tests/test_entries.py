@@ -235,6 +235,23 @@ def test_props_refuse_items_that_are_not_pairs(write, pairs, error, message):
     assert str(d) == "n a=1\n"
 
 
+class Unloaded:
+    """A pair that fails to load when iterated."""
+
+    def __iter__(self):
+        raise ValueError("record not loaded")
+
+
+# Only a TypeError means "not iterable". Anything else a pair raises while being iterated comes through as it is, as
+# for a dict: `{}.update([Unloaded()])` raises the same ValueError.
+@pytest.mark.parametrize("write", WRITE_PAIRS.values(), ids=WRITE_PAIRS.keys())
+def test_props_pass_on_what_iterating_a_pair_raises(write):
+    d, n = node("n a=1\n")
+    with pytest.raises(ValueError, match="^record not loaded$"):
+        write(n, [("b", 2), Unloaded()])
+    assert str(d) == "n a=1\n"
+
+
 def test_props_clear():
     d, n = node("n 1 a=1 2 b=2\n")
     n.props.clear()

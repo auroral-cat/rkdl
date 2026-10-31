@@ -460,3 +460,20 @@ impl Node {
         self.home.traverse(&visit)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A node with no format has no annotation text to forget: it's left as it is. rkdl's nodes always have one today
+    // (kdl-rs's parse and autoformat leave one, and so does `KdlNode::new`), but nothing promises that.
+    #[test]
+    fn a_node_without_format_text_keeps_its_annotation() {
+        let mut node = KdlNode::new("x");
+        *node.ty_mut() = Some(KdlIdentifier::from("t"));
+        node.clear_format();
+        drop_annotation_text(&mut node);
+        assert!(node.format().is_none());
+        assert_eq!(node.ty().map(KdlIdentifier::value), Some("t"));
+    }
+}

@@ -148,6 +148,25 @@ def test_a_rename_during_an_edit_plans_it_again():
     assert doc["n"].props["k"].value == 5
 
 
+def test_an_entry_replaced_during_an_edit_plans_it_again():
+    # Setting args[0] plans a write over the entry at index 0. The encode replaces that entry with a new one first:
+    # same place, no key, no annotation, so only its identity says the plan no longer fits. Planned again, the write
+    # goes to the entry now at index 0.
+    holder = {"armed": True}
+
+    def replace_first():
+        if holder["armed"]:
+            holder["armed"] = False
+            holder["n"].args.pop(0)
+            holder["n"].args.insert(0, 7)
+
+    doc = box_parser(encode=replace_first).parse("n 0 2\n")
+    holder["n"] = doc["n"]
+    doc["n"].args[0] = Box(5)
+    assert str(doc) == "n (box)5 2\n"
+    assert list(doc["n"].args)[1:] == [2]
+
+
 # Plans that return or match a value check it again when they apply, so a value written meanwhile isn't lost.
 
 

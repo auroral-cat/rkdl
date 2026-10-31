@@ -997,3 +997,26 @@ impl Children {
         visit.call(self.owner.as_py())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{empty_doc, stray_id, with_python};
+
+    // A node gone from its home's document when no move repointed the home: the id tree and the KDL disagree, which
+    // only an rkdl bug does. `check_detached` says so (`stale()`) rather than asking for a retry that would find the
+    // same thing forever.
+    #[test]
+    fn a_node_gone_from_an_unmoved_home_is_stale() {
+        with_python(|py| {
+            let home = Home::new(empty_doc(py));
+            let source = home.doc(py).expect("a node's home never empties");
+            let result = source
+                .get()
+                .with_state(py, |s| check_detached(stray_id(), &home, &source, s));
+            assert!(
+                matches!(&result, Err(Fail::Err(err)) if err.to_string().contains("out of step with its document"))
+            );
+        });
+    }
+}
