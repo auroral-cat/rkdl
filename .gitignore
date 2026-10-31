@@ -11,7 +11,7 @@ __pycache__/
 # llm yap
 /refs/
 plan.md
-/notes/
+/wiki/
 
 # agent worktrees
 /.claude/worktrees/
