@@ -198,7 +198,6 @@ def test_diagnostic_repr_shows_where_and_what():
     assert "not a setting" not in shown
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="task 64: Diagnostic repr uses Python's quoting")
 def test_diagnostic_repr_quotes_the_message_as_python_does():
     # The message is a Python str, so it's shown with Python's repr, as `<Entry 'web'>` shows its value. Double
     # quotes in it are where that differs from Rust's quoting, and both kinds where it differs from wrapping in '...'.
@@ -206,6 +205,9 @@ def test_diagnostic_repr_quotes_the_message_as_python_does():
     assert repr(diagnostic) == """<Diagnostic 3:10 'mode is "on" or "off"'>"""
     both = rkdl.Diagnostic('mode can\'t be "auto"', None, None, 30, 4, 3, 10)
     assert repr(both) == """<Diagnostic 3:10 'mode can\\'t be "auto"'>"""
+    # Python keeps printable non-ASCII as is and escapes what isn't printable, where Rust's quoting differs again.
+    wide = rkdl.Diagnostic("é isn't ✓\u200b\x07", None, None, 30, 4, 3, 10)
+    assert repr(wide) == """<Diagnostic 3:10 "é isn't ✓\\u200b\\x07">"""
 
 
 def lines(eol, last):
