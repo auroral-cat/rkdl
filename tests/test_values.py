@@ -315,6 +315,7 @@ def test_an_unknown_annotation_stays_over_a_non_plain_value(value, text):
         (float("inf"), "u8", "inf doesn't fit (u8): expected an integer"),
         (300.0, "u8", "300.0 doesn't fit (u8): out of range 0..=255"),
         (1e40, "i128", "1e+40 doesn't fit (i128): out of range"),
+        (-1e40, "i128", "-1e+40 doesn't fit (i128): out of range"),
     ],
 )
 def test_a_number_out_of_its_types_range_raises(value, current, message):
@@ -425,6 +426,13 @@ def test_user_encode_must_return_plain():
         from_python(Celsius(1), None, [bad])
 
 
+def test_user_encode_returning_an_int_outside_i128_overflows():
+    # What encode returns is written as a plain value would be, so the same limit applies.
+    kelvin_nanos = rkdl.Type("celsius", Celsius, decode=Celsius, encode=lambda c: c.degrees * 10**40)
+    with pytest.raises(OverflowError, match=re.escape("int doesn't fit in a KDL integer (i128)")):
+        from_python(Celsius(1), None, [kelvin_nanos])
+
+
 def test_user_decode_errors_are_the_cause():
     def decode(value):
         raise RuntimeError("nope")
@@ -438,13 +446,18 @@ def test_user_decode_errors_are_the_cause():
 
 
 def test_type_requires_callables():
-    with pytest.raises(TypeError):
-        rkdl.Type("x", int, decode=1, encode=int)
+    for decode, encode in [(1, int), (int, 1)]:
+        with pytest.raises(TypeError, match="^Type decode and encode must be callable$"):
+            rkdl.Type("x", int, decode=decode, encode=encode)
 
 
 def test_type_attributes():
     assert CELSIUS.name == "celsius"
     assert CELSIUS.cls is Celsius
+    assert CELSIUS.decode is Celsius
+    assert CELSIUS.encode(Celsius(3)) == 3
+    # Spelled the way a Type is made, as the hint for a value Python can't read spells one.
+    assert repr(CELSIUS) == 'Type("celsius", Celsius)'
 
 
 def test_type_is_immutable():
@@ -858,6 +871,10 @@ def test_a_decode_that_raises_a_base_exception_propagates():
     doc = rkdl.Parser(types=[stop]).parse("t (celsius)1\n")
     with pytest.raises(Stop):
         doc["t"].args[0]
+    # Writing a plain value over the annotation asks decode whether it fits, and that propagates too.
+    with pytest.raises(Stop):
+        doc["t"].args.append(rkdl.Value(2, type="celsius"))
+    assert str(doc) == "t (celsius)1\n"
 
 
 def test_setting_a_type_the_value_doesnt_fit_says_so_without_a_place():
@@ -1081,10 +1098,25 @@ def test_a_misfit_has_one_reason_on_every_route(ty, text, value, why):
 
 
 @pytest.mark.parametrize(
+    ("date", "why"),
+    [
+        # Gregorian leap years: every fourth year, except centuries, except every fourth century.
+        ("2100-02-29", "day must be in 1..28, not 29"),
+        ("2000-02-30", "day must be in 1..29, not 30"),
+    ],
+)
+def test_a_day_out_of_february_follows_the_leap_year_rule(date, why):
+    n = rkdl.parse(f'n (date)"{date}"\n')["n"]
+    assert reason(read_error(lambda n: n.args[0], n)) == why
+
+
+@pytest.mark.parametrize(
     ("value", "ty", "why"),
     [
         # Misfits only a write makes: a file can't hold a Python object.
         (datetime.datetime(2029, 1, 1, 10), "date", "would lose its time"),
+        # Only a datetime has a time to lose; any other class is just not a date.
+        (datetime.time(9, 30), "date", "expected a date"),
         (datetime.date(2029, 1, 1), "celsius", "expected a Celsius"),
     ],
 )
