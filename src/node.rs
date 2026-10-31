@@ -278,7 +278,7 @@ impl Node {
     // `node.args += values` works.
     #[setter]
     fn set_args(slf: &Bound<'_, Self>, values: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let values = values.ok_or_else(|| PyTypeError::new_err("can't delete node.args; use node.args.clear()"))?;
+        let values = values.ok_or_else(|| PyTypeError::new_err("node.args can't be None; use node.args.clear()"))?;
         if Args::is_view_of(values, slf) {
             return Ok(());
         }
@@ -297,7 +297,8 @@ impl Node {
     // node's own view does nothing, so `node.props |= mapping` works.
     #[setter]
     fn set_props(slf: &Bound<'_, Self>, mapping: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let mapping = mapping.ok_or_else(|| PyTypeError::new_err("can't delete node.props; use node.props.clear()"))?;
+        let mapping =
+            mapping.ok_or_else(|| PyTypeError::new_err("node.props can't be None; use node.props.clear()"))?;
         if Props::is_view_of(mapping, slf) {
             return Ok(());
         }
@@ -329,11 +330,11 @@ impl Node {
         let owner = Owner::Node(slf.clone().unbind());
         match value {
             Some(v) if children::is_view_of(&v, slf.as_any()) => Ok(()),
-            Some(v) if !v.is_none() => {
+            Some(v) => {
                 let nodes = children::nodes_in(&v, "node.children")?;
                 children::splice(py, &owner, &At::All, &nodes, true)
             }
-            _ => children::close_block(py, &owner),
+            None => children::close_block(py, &owner),
         }
     }
 

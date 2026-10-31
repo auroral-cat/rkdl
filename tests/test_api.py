@@ -375,11 +375,6 @@ def test_node_property_keys_must_be_strings():
         rkdl.parse("").node("listen", props={8080: "http"})
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason='task 65: node.args = None and node.props = None say "can\'t delete"',
-)
 @pytest.mark.parametrize("view", ["args", "props"])
 def test_node_args_and_props_cant_be_none(view):
     doc = rkdl.parse("n 1 k=2\n")
@@ -1368,29 +1363,40 @@ def test_reprs_survive_a_raising_repr():
 
 
 class RaisingRepr:
+    def __init__(self, error=KeyError):
+        self.error = error
+
     def __repr__(self):
-        raise KeyError("no repr")
+        raise self.error("no repr")
 
 
+# Each route to a search that finds nothing, with the view its message names.
 INDEX_MISSES = {
-    "args.index": lambda doc: doc["n"].args.index(RaisingRepr()),
-    "args.remove": lambda doc: doc["n"].args.remove(RaisingRepr()),
-    "children.index": lambda doc: doc.children.index(RaisingRepr()),
+    "args.index": ("args", lambda doc, value: doc["n"].args.index(value)),
+    "args.remove": ("args", lambda doc, value: doc["n"].args.remove(value)),
+    "children.index": ("children", lambda doc, value: doc.children.index(value)),
+    "node.children.index": ("children", lambda doc, value: doc["n"].children.index(value)),
+    "node.entries.index": ("entries", lambda doc, value: doc["n"].entries.index(value)),
 }
+INDEX_TEXT = "n 1 2 {\n    c\n}\n"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KeyError,
-    reason="task 65: index/remove of a missing value raise its repr's exception instead of ValueError",
-)
-@pytest.mark.parametrize("miss", INDEX_MISSES.values(), ids=INDEX_MISSES.keys())
-def test_a_missing_value_with_a_raising_repr_is_a_value_error(miss):
+@pytest.mark.parametrize(("view", "miss"), INDEX_MISSES.values(), ids=INDEX_MISSES.keys())
+def test_a_missing_value_with_a_raising_repr_is_a_value_error(view, miss):
     # As list.index and list.remove: a value that isn't there is a ValueError, whatever its repr does.
-    doc = rkdl.parse("n 1 2\n")
-    with pytest.raises(ValueError):
-        miss(doc)
-    assert str(doc) == "n 1 2\n"
+    doc = rkdl.parse(INDEX_TEXT)
+    with pytest.raises(ValueError, match=f"^value not in {view}$"):
+        miss(doc, RaisingRepr())
+    assert str(doc) == INDEX_TEXT
+
+
+@pytest.mark.parametrize(("view", "miss"), INDEX_MISSES.values(), ids=INDEX_MISSES.keys())
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_a_missing_value_lets_a_base_exception_from_its_repr_through(view, miss, error):
+    doc = rkdl.parse(INDEX_TEXT)
+    with pytest.raises(error):
+        miss(doc, RaisingRepr(error))
+    assert str(doc) == INDEX_TEXT
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])

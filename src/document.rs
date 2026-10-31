@@ -287,14 +287,8 @@ impl Document {
     // nothing, so `doc.children += nodes` works.
     #[setter]
     fn set_children(slf: &Bound<'_, Self>, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
-        let value = match value {
-            Some(v) if !v.is_none() => v,
-            _ => {
-                return Err(PyTypeError::new_err(
-                    "a document always has children; use doc.children.clear()",
-                ));
-            }
-        };
+        let value =
+            value.ok_or_else(|| PyTypeError::new_err("a document always has children; use doc.children.clear()"))?;
         if children::is_view_of(&value, slf.as_any()) {
             return Ok(());
         }
