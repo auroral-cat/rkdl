@@ -131,13 +131,15 @@ def test_entry_positions_while_its_node_leaves_and_comes_back():
     def leave_and_come_back():
         try:
             for _ in range(ROUNDS):
-                # A detached node keeps the positions of its document, and gets them back there.
+                # Within one document, so the positions stay (moving to another would drop them, hence no `mover`).
                 doc.children.remove(node)
                 doc.children.insert(1, node)
             return ROUNDS
         finally:
             done.set()
 
+    # A reader that catches the node mid-move still finds its entries and their positions: never "entry was removed",
+    # never None.
     def read():
         assert (arg.line, arg.column) == (2, 7)
         assert (port.line, port.column) == (2, 9)

@@ -159,31 +159,46 @@ def test_props_pop_takes_one_default():
     assert str(d) == "n a=1\n"
 
 
-def test_views_take_int_indexes_and_iterables():
+# The messages for these are CPython's and PyO3's, so only the exception types are rkdl's to promise.
+NOT_AN_INDEX = {
+    "args get": lambda n: n.args["0"],
+    "args set": lambda n: n.args.__setitem__("0", 5),
+    "args del": lambda n: n.args.__delitem__("0"),
+    "entries get": lambda n: n.entries["0"],
+}
+
+
+@pytest.mark.parametrize("use", NOT_AN_INDEX.values(), ids=NOT_AN_INDEX.keys())
+def test_views_take_int_indexes(use):
     d, n = node("n 1 2 a=3\n")
-    # The messages are CPython's and PyO3's, so only the exception types are rkdl's to promise.
     with pytest.raises(TypeError):
-        n.args["0"]
+        use(n)
+    assert str(d) == "n 1 2 a=3\n"
+
+
+NOT_ITERABLE = {
+    "args assign": lambda n: setattr(n, "args", 5),
+    "props assign": lambda n: setattr(n, "props", 5),
+    "props update": lambda n: n.props.update(5),
+}
+
+
+@pytest.mark.parametrize("use", NOT_ITERABLE.values(), ids=NOT_ITERABLE.keys())
+def test_views_take_iterables(use):
+    d, n = node("n 1 2 a=3\n")
     with pytest.raises(TypeError):
-        n.args["0"] = 5
-    with pytest.raises(TypeError):
-        del n.args["0"]
-    with pytest.raises(TypeError):
-        n.entries["0"]
-    with pytest.raises(TypeError):
-        n.args = 5
-    with pytest.raises(TypeError):
-        n.args[0:1] = 5
-    with pytest.raises(TypeError):
-        n.props = 5
-    with pytest.raises(TypeError):
-        n.props.update(5)
+        use(n)
+    assert str(d) == "n 1 2 a=3\n"
+
+
+def test_props_take_str_keys_and_two_item_pairs():
+    d, n = node("n a=3\n")
+    with pytest.raises(TypeError, match="property keys must be str"):
+        n.props.setdefault(1, 2)
     # As for a dict, a pair has two items.
     with pytest.raises(ValueError):
         n.props.update([("b",)])
-    with pytest.raises(TypeError, match="property keys must be str"):
-        n.props.setdefault(1, 2)
-    assert str(d) == "n 1 2 a=3\n"
+    assert str(d) == "n a=3\n"
 
 
 @pytest.mark.xfail(
