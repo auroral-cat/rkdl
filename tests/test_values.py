@@ -575,19 +575,6 @@ class Price(decimal.Decimal):
         return f"${super().__str__()}"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="str() of the subclass is written, not its digits")
-@pytest.mark.parametrize("cls", [Price])
-@pytest.mark.parametrize("old", ["(decimal64)1.0", '(decimal)"1.0"', "1.0"])
-def test_a_decimal_subclass_writes_its_own_digits_whatever_its_str_says(old, cls):
-    # A Decimal subclass is a Decimal: its value is written as the Decimal's would be, not as its str() displays it.
-    def written(value):
-        doc = rkdl.parse(f"n {old}\n")
-        doc["n"].args[0] = value
-        return str(doc)
-
-    assert written(cls("1.50")) == written(decimal.Decimal("1.50"))
-
-
 class Ninety(int):
     def __float__(self):
         return 99.0
@@ -603,15 +590,38 @@ class Stamp(datetime.date):
         return self.strftime("%d/%m/%Y")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="the subclass's own method is called")
+def task69(row, *, ids, why):
+    return pytest.param(
+        *row, id=ids, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"task 69: {why}")
+    )
+
+
 @pytest.mark.parametrize(
     ("old", "value", "base"),
     [
-        ("(f64)1.0", Ninety(1), 1),
-        ("(decimal64)1.0", FloatPrice("1.50"), decimal.Decimal("1.50")),
-        ('(date)"2026-01-01"', Stamp(2026, 10, 31), datetime.date(2026, 10, 31)),
+        task69(("(f64)1.0", Ninety(1), 1), ids="int __float__", why="its __float__ is called"),
+        task69(
+            ("(decimal64)1.0", FloatPrice("1.50"), decimal.Decimal("1.50")),
+            ids="Decimal __float__",
+            why="its __float__ is called",
+        ),
+        task69(
+            ("(decimal64)1.0", Price("1.50"), decimal.Decimal("1.50")),
+            ids="Decimal __str__ over decimal64",
+            why="its __str__ is written",
+        ),
+        task69(
+            ('(decimal)"1.0"', Price("1.50"), decimal.Decimal("1.50")),
+            ids="Decimal __str__ over decimal",
+            why="its __str__ is written",
+        ),
+        task69(("1.0", Price("1.50"), decimal.Decimal("1.50")), ids="Decimal __str__", why="its __str__ is written"),
+        task69(
+            ('(date)"2026-01-01"', Stamp(2026, 10, 31), datetime.date(2026, 10, 31)),
+            ids="date isoformat",
+            why="its isoformat is called",
+        ),
     ],
-    ids=["int __float__", "Decimal __float__", "date isoformat"],
 )
 def test_a_subclass_is_written_as_its_base_types_value(old, value, base):
     # A subclass of a built-in type is written by its base type's value; methods it overrides don't change that.

@@ -551,7 +551,6 @@ fn claims(b: Builtin, value: &Bound<'_, PyAny>) -> PyResult<bool> {
             Ok(is_instance(value, "re", "Pattern")? && value.getattr("pattern")?.is_instance_of::<PyString>())
         }
         Builtin::Base64 => Ok(value.is_instance_of::<PyBytes>()),
-        // unreachable: `writable` is the only caller, with the types in INFERRED, and each has an arm above
         _ => Ok(false),
     }
 }
@@ -1156,7 +1155,6 @@ fn range_of(b: Builtin) -> Option<String> {
         Builtin::Int { min, max } => Some(int_range(min, max)),
         Builtin::F32 => Some(F32_RANGE.to_owned()),
         Builtin::F64 => Some(F64_RANGE.to_owned()),
-        // unreachable: the callers, all in `number_misfit`, pass only Int, F32 and F64
         _ => None,
     }
 }
@@ -1284,7 +1282,7 @@ mod tests {
     use super::{Builtin, int, reads_back_as};
 
     #[test]
-    fn int_makes_an_inclusive_range() {
+    fn int_builds_an_int_type_with_its_min_and_max() {
         // `int` builds the BUILTINS table, which is evaluated at compile time, so only a call here runs it.
         assert!(matches!(int(-128, 127), Builtin::Int { min: -128, max: 127 }));
     }
