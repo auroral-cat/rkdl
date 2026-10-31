@@ -542,6 +542,57 @@ def test_view_follows_node_and_block():
         len(e_view)
 
 
+# Every read or edit through a view of a removed block raises, even where a list would answer (`in`) or do nothing
+# (`clear()`, `reverse()`), as `len` does. (User's decision, 2026-10-30.)
+REMOVED_BLOCK_USES = {
+    "list": lambda v, stray: list(v),
+    "reversed": lambda v, stray: list(reversed(v)),
+    "getitem": lambda v, stray: v[0],
+    "in": lambda v, stray: stray in v,
+    "eq": lambda v, stray: v == [],
+    "index": lambda v, stray: v.index(stray),
+    "count": lambda v, stray: v.count(stray),
+    "append": lambda v, stray: v.append(stray),
+    "insert": lambda v, stray: v.insert(0, stray),
+    "extend": lambda v, stray: v.extend([stray]),
+    "setitem": lambda v, stray: v.__setitem__(0, stray),
+    "set slice": lambda v, stray: v.__setitem__(slice(None), [stray]),
+    "pop": lambda v, stray: v.pop(),
+    "delitem": lambda v, stray: v.__delitem__(0),
+    "remove": lambda v, stray: v.remove(stray),
+    "clear": lambda v, stray: v.clear(),
+    "reverse": lambda v, stray: v.reverse(),
+}
+
+
+@pytest.mark.parametrize("use", REMOVED_BLOCK_USES.values(), ids=REMOVED_BLOCK_USES.keys())
+def test_a_view_of_a_removed_block_refuses_reads_and_edits(use):
+    d = doc()
+    b = d["b"]
+    view = b.children
+    b.children = None
+    stray = rkdl.Node("stray")
+    with pytest.raises(ValueError, match="no children block"):
+        use(view, stray)
+    # Nothing went in, and the block is still gone: an edit doesn't open one.
+    assert stray.parent is None
+    assert b.children is None
+    assert str(d) == "// header\na 1\nb\ne {}\n"
+
+
+def test_a_view_works_again_once_its_node_has_a_new_block():
+    # The view belongs to the node, not to one block.
+    d = doc()
+    b = d["b"]
+    view = b.children
+    b.children = None
+    b.children = [rkdl.Node("x")]
+    assert [n.name for n in view] == ["x"]
+    view.append(rkdl.Node("y"))
+    assert view == b.children
+    assert str(d) == "// header\na 1\nb {\n    x\n    y\n}\ne {}\n"
+
+
 # children = None / []
 
 
@@ -600,6 +651,26 @@ def test_children_assignment_errors():
     assert str(d) == before
 
 
+def test_children_take_int_indexes_and_nodes():
+    d = doc()
+    before = str(d)
+    # By name is doc["a"], not doc.children["a"].
+    with pytest.raises(TypeError):
+        d.children["a"]
+    with pytest.raises(TypeError):
+        d.children["a"] = rkdl.Node("x")
+    with pytest.raises(TypeError):
+        del d.children["a"]
+    with pytest.raises(TypeError):
+        d.children[0] = "x"
+    # A string is an iterable, of strings.
+    with pytest.raises(TypeError, match="slice assignment to children takes an iterable of Nodes"):
+        d.children[0:1] = "x"
+    with pytest.raises(TypeError, match="children.extend takes an iterable of Nodes"):
+        d.children.extend("x")
+    assert str(d) == before
+
+
 def test_children_iadd():
     d = rkdl.parse("a { b; }\n")
     node = d["a"]
@@ -642,6 +713,13 @@ def test_lookups():
         d[("x", "a")]
     with pytest.raises(TypeError):
         d[0]
+    with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
+        d[["t", "a"]]
+    # get and iter take the same keys: a list isn't one.
+    with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
+        d.get(["t", "a"])
+    with pytest.raises(TypeError, match=r"a node key is a name or a \(type, name\) tuple"):
+        d.iter(["t", "a"])
 
 
 def test_node_lookups():

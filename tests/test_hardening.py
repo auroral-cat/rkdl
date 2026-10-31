@@ -233,3 +233,16 @@ def test_inserting_a_detached_node_into_its_own_child():
         detached["b"].children.append(detached)
     with pytest.raises(ValueError, match="inside itself"):
         detached.children.append(detached)
+
+
+def test_inserting_a_detached_node_together_with_its_child():
+    section = rkdl.Node("section", children=[rkdl.Node("key", 1)])
+    doc = rkdl.parse("x\n")
+    # The child is in the section's document, so it can't go in beside it, in either order. Neither goes in.
+    with pytest.raises(ValueError, match="already in a document"):
+        doc.children.extend([section, section["key"]])
+    with pytest.raises(ValueError, match="already in a document"):
+        doc.children.extend([section["key"], section])
+    assert str(doc) == "x\n"
+    assert section.parent is None
+    assert section["key"].parent is section

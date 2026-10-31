@@ -390,6 +390,19 @@ def test_sorting_keeps_each_place_s_whitespace_and_each_node_s_comments():
     reads_back(str(d))
 
 
+def test_sorting_where_a_comment_would_lose_its_line_end():
+    # b would take a's place, `a;`, which c follows on the same line. A `//` comment runs to the end of its line, so
+    # there it would comment out c: b has to go in another way.
+    d = rkdl.parse("b // about b\na; c\n")
+    b = d["b"]
+    d.children[:] = sorted(d.children, key=lambda n: n.name)
+    assert [n.name for n in d.children] == ["a", "b", "c"]
+    assert d.children[1] is b
+    assert "b // about b\n" in str(d)
+    assert [n.name for n in rkdl.parse(str(d)).children] == ["a", "b", "c"]
+    reads_back(str(d))
+
+
 def test_sorting_nested_blocks():
     d = rkdl.parse("pkg {\n    z {\n        x\n    }\n    b {}\n}\n")
     pkg = d["pkg"]

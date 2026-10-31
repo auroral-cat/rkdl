@@ -217,3 +217,98 @@ def test_detached_nodes_inserted_into_each_other():
         outer, inner = (b, a) if won[0] else (a, b)
         assert list(outer.children) == [inner]
         assert list(inner.children) == []
+
+
+def test_one_detached_node_inserted_by_two_threads():
+    # Both threads find the node detached. The first insert takes it, and the other finds it attached once it has the
+    # locks.
+    for _ in range(ROUNDS):
+        node = rkdl.Node("shared")
+        first, second = rkdl.parse("a\n"), rkdl.parse("b\n")
+
+        def put(into, node=node):
+            def go():
+                try:
+                    into.children.append(node)
+                except ValueError as e:
+                    assert "already in a document" in str(e)
+                    return False
+                return True
+
+            return go
+
+        won = run(put(first), put(second))
+        assert sorted(won) == [False, True]
+        winner, loser = (first, second) if won[0] else (second, first)
+        assert winner["shared"] is node
+        assert [n.name for n in loser.children] == ["b" if loser is second else "a"]
+        assert str(winner) == ("a" if winner is first else "b") + "\nshared\n"
+
+
+def test_two_threads_detaching_one_node():
+    for _ in range(ROUNDS):
+        doc = rkdl.parse("a\nb {\n    c\n}\nd\n")
+        b = doc["b"]
+        c = b["c"]
+        # Both calls return the node, whichever of them took it out.
+        returned = run(b.detach, b.detach)
+        assert returned[0] is b and returned[1] is b
+        assert str(doc) == "a\nd\n"
+        assert b.parent is None
+        assert str(b) == "b {\n    c\n}"
+        assert c.parent is b
+
+
+def test_parent_while_the_node_moves_between_documents():
+    first = rkdl.parse("p {\n    mover\n}\n")
+    second = rkdl.parse("q {\n    other\n}\n")
+    p, q = first["p"], second["q"]
+    node = p["mover"]
+    done = threading.Event()
+
+    def read():
+        # Between the moves it's detached.
+        parent = node.parent
+        assert parent is None or parent is p or parent is q
+
+    counts = run(mover(node, p, q, done), *[until(done, read)] * 2)
+    assert all(counts), counts
+    assert node.parent is p
+    assert str(first) == "p {\n    mover\n}\n"
+    assert str(second) == "q {\n    other\n}\n"
+
+
+def test_removing_a_block_while_other_threads_use_it():
+    doc = rkdl.parse("p\n")
+    p = doc["p"]
+    p.children = []
+    view = p.children
+    done = threading.Event()
+
+    def refill():
+        try:
+            for _ in range(ROUNDS):
+                p.children = [rkdl.Node("x"), rkdl.Node("y")]
+                p.children = None
+            return ROUNDS
+        finally:
+            done.set()
+
+    def close():
+        p.children = None
+
+    def pop():
+        try:
+            taken = view.pop()
+        except ValueError as e:
+            assert "no children block" in str(e)
+        except IndexError:
+            pass  # the block was there, but emptied
+        else:
+            assert taken.parent is None
+            assert str(taken) in ("x", "y")
+
+    counts = run(refill, until(done, close), until(done, pop))
+    assert all(counts), counts
+    assert p.children is None
+    assert str(doc) == "p\n"
