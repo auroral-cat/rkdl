@@ -287,30 +287,34 @@ def test_two_threads_detaching_one_node():
         assert c.parent is b
 
 
-def test_detach_while_another_thread_moves_the_node_to_another_block():
+def test_detach_while_other_threads_move_the_node_to_other_blocks():
     # Each thread takes the node out and puts it into its own block, so a detach can find the node under a different
-    # parent from the one it saw a moment ago. It takes the node out of wherever it is now.
-    doc = rkdl.parse("p {\n    mover\n}\nq {\n    other\n}\n")
-    p, q = doc["p"], doc["q"]
-    node = p["mover"]
+    # parent from the one it saw a moment ago. It takes the node out of wherever it is now. The window is narrow, so
+    # this runs more rounds than the other tests (about a hundred hits in 3000 rounds of three threads).
+    doc = rkdl.parse("p {\n    mover\n}\nq {\n    x\n}\nr {\n    y\n}\n")
+    blocks = [doc["p"], doc["q"], doc["r"]]
+    node = doc["p"]["mover"]
+    rounds = 10 * ROUNDS
 
     def move_into(block):
         def move():
-            for _ in range(ROUNDS):
+            for _ in range(rounds):
                 assert node.detach() is node
                 try:
                     block.children.append(node)
                 except ValueError as e:
-                    assert "already in a document" in str(e)  # the other thread put it back first
-            return ROUNDS
+                    assert "already in a document" in str(e)  # another thread put it back first
+            return rounds
 
         return move
 
-    assert run(move_into(p), move_into(q)) == [ROUNDS, ROUNDS]
+    assert run(*map(move_into, blocks)) == [rounds] * 3
     # The node is in one block at most, the one that is its parent, and the text says the same.
-    holders = [b for b in (p, q) if any(n is node for n in b.children)]
+    holders = [b for b in blocks if any(n is node for n in b.children)]
     assert holders == ([] if node.parent is None else [node.parent])
-    expected = {"p": ["mover"] if node.parent is p else [], "q": ["other", "mover"] if node.parent is q else ["other"]}
+    expected = {"p": [], "q": ["x"], "r": ["y"]}
+    if node.parent is not None:
+        expected[node.parent.name].append("mover")
     assert {n.name: [c.name for c in n.children] for n in rkdl.parse(str(doc))} == expected
 
 
@@ -367,3 +371,4 @@ def test_removing_a_block_while_other_threads_use_it():
     assert all(counts), counts
     assert p.children is None
     assert str(doc) == "p\n"
+
