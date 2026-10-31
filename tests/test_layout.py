@@ -414,6 +414,9 @@ def test_reversing_twice_gives_back_the_text(name, crlf, where):
         ('x """\n  hi\n  """\n', 'x """\n  hi\n  """'),
         # A slashdashed block after the entries, from a block at the depth it lands at.
         ("p {\n    x 1 /-{\n        y\n    }\n}\n", "x 1 /-{\n        y\n    }"),
+        # A multi-line string is a name like any other, and a type annotation.
+        ('"""\n  hi\n  """ 1\n', '"""\n  hi\n  """ 1'),
+        ('("""\n  t\n  """)x 1\n', '("""\n  t\n  """)x 1'),
     ],
 )
 def test_a_node_written_over_lines_spreads_a_one_line_block(source, moved):
@@ -492,6 +495,17 @@ def test_sorting_where_a_comment_would_lose_its_line_end():
     assert d.children[1] is b
     assert "b // about b\n" in str(d)
     assert [n.name for n in rkdl.parse(str(d)).children] == ["a", "b", "c"]
+    reads_back(str(d))
+
+
+def test_reordering_where_comment_lines_would_land_after_a_semicolon():
+    # c would take b's place, after `a;` on its line, where the comment line above c would end up between a and c on
+    # that line. So c goes in another way: a ends its line, and c goes below it with its comment.
+    d = rkdl.parse("a; b\n// about c\nc\n")
+    a, b, c = d.children
+    d.children = [a, c, b]
+    assert str(d) == "a;\n// about c\nc\nb\n"
+    assert d.children[1] is c
     reads_back(str(d))
 
 
@@ -768,6 +782,11 @@ def test_a_comment_with_a_blank_line_inside_is_one_piece(text, edit, expected):
         '/-old {\n    k #"}"#\n\n}\na\nb\n',
         "/-old {\n    // }\n\n}\na\nb\n",
         "p {\n    /-old {\n\n    }\n    a\n    b\n}\n",
+        # A comment in it doesn't end it, even with a line ending.
+        "/-old 1 /* was\n\n 2 */\na\nb\n",
+        # Nor does a `;` in its block, or a `\` continuation's line ending.
+        "/-old {\n    k 1; v 2\n\n    w 3\n}\na\nb\n",
+        "/-old 1 \\\n    2 {\n\n    }\na\nb\n",
     ],
 )
 def test_a_slashdashed_node_with_a_blank_line_inside_is_one_piece(text):
@@ -837,6 +856,17 @@ def test_a_node_ending_in_a_semicolon_moves_with_the_comment_on_its_line(target,
     reads_back(str(other))
 
 
+def test_a_node_ending_in_a_semicolon_moves_with_the_comment_on_its_line_into_a_new_document():
+    # A document made from scratch has no text of its own yet, so the comment goes at its end.
+    d = rkdl.Document()
+    d.children.append(rkdl.parse("p {\n    b\n    c; // x\n}\n")["p"].children.pop())
+    assert str(d) == "c; // x\n"
+    fresh = rkdl.parse(str(d))
+    fresh.fmt()
+    d.fmt()
+    assert str(d) == str(fresh)
+
+
 def test_removing_the_node_after_a_comment_at_the_end_of_a_line_keeps_it():
     d = rkdl.parse("a; // x\nb\n")
     d.children.pop(1)
@@ -879,6 +909,12 @@ def test_a_new_node_goes_below_the_comment_on_the_line_before(text, index, expec
         ("a; // x\r\nb\r\n", "b;\r\na // x\r\n"),
         # The comments that end a node's line go with it the other way too.
         ("a /* y */\nb; // x\n", "b // x\na; /* y */\n"),
+        # But not a comment that runs over lines: it's part of the node's text, so it stays before the `;`.
+        ("a 1 /* two\n lines */\nb 2; // c\n", "b 2 // c\na 1 /* two\n lines */;\n"),
+        # Nor what looks like a comment in a string.
+        ('include /-"src/*.rs"\nb; // c\n', 'b // c\ninclude /-"src/*.rs";\n'),
+        # A node that stays where it is keeps the comments after its `;` too.
+        ("a\nb; // x\nc\n", "c\nb; // x\na\n"),
     ],
 )
 def test_reversing_moves_the_comments_after_a_semicolon_with_their_node(text, expected):
@@ -960,6 +996,17 @@ def test_the_comment_after_a_semicolon_at_the_end_of_a_file(text, edit, expected
     edit(d)
     assert str(d) == expected
     reads_back(expected)
+
+
+def test_a_comment_that_ended_the_file_stays_with_its_node():
+    # c's `//` comment ends the file, and its line. A node after it gets a line ending first, and then the comment
+    # moves with c like any comment that ends a node's line.
+    d = rkdl.parse("b\nc // t")
+    d.children.append(N("x"))
+    assert str(d) == "b\nc // t\nx\n"
+    d.children.reverse()
+    assert str(d) == "x\nc // t\nb\n"
+    reads_back(str(d))
 
 
 @pytest.mark.parametrize(
@@ -1076,3 +1123,42 @@ def test_a_node_after_an_open_continuation(text, edit, expected):
     edit(d)
     assert str(d) == expected
     reads_back(expected)
+
+
+# Known bugs, as strict xfails. Each run takes the layout path the bug is in, so a fix shows as an XPASS.
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="the next node takes the indent of a comment's last line")
+@pytest.mark.parametrize(
+    ("text", "index", "expected"),
+    [
+        # b's comment, which runs over lines, goes with b. c goes on in b's place, or else starts a line at its
+        # block's indent: not at the indent of the comment's last line, which went with b.
+        ("a; /* first,\n   then */ b; c\n", 1, {"a; c\n", "a;\nc\n"}),
+        ("p {\n    a; /* first,\n          then */ b; c\n}\n", 1, {"p {\n    a; c\n}\n", "p {\n    a;\n    c\n}\n"}),
+        ("p { /* first,\n      then */ b; c }\n", 0, {"p { c }\n", "p {\n    c\n}\n"}),
+    ],
+)
+def test_the_node_after_a_comment_over_lines_takes_its_place(text, index, expected):
+    d = rkdl.parse(text)
+    _block(d).pop(index)
+    assert str(d) in expected
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="a comment before `}` keeps the space before it as indent")
+@pytest.mark.parametrize(
+    ("edit", "expected"),
+    [
+        # The comment is on b's line, after its `;`: b's, as at the end of a file, or else the block's, on a line of
+        # its own at the nodes' indent as when a one-line block spreads. Either way `}` lines up with p.
+        (lambda d: d["p"].children.pop(1), {"p {\n    a\n}\n", "p {\n    a\n    /* c */\n}\n"}),
+        (
+            lambda d: d["p"].children.append(N("x")),
+            {"p {\n    a\n    b; /* c */\n    x\n}\n", "p {\n    a\n    b;\n    x\n    /* c */\n}\n"},
+        ),
+    ],
+)
+def test_a_comment_before_the_closing_brace_after_a_semicolon(edit, expected):
+    d = rkdl.parse("p {\n    a\n    b; /* c */ }\n")
+    edit(d)
+    assert str(d) in expected

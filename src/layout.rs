@@ -2019,6 +2019,10 @@ mod tests {
         assert_eq!(gap_len("/-x {\n\n}\n/-\n\ny\n/-z \"\"\"\n\n  \"\"\"\n", true), 0);
         assert_eq!(gap_len("/-x #\"\"\"\n\n  }\n  \"\"\"#; /-y \"\\\"}\"\n\n", true), 33);
         assert_eq!(gap_len("/-x /-\n\n  1\n\n// own\n", true), 13);
+        // A slashdashed node also ends at the `}` of the block it's last in, or at the end of the text, as a node
+        // can in KDL. In a node's leading text, neither follows one, but the scanner reads any valid text.
+        assert_eq!(multi_line_pieces("/-x 1 }"), vec![0..6]);
+        assert_eq!(multi_line_pieces("/-x {\n\n}"), vec![0..8]);
     }
 
     const HEADED: &str = "// header\n\n// about a\na\n\nb\n";
