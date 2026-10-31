@@ -679,46 +679,78 @@ def test_slashdashed_nodes_count_as_comments():
     assert str(other) == "/- older 2\na\n"
 
 
-# Known bugs, as strict xfails: each passes once its task fixes it.
+# A comment is one piece, blank lines inside it included. The whole of it is in the gap or the node's own.
+
+
+def _parent(d):
+    """What holds the block the case is about: p, in the nested cases."""
+    return d["p"] if d.children[0].name == "p" else d
+
+
+def _block(d):
+    return _parent(d).children
 
 
 def _removed_a(d):
-    d.children.remove(d["a"])
+    _block(d).remove(_parent(d)["a"])
     return str(d)
 
 
 def _reversed(d):
-    d.children.reverse()
+    _block(d).reverse()
     return str(d)
 
 
 def _x_inserted_first(d):
-    d.children.insert(0, N("x"))
+    _block(d).insert(0, N("x"))
     return str(d)
 
 
 def _a_copied(d):
-    empty = rkdl.parse("")
-    empty.children.append(d["a"].copy())
-    return str(empty)
+    # Into a block at the same depth, so the comment's own lines keep their indent either way.
+    nested = d.children[0].name == "p"
+    other = rkdl.parse("q {\n    z\n}\n" if nested else "z\n")
+    (other["q"].children if nested else other.children).append(_parent(d)["a"].copy())
+    return str(other)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="task 62: a blank line inside a comment above a node counts as the end of the node's gap",
-)
+OWN = "/* n\n\n m */\na\nb\n"
+OWN_NESTED = "p {\n    /* n\n\n     m */\n    a\n    b\n}\n"
+HEADED_OWN = "// h\n\n/* n\n\n m */\na\nb\n"
+HEADED_OWN_NESTED = "p {\n    // h\n\n    /* n\n\n     m */\n    a\n    b\n}\n"
+
+
 @pytest.mark.parametrize(
     ("text", "edit", "expected"),
     [
         # No blank line between pieces: the whole comment is a's own. It goes with a, it stays above a when a node
         # goes in front of a, and it comes with a's copy.
-        ("/* note\n\n more */\na\nb\n", _removed_a, "b\n"),
-        ("/-old {\n\n}\na\nb\n", _removed_a, "b\n"),
-        ("/* note\n\n more */\na\nb\n", _x_inserted_first, "x\n/* note\n\n more */\na\nb\n"),
-        ("/* note\n\n more */\na\nb\n", _a_copied, "/* note\n\n more */\na\n"),
+        (OWN, _removed_a, "b\n"),
+        (OWN, _x_inserted_first, "x\n/* n\n\n m */\na\nb\n"),
+        (OWN, _a_copied, "z\n/* n\n\n m */\na\n"),
+        (OWN, _reversed, "b\n/* n\n\n m */\na\n"),
+        (OWN_NESTED, _removed_a, "p {\n    b\n}\n"),
+        (OWN_NESTED, _x_inserted_first, "p {\n    x\n    /* n\n\n     m */\n    a\n    b\n}\n"),
+        (OWN_NESTED, _a_copied, "q {\n    z\n    /* n\n\n     m */\n    a\n}\n"),
+        (OWN_NESTED, _reversed, "p {\n    b\n    /* n\n\n     m */\n    a\n}\n"),
+        # A blank line between pieces as well: what's above it is the gap and stays.
+        (HEADED_OWN, _removed_a, "// h\n\nb\n"),
+        (HEADED_OWN, _x_inserted_first, "// h\n\nx\n/* n\n\n m */\na\nb\n"),
+        (HEADED_OWN, _a_copied, "z\n/* n\n\n m */\na\n"),
+        (HEADED_OWN, _reversed, "// h\n\nb\n/* n\n\n m */\na\n"),
+        (HEADED_OWN_NESTED, _removed_a, "p {\n    // h\n\n    b\n}\n"),
+        (HEADED_OWN_NESTED, _x_inserted_first, "p {\n    // h\n\n    x\n    /* n\n\n     m */\n    a\n    b\n}\n"),
+        (HEADED_OWN_NESTED, _a_copied, "q {\n    z\n    /* n\n\n     m */\n    a\n}\n"),
+        (HEADED_OWN_NESTED, _reversed, "p {\n    // h\n\n    b\n    /* n\n\n     m */\n    a\n}\n"),
+        # Comments nest.
+        ("/* x /* y\n\n */ z */\na\nb\n", _removed_a, "b\n"),
         # Each place keeps its whitespace and line end, and u moves with its whole comment.
         ("h { i }\n/* x\n\n y */\nu /* c */ 2", _reversed, "/* x\n\n y */\nu /* c */ 2\nh { i }"),
+        (
+            "p {\n    h { i }\n    /* x\n\n     y */\n    u /* c */ 2\n}\n",
+            _reversed,
+            "p {\n    /* x\n\n     y */\n    u /* c */ 2\n    h { i }\n}\n",
+        ),
     ],
 )
 def test_a_comment_with_a_blank_line_inside_is_one_piece(text, edit, expected):
@@ -727,47 +759,114 @@ def test_a_comment_with_a_blank_line_inside_is_one_piece(text, edit, expected):
     reads_back(out)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="task 62: removing the second node on a line takes the blank line after it as the first one's line ending",
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/-old {\n\n}\na\nb\n",
+        "/-\n\nold\na\nb\n",
+        "/-old /-\n\n  1\na\nb\n",
+        '/-old """\n\n  """\na\nb\n',
+        '/-old #"""\n\n  """#\na\nb\n',
+        '/-old {\n    k "}"\n\n}\na\nb\n',
+        '/-old {\n    k #"}"#\n\n}\na\nb\n',
+        "/-old {\n    // }\n\n}\na\nb\n",
+        "p {\n    /-old {\n\n    }\n    a\n    b\n}\n",
+    ],
 )
+def test_a_slashdashed_node_with_a_blank_line_inside_is_one_piece(text):
+    out = _removed_a(rkdl.parse(text))
+    assert out == ("p {\n    b\n}\n" if text.startswith("p") else "b\n")
+    reads_back(out)
+
+
+# Every line break belongs to the thing before it, after a `;` too.
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("a; b\n\nc\n", "a;\n\nc\n"),
+        ("a; b;\n\nc\n", "a;\n\nc\n"),
         ("p {\n    a; b\n\n    c\n}\n", "p {\n    a;\n\n    c\n}\n"),
         ("a; b\n\n// about c\nc\n", "a;\n\n// about c\nc\n"),
     ],
 )
 def test_removing_the_second_of_a_line_keeps_the_blank_line_after_it(text, expected):
     d = rkdl.parse(text)
-    view = d["p"].children if text.startswith("p") else d.children
-    view.pop(1)
+    _block(d).pop(1)
     assert str(d) == expected
+    reads_back(expected)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="task 62: the line ending after a `;` is kept outside the node, and stays behind when the node goes",
-)
 @pytest.mark.parametrize(
     ("text", "index", "expected"),
     [
-        ("a {\n    b\n    c;\n}\n", -1, "a {\n    b\n}\n"),
+        ("p {\n    b\n    c;\n}\n", -1, "p {\n    b\n}\n"),
         ("a\nc;\n", -1, "a\n"),
         ("a;\nb;\n", 0, "b;\n"),
+        ("a;\nb;\nc;\n", 1, "a;\nc;\n"),
         ("p {\n    a;\n    b\n}\n", 0, "p {\n    b\n}\n"),
-        # The comment on c's line is c's own and goes with it.
-        ("a {\n    b\n    c; // x\n}\n", -1, "a {\n    b\n}\n"),
+        # The comments on c's line are c's own and go with it.
+        ("p {\n    b\n    c; // x\n}\n", -1, "p {\n    b\n}\n"),
+        ("b\nc; /* x */ // y\nd\n", 1, "b\nd\n"),
+        # One that runs onto the next line is d's.
+        ("b\nc; /* x\n*/ d\n", 1, "b\n/* x\n*/ d\n"),
     ],
 )
 def test_a_node_ending_in_a_semicolon_takes_its_line_ending(text, index, expected):
     d = rkdl.parse(text)
-    view = d.children[0].children if "{" in text else d.children
-    view.pop(index)
+    _block(d).pop(index)
     assert str(d) == expected
+    reads_back(expected)
+
+
+@pytest.mark.parametrize(
+    ("target", "move", "expected"),
+    [
+        ("z\n", lambda d, c: d.children.append(c), "z\nc; // x\n"),
+        ("z\n", lambda d, c: d.children.insert(0, c), "c; // x\nz\n"),
+        ("z\ny\n", lambda d, c: d.children.__setitem__(0, c), "c; // x\ny\n"),
+        ("q {\n    z\n}\n", lambda d, c: d["q"].children.append(c), "q {\n    z\n    c; // x\n}\n"),
+    ],
+)
+def test_a_node_ending_in_a_semicolon_moves_with_the_comment_on_its_line(target, move, expected):
+    d = rkdl.parse("p {\n    b\n    c; // x\n}\n")
+    other = rkdl.parse(target)
+    move(other, d["p"].children.pop())
+    assert str(other) == expected
+    # The comment is where kdl-rs puts it when it reads the text, so formatting keeps it.
+    other.fmt()
+    assert "// x" in str(other)
+    reads_back(str(other))
+
+
+def test_removing_the_node_after_a_comment_at_the_end_of_a_line_keeps_it():
+    d = rkdl.parse("a; // x\nb\n")
+    d.children.pop(1)
+    assert str(d) == "a; // x\n"
+    d = rkdl.parse("p {\n    a; // x\n    b\n    c\n}\n")
+    d["p"].children.pop(1)
+    assert str(d) == "p {\n    a; // x\n    c\n}\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "index", "expected"),
+    [
+        ("a; // x\nb\n", 1, "a; // x\nx\nb\n"),
+        ("a; /* x */\n", 1, "a; /* x */\nx\n"),
+        ("p {\n    a; // x\n    b\n}\n", 1, "p {\n    a; // x\n    x\n    b\n}\n"),
+        # The line after `{` works the same way.
+        ("p { // x\n    b\n}\n", 0, "p { // x\n    x\n    b\n}\n"),
+    ],
+)
+def test_a_new_node_goes_below_the_comment_on_the_line_before(text, index, expected):
+    d = rkdl.parse(text)
+    _block(d).insert(index, N("x"))
+    assert str(d) == expected
+    reads_back(expected)
+    d.fmt()
+    assert "// x" in str(d) or "/* x */" in str(d)
+    reads_back(str(d))
 
 
 def test_a_moved_node_s_multi_line_string_keeps_its_lines():

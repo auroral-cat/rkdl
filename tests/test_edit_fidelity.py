@@ -463,6 +463,24 @@ def test_meaning(file, path, edit):
     assert snapshot(rkdl.parse(new)) == expected
 
 
+def line_rest_end(text, i):
+    """Where the line ending ends, if only spaces and comments come before it from `i`; otherwise `i`."""
+    scanner = Scanner(text)
+    j = i
+    while True:
+        while j < len(text) and text[j] in SPACES:
+            j += 1
+        if not text.startswith("/*", j):
+            break
+        end = scanner.block_comment(j)
+        if any(nl in text[j:end] for nl in NEWLINES):
+            return i
+        j = end
+    if text.startswith("//", j):
+        return scanner.line_comment(j)
+    return j + scanner.newline(j) if scanner.newline(j) else i
+
+
 def common_prefix(a, b):
     n = min(len(a), len(b))
     i = 0
@@ -502,6 +520,9 @@ def test_untouched(file, path, edit):
         # A node that was next on the same line takes over the start of the line, so the spaces before it go.
         while hi < len(old) and old[hi] in SPACES:
             hi += 1
+        # After a `;`, the rest of the line is the node's if it's only comments.
+        if old[span.end - 1] == ";":
+            hi = line_rest_end(old, hi)
     elif edit in HEADER_EDITS:
         lo, hi = span.core, span.block[0] if span.block else span.end
     else:
