@@ -9,8 +9,6 @@ __pycache__/
 .mypy_cache/
 
 # llm yap
-/refs/
-plan.md
 /wiki/
 
 # agent worktrees
