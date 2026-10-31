@@ -781,36 +781,48 @@ mod tests {
 
     use super::*;
 
-    fn kdl_rs() -> PathBuf {
-        std::env::var_os("RKDL_KDL_RS").map_or_else(
-            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs/kdl-rs"),
+    /// The kdl-org/kdl checkout: the `tests/kdl-spec` submodule, or `RKDL_SPEC`, as for the Python tests.
+    fn spec() -> PathBuf {
+        std::env::var_os("RKDL_SPEC").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/kdl-spec"),
             PathBuf::from,
         )
     }
 
-    /// Every file kdl-rs parses must scan without a break, or the scan would treat valid documents as suspect.
+    /// Every spec case and example that kdl-rs parses must scan without a break, or the scan would treat valid
+    /// documents as suspect.
     #[test]
-    fn documents_kdl_rs_parses_never_break() {
-        let root = kdl_rs();
+    fn spec_documents_never_break() {
+        let root = spec();
         let dirs = [root.join("tests/test_cases/input"), root.join("examples")];
+        let files: Vec<PathBuf> = dirs
+            .iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flat_map(|dir| dir.flatten().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "kdl"))
+            .collect();
+        if files.is_empty() {
+            // A plain `cargo test` can't skip, so this says why it checked nothing. The Python tests skip loudly too.
+            eprintln!(
+                "SKIPPED: no KDL spec cases under {}: run `git submodule update --init`, or point RKDL_SPEC at a \
+                 kdl-org/kdl checkout",
+                root.display()
+            );
+            return;
+        }
         let mut checked = 0;
-        for dir in dirs.iter().filter_map(|d| std::fs::read_dir(d).ok()) {
-            for path in dir.flatten().map(|e| e.path()) {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                if path.extension().is_some_and(|e| e == "kdl") && text.parse::<kdl::KdlDocument>().is_ok() {
-                    let scan = scan(&text);
-                    assert_eq!(scan.broke_at, None, "{}", path.display());
-                    assert!(scan.refusal.is_none(), "{}", path.display());
-                    checked += 1;
-                }
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if text.parse::<kdl::KdlDocument>().is_ok() {
+                let scan = scan(&text);
+                assert_eq!(scan.broke_at, None, "{}", path.display());
+                assert!(scan.refusal.is_none(), "{}", path.display());
+                checked += 1;
             }
         }
-        // Without the kdl-rs checkout there's nothing to check; the Python tests say so loudly.
-        if root.is_dir() {
-            assert!(checked > 100);
-        }
+        assert!(checked > 100, "only {checked} spec documents parsed");
     }
 
     fn short(text: &str) -> String {
