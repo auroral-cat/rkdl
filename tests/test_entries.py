@@ -159,6 +159,42 @@ def test_props_pop_takes_one_default():
     assert str(d) == "n a=1\n"
 
 
+def test_views_take_int_indexes_and_iterables():
+    d, n = node("n 1 2 a=3\n")
+    # The messages are CPython's and PyO3's, so only the exception types are rkdl's to promise.
+    with pytest.raises(TypeError):
+        n.args["0"]
+    with pytest.raises(TypeError):
+        n.args["0"] = 5
+    with pytest.raises(TypeError):
+        del n.args["0"]
+    with pytest.raises(TypeError):
+        n.entries["0"]
+    with pytest.raises(TypeError):
+        n.args = 5
+    with pytest.raises(TypeError):
+        n.args[0:1] = 5
+    with pytest.raises(TypeError):
+        n.args.extend(5)
+    with pytest.raises(TypeError):
+        n.props = 5
+    with pytest.raises(TypeError):
+        n.props.update(5)
+    # As for a dict, a pair has two items.
+    with pytest.raises(ValueError):
+        n.props.update([("b",)])
+    with pytest.raises(TypeError, match="property keys must be str"):
+        n.props.setdefault(1, 2)
+    assert str(d) == "n 1 2 a=3\n"
+
+
+@pytest.mark.xfail(strict=True, reason="props take pairs only as tuples; a dict takes any two-item iterable")
+def test_props_update_takes_pairs_as_lists():
+    d, n = node("n a=1\n")
+    n.props.update([["b", 2]])
+    assert str(d) == "n a=1 b=2\n"
+
+
 def test_props_clear():
     d, n = node("n 1 a=1 2 b=2\n")
     n.props.clear()
